@@ -253,6 +253,145 @@ impl UreqClient {
 
         Ok((length, Box::new(response.into_body().into_reader())))
     }
+
+    /// Fetches the first `len` bytes of a stream ahead of time (D-077).
+    ///
+    /// `Ok(None)` when the server does not answer the range as a range — a
+    /// `200` with the whole body, a `206` without a total or from another
+    /// byte: the rest of a head has to be fetched from where it ends, and a
+    /// server that does not cut ranges cannot promise the rest belongs to the
+    /// same file. A refusal (`4xx`/`5xx`) is an error, as when opening.
+    ///
+    /// # Errors
+    /// If no connection can be made, the server refuses, or the body breaks
+    /// off before the head is complete.
+    pub fn fetch_head(
+        &self,
+        url: &str,
+        headers: &[HttpHeader],
+        len: u64,
+    ) -> Result<Option<super::StreamHead>> {
+        let Some(last) = len.checked_sub(1) else {
+            return Ok(None);
+        };
+        let shown = super::without_query(url);
+        let response = self.call_range(url, headers, &format!("bytes=0-{last}"))?;
+        if response.status().as_u16() != 206 {
+            return Ok(None);
+        }
+        let Some((0, end, Some(total))) = content_range(&response) else {
+            return Ok(None);
+        };
+        // A server may cut a shorter range than asked, or send the whole rest
+        // under a `206`: what it said it sent, up to what was asked.
+        let want = len.min(end.saturating_add(1)).min(total);
+        let mut bytes = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
+        response
+            .into_body()
+            .into_reader()
+            .take(want)
+            .read_to_end(&mut bytes)
+            .map_err(|err| super::network_err(shown, err.to_string().replace(url, shown)))?;
+        if bytes.len() as u64 != want {
+            return Err(super::network_err(
+                shown,
+                format!("the head broke off after {} of {want} bytes", bytes.len()),
+            ));
+        }
+        Ok(Some(super::StreamHead { bytes, total }))
+    }
+
+    /// Opens a stream from byte `offset` of a `total`-byte file (D-077): the
+    /// rest after a head.
+    ///
+    /// The server has to answer as a range — a `206` from exactly `offset` of
+    /// a file exactly `total` long. Anything else is an error, not a guess:
+    /// bytes from another offset, or of a file that changed, would be joined
+    /// to the head as if they followed it.
+    ///
+    /// # Errors
+    /// If no connection can be made, the server refuses, or it does not
+    /// continue the same file from `offset`.
+    pub fn open_stream_at(
+        &self,
+        url: &str,
+        headers: &[HttpHeader],
+        offset: u64,
+        total: u64,
+    ) -> Result<Box<dyn Read + Send>> {
+        let shown = super::without_query(url);
+        let response = self.call_range(url, headers, &format!("bytes={offset}-"))?;
+        let status = response.status().as_u16();
+        let range = content_range(&response);
+        if status != 206
+            || !matches!(range, Some((start, _, Some(whole))) if start == offset && whole == total)
+        {
+            let got = match range {
+                Some((start, end, whole)) => format!(
+                    "bytes {start}-{end} of {}",
+                    whole.map_or_else(|| "an unknown length".to_owned(), |n| n.to_string())
+                ),
+                None => "no range".to_owned(),
+            };
+            return Err(crate::Error::new(
+                crate::diag::Stage::NetworkRequest,
+                crate::ErrorKind::HttpStatus {
+                    url: shown.to_owned(),
+                    status,
+                    detail: format!(
+                        "asked for the rest of a {total}-byte file from byte {offset}, got {got}"
+                    ),
+                },
+            ));
+        }
+        Ok(Box::new(response.into_body().into_reader()))
+    }
+
+    /// A `GET` with `Range: <range>` in place of any `Range` the source
+    /// carried; a status outside 2xx is an error that says what the server
+    /// said.
+    fn call_range(
+        &self,
+        url: &str,
+        headers: &[HttpHeader],
+        range: &str,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        let mut builder = self.agent.get(url);
+        for header in super::with_range(headers, range) {
+            builder = builder.header(&header.name, &header.value);
+        }
+        let shown = super::without_query(url);
+        let mut response = builder
+            .call()
+            .map_err(|err| super::network_err(shown, err.to_string().replace(url, shown)))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let detail = response
+                .body_mut()
+                .with_config()
+                .limit(1024)
+                .read_to_string()
+                .unwrap_or_else(|err| format!("(could not read the body: {err})"));
+            return Err(crate::Error::new(
+                super::stage_for_status(status),
+                crate::ErrorKind::HttpStatus {
+                    url: shown.to_owned(),
+                    status,
+                    detail,
+                },
+            ));
+        }
+        Ok(response)
+    }
+}
+
+/// The response's `Content-Range`, read.
+fn content_range(response: &ureq::http::Response<ureq::Body>) -> Option<(u64, u64, Option<u64>)> {
+    response
+        .headers()
+        .get("content-range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(super::parse_content_range)
 }
 
 impl crate::plugin::artifact::ArtifactSource for UreqClient {
@@ -421,5 +560,118 @@ mod tests {
         );
         assert!(err.to_string().contains("timeout"), "{err}");
         assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    }
+
+    // — Heads and the rest after them (D-077) —————————————————————————————
+
+    use crate::net::HttpHeader;
+    use crate::test_support::{Answer, LocalServer};
+
+    fn body(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// The head is cut as a range, with the file's length; the rest comes
+    /// from where it ends, and the plugin's own `Range` gives way to both.
+    #[test]
+    fn a_head_and_the_rest_after_it_make_the_whole_file() {
+        let file = body(10_000);
+        let served = file.clone();
+        let server = LocalServer::start(move |req| Answer::file(&served, req.range.as_deref()));
+        let url = server.url("/videoplayback?sig=secret");
+        let headers = [HttpHeader::new("Range", "bytes=0-")];
+
+        let head = UreqClient::for_streams()
+            .fetch_head(&url, &headers, 4_096)
+            .unwrap()
+            .expect("a server that cuts ranges gives a head");
+        assert_eq!(head.total, 10_000);
+        assert_eq!(head.bytes, file[..4_096]);
+
+        let mut rest = Vec::new();
+        UreqClient::for_streams()
+            .open_stream_at(&url, &headers, 4_096, 10_000)
+            .unwrap()
+            .read_to_end(&mut rest)
+            .unwrap();
+        assert_eq!(rest, file[4_096..]);
+
+        let ranges: Vec<_> = server.seen().into_iter().map(|req| req.range).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                Some("bytes=0-4095".to_owned()),
+                Some("bytes=4096-".to_owned())
+            ]
+        );
+    }
+
+    /// A file shorter than the head asked for is its own head.
+    #[test]
+    fn a_file_shorter_than_the_head_comes_whole() {
+        let file = body(1_000);
+        let served = file.clone();
+        let server = LocalServer::start(move |req| Answer::file(&served, req.range.as_deref()));
+        let head = UreqClient::for_streams()
+            .fetch_head(&server.url("/short"), &[], 4_096)
+            .unwrap()
+            .expect("a head");
+        assert_eq!(head.total, 1_000);
+        assert_eq!(head.bytes, file);
+    }
+
+    /// A server that ignores `Range` gives no head: its rest could not be
+    /// fetched from where the head ends.
+    #[test]
+    fn a_server_that_does_not_cut_ranges_gives_no_head() {
+        let file = body(10_000);
+        let server = LocalServer::start(move |_| Answer::whole(&file));
+        let head = UreqClient::for_streams()
+            .fetch_head(&server.url("/whole"), &[], 4_096)
+            .unwrap();
+        assert_eq!(head, None);
+    }
+
+    /// A refused head is an error with the status, not "no head": the
+    /// address itself may be dead.
+    #[test]
+    fn a_refused_head_is_an_error() {
+        let server = LocalServer::start(|_| Answer::status(403, "expired"));
+        let err = UreqClient::for_streams()
+            .fetch_head(&server.url("/old?sig=secret"), &[], 4_096)
+            .unwrap_err();
+        let text = err.chain_text();
+        assert!(text.contains("403") && text.contains("expired"), "{text}");
+        assert!(
+            !text.contains("secret"),
+            "the key must not reach the error: {text}"
+        );
+    }
+
+    /// The rest is refused when the server sends anything but the same file
+    /// from the same byte: those bytes would be joined to the head as if they
+    /// followed it.
+    #[test]
+    fn the_rest_must_be_the_same_file_from_the_same_byte() {
+        let file = body(10_000);
+        let whole = file.clone();
+        let ignores = LocalServer::start(move |_| Answer::whole(&whole));
+        let err = UreqClient::for_streams()
+            .open_stream_at(&ignores.url("/a"), &[], 4_096, 10_000)
+            .err()
+            .expect("a 200 is not the rest");
+        assert!(
+            err.chain_text().contains("from byte 4096"),
+            "{}",
+            err.chain_text()
+        );
+
+        let longer = body(12_000);
+        let changed = LocalServer::start(move |req| Answer::file(&longer, req.range.as_deref()));
+        let err = UreqClient::for_streams()
+            .open_stream_at(&changed.url("/b"), &[], 4_096, 10_000)
+            .err()
+            .expect("another length is another file");
+        assert!(err.chain_text().contains("12000"), "{}", err.chain_text());
     }
 }

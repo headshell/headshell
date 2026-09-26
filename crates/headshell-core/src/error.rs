@@ -227,6 +227,17 @@ pub enum ErrorKind {
         detail: String,
     },
 
+    /// A call made ahead of time was stopped so that one made on the user's
+    /// behalf could run (D-077).
+    ///
+    /// Not a failure: nothing is wrong with the plugin or the track. Separate
+    /// from [`ErrorKind::PluginThrew`] so that what read ahead can count it as
+    /// "gave way" and ask again later, instead of as "this track fails" (K9).
+    #[error(
+        "the {plugin} plugin's {method} call, made ahead of time, gave way to one the user asked for"
+    )]
+    PluginPreempted { plugin: String, method: String },
+
     /// The server returned HTTP 200 but the body holds an error (as Subsonic
     /// does).
     #[error("{server} refused the request: {message} (code {code}, endpoint: {endpoint})")]

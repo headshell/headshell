@@ -101,6 +101,213 @@ impl std::ops::Deref for TestConfig {
     }
 }
 
+/// A request the local server saw: its path and its `Range`, if any.
+#[cfg(feature = "http-client")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SeenRequest {
+    pub(crate) path: String,
+    pub(crate) range: Option<String>,
+}
+
+/// What the local server answers one request with.
+#[cfg(feature = "http-client")]
+pub(crate) struct Answer {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    /// Sends this many bytes of the body, then waits before the rest: a
+    /// stream whose end comes late.
+    pause: Option<(usize, std::time::Duration)>,
+}
+
+#[cfg(feature = "http-client")]
+impl Answer {
+    /// `body` served as a file server serves it: a `Range` gets a `206` with
+    /// its `Content-Range`, a request without one a `200`.
+    pub(crate) fn file(body: &[u8], range: Option<&str>) -> Self {
+        let total = body.len();
+        let asked = range
+            .and_then(|value| value.trim().strip_prefix("bytes="))
+            .and_then(|spec| spec.split_once('-'))
+            .and_then(|(start, end)| {
+                let start = start.parse::<usize>().ok()?;
+                let end = if end.is_empty() {
+                    total.checked_sub(1)?
+                } else {
+                    end.parse::<usize>().ok()?.min(total.checked_sub(1)?)
+                };
+                (start <= end).then_some((start, end))
+            });
+        match asked {
+            Some((start, end)) => Self {
+                status: 206,
+                headers: vec![(
+                    "Content-Range".to_owned(),
+                    format!("bytes {start}-{end}/{total}"),
+                )],
+                body: body[start..=end].to_vec(),
+                pause: None,
+            },
+            None => Self::whole(body),
+        }
+    }
+
+    /// The whole body with a `200`, whatever was asked: a server that does
+    /// not cut ranges.
+    pub(crate) fn whole(body: &[u8]) -> Self {
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            body: body.to_vec(),
+            pause: None,
+        }
+    }
+
+    pub(crate) fn status(status: u16, text: &str) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: text.as_bytes().to_vec(),
+            pause: None,
+        }
+    }
+
+    /// Used by the audio stream's tests.
+    #[cfg(feature = "audio")]
+    pub(crate) fn pausing_after(mut self, bytes: usize, pause: std::time::Duration) -> Self {
+        self.pause = Some((bytes, pause));
+        self
+    }
+}
+
+/// A local HTTP/1.1 server on a real socket (D-077): every connection on a
+/// thread of its own, so one that pauses does not hold the others.
+#[cfg(feature = "http-client")]
+pub(crate) struct LocalServer {
+    addr: std::net::SocketAddr,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<SeenRequest>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "http-client")]
+impl LocalServer {
+    pub(crate) fn start(handler: impl Fn(&SeenRequest) -> Answer + Send + Sync + 'static) -> Self {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("the listener must bind");
+        let addr = listener.local_addr().expect("the address must be readable");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mode must be set");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(handler);
+
+        let thread = {
+            let seen = Arc::clone(&seen);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    let seen = Arc::clone(&seen);
+                    let handler = Arc::clone(&handler);
+                    std::thread::spawn(move || {
+                        let _ = stream.set_nonblocking(false);
+                        let Ok(peer) = stream.try_clone() else { return };
+                        let mut reader = BufReader::new(peer);
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                        let mut range = None;
+                        loop {
+                            let mut header = String::new();
+                            if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                                break;
+                            }
+                            let header = header.trim_end();
+                            if header.is_empty() {
+                                break;
+                            }
+                            if let Some((name, value)) = header.split_once(':')
+                                && name.trim().eq_ignore_ascii_case("range")
+                            {
+                                range = Some(value.trim().to_owned());
+                            }
+                        }
+                        let request = SeenRequest { path, range };
+                        if let Ok(mut log) = seen.lock() {
+                            log.push(request.clone());
+                        }
+                        let answer = handler(&request);
+                        let mut head = format!(
+                            "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n",
+                            answer.status,
+                            answer.body.len()
+                        );
+                        for (name, value) in &answer.headers {
+                            head.push_str(&format!("{name}: {value}\r\n"));
+                        }
+                        head.push_str("\r\n");
+                        let mut out = stream;
+                        if out.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        match answer.pause {
+                            Some((first, pause)) => {
+                                let first = first.min(answer.body.len());
+                                let _ = out.write_all(&answer.body[..first]);
+                                let _ = out.flush();
+                                std::thread::sleep(pause);
+                                let _ = out.write_all(&answer.body[first..]);
+                            }
+                            None => {
+                                let _ = out.write_all(&answer.body);
+                            }
+                        }
+                        let _ = out.flush();
+                    });
+                }
+            })
+        };
+        Self {
+            addr,
+            seen,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub(crate) fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
+    pub(crate) fn seen(&self) -> Vec<SeenRequest> {
+        self.seen.lock().map(|log| log.clone()).unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "http-client")]
+impl Drop for LocalServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

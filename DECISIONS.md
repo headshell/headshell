@@ -740,6 +740,12 @@ change — the data given to it was fixed. Locked with a test
 broken or missing file should say `PLAYBACK_DECODE` in an environment without an
 audio output (CI) too; a "no device" error would hide the real cause.
 
+> **D-077 changed where the next track comes from.** `tick` no longer resolves it
+> itself — that held the core's thread for as long as the provider took (4.7 s for
+> yt-dlp, measured) — but hands it to the engine once the read-ahead thread has it
+> ready. A transition the user asks for still sets the engine up again, as above; it
+> starts from the address, and the stream's head, read ahead.
+
 ---
 
 ## D-025 — Directory watching: a dependency-free staleness probe
@@ -4892,3 +4898,178 @@ and the note saying why, the plain label back on the coverless track. With
 `HEADSHELL_ONLINE=1`: the real recording's album cover from the Cover Art Archive, the
 made-up band "not found", the environment block saying so. The live plugin tests passed
 against a local mirror of the catalog carrying the api 3 plugins.
+
+## D-077 — Reading the queue ahead: three tracks made ready in memory, the user's calls first
+
+**Date:** 2026-09-26 · **Status:** APPLIED (2026-09-26)
+
+**Question:** The user, after screenshots in which Enter took 10–16 s to sound with
+YouTube Music: *"Write us a nice, solid cache engine. Especially when there are several
+songs, as with Shift+Enter, give each of the other songs a probability of being played,
+based on statistics, then download a little of the likeliest one and continue from
+there. These waits are unacceptable. The likeliest should always be the next song, but
+let's try to predict the one after it too. What do you think?"* The waits were measured
+before anything was written, and four questions were asked (§0.2); the answers are the
+decisions below.
+
+**Measured first** (the host and a Debian 13 container; YouTube Music, "Let It Happen",
+a 7.57 MB m4a):
+
+| step | time |
+|---|---|
+| the InnerTube search | 1.3 s |
+| yt-dlp resolving the address | 3.5–5.2 s (1.15 s of it yt-dlp starting; ~2.8 s of CPU) |
+| the stream's first byte / first 256 KB | 0.1–0.3 s / 0.26 s |
+| the whole file | 2.4–3.3 s |
+
+The 10–16 s of the screenshots was a debug build: there the first yt-dlp call of every
+engine start hashes the 40 MB binary with an unoptimised sha256 (~7 s; 0.15 s
+optimised) — the plugins section filling late came from the same hash. **The expensive
+part is the address, not the audio**: "download a little" is cheap and enough, and what
+has to happen ahead of time is the resolving.
+
+**Decision (the user's):**
+
+1. **Memory only.** Addresses and heads are kept in memory; no audio is written to
+   disk. A persistent cache would be downloading YouTube's audio and keeping it: the
+   appendix draws the legal line at DRM, but a kept copy widens the terms-of-service
+   risk, and it costs disk. Local files and Subsonic/Jellyfin are fast already; the
+   read-ahead is mostly for plugins.
+2. **Three tracks at most** — "three in total is enough": the next one and the one
+   after it, always; a third that statistics pick.
+3. **The user's calls first.** A plugin runs one call at a time; a call made on the
+   user's behalf goes before the calls made ahead of time, and a tool one of those is
+   running (yt-dlp) is stopped for it. The alternative, a second engine per plugin for
+   the background, would have run in parallel, but `host.storage` is not written for
+   two engines: each keeps its own copy and writes it back whole, and the temporary
+   name is per process.
+4. **This order:** the quick wins first — reuse the address already resolved, take the
+   resolving off the core's thread, keep addresses, measure in a release build — then
+   the statistics.
+
+**Found on the way: every HTTP stream waited for its whole file.** symphonia 0.6 reads a
+seekable source's end before its start when it knows the length: trailing tags (ID3v1,
+APE), and for Ogg the last page. `HttpMediaSource` downloads front to back, so a read at
+the end waited for the last byte: opening the 7.5 MB m4a took 1.77 s, and a 40 MB FLAC
+from Subsonic would wait for its whole download. The source keeps its length for
+`seek(End)` — an MP4 whose `moov` sits at the end needs that — but no longer reports it
+through `byte_len`. Lost is what symphonia derives from the end: an Ogg stream's length
+and the estimate for an MP3 without a Xing header; the provider's metadata gives both.
+A test with a server that holds a file's end back for three seconds fails with the old
+behaviour (it waited 3.006 s).
+
+**Found on the way: D-024's read-ahead held the core's thread.** `tick` resolved the next
+track itself, synchronously: a round took 4.7 s, and in the desktop pause and next waited
+behind it. A "next" the user pressed also threw the resolved address away and ran yt-dlp
+again.
+
+**The design.**
+
+- **`playback::prefetch`**: one read-ahead thread per playing session
+  (`headshell-prefetch`). The player hands it the plan whenever the queue or its
+  position changes, and never waits for it. The plan: the next track, the one after
+  it, and the third (`Likely`); under repeat one the playing track comes first
+  (`Again`), for the gapless repeat.
+- **What is kept:** a track's address, how long resolving it took, and the first
+  512 KB of its stream. An address is trusted for 8 minutes: YouTube signs for six
+  hours, SoundCloud for eleven minutes (both measured), and the core does not know which
+  provider signs for how long. A head is kept only while its track is planned.
+- **Starts:** a start takes the track if it is ready and begins from its head; if the
+  thread is resolving it at that moment, the start waits for it rather than resolving
+  it a second time; otherwise the start resolves it, as before, and the address is kept
+  for "previous" and a replay. A kept address that no longer opens is resolved once
+  more. The next track goes to the engine for the gapless transition (D-024) once it is
+  ready.
+- **Heads:** a range request for the first bytes, kept only when the server cut it as
+  a range and stated the file's length (`206` + `Content-Range`): the rest is fetched
+  later from where the head ends, and two bodies not cut from the same file cannot be
+  joined. The rest has to come as a `206` from exactly that byte of a file of exactly
+  that length; anything else is an error, not a guess. A plugin's own `Range` (YouTube's
+  `bytes=0-`, D-048) gives way to these.
+- **A stale address after a head:** the stream asks for a new one through its handle;
+  the player has the read-ahead thread resolve that track before anything else and
+  hands the new address over; the head plays meanwhile. Once: a second failure is an
+  error, not a silently shortened track.
+- **A skipped track's download stops** — it used to run to the file's end.
+- **Calls made ahead of time** (`provider::ahead_of_time`): a background worker marks
+  its thread, and nothing in `Provider` changes. The cover worker (D-076) is marked too:
+  the twenty lookups of a "queue all" no longer hold a call the user makes.
+- **The plugin gate:** a call for the user waits only for the call already running,
+  and asks that one, if made ahead of time, to give way; the engine's `host.tools.run`
+  stops the tool, and `host.http` refuses a new request. The call made ahead of time
+  ends as `ErrorKind::PluginPreempted` — "gave way", counted apart from "failed" (K9) —
+  and is asked again later. A cover that gave way stays pending and is looked up again
+  instead of showing a failure.
+
+**The third track** (`prefetch::likely`). A track beyond the next two is needed before
+the thread has moved on in two ways: the user skips the next two quickly — the queue's
+continuation is needed — or picks a track from the queue. The first is weighed with how
+often the user skips: in this session, and in the history of the next two tracks or
+their artists. The second with how much the user listened to each track, and a quarter of
+its artist's plays. Before anything is known a quarter of tracks count as skipped (worth
+four observed tracks) and a tenth of moves as picks (worth ten). Without history the
+third is the continuation; for someone skipping through a list of versions it stays the
+continuation; a track played forty times pulls it to itself. The report says why in one
+sentence ("you skipped 5 of the 5 tracks you left this session", "you played it 40
+times"): a guess nobody can check is worth less than one that explains itself.
+
+- **The history** comes from `SqliteLibrary::listening_profile`: counted plays and the
+  listens that stopped before the play rule, by the same predicate `stats` uses; the
+  artist is found by its part of the grouping key — a range the key's index answers,
+  so a name that merely begins the same is not counted. No schema change. Only imports
+  bring skips: the app's own playback writes counted plays only, so the session's habits
+  are the strong signal and the history the weak one.
+- **The habits** — skipped, finished, picked, went back — are counted by the player and
+  carried across the players of one session: a new search replaces the player, not the
+  listener.
+
+**The CLI and the IPC (D-033).** `headshell prefetch "<query>" [--all]`, with `--json`
+and a snapshot: the track `play` would start and the two after it, each one's address
+resolved and head fetched, timed, and a summary. The desktop mirrors it as `prefetch`;
+`prefetch_queue` is the playing queue's plan, counts and habits. A hand-run probe,
+`examples/latency_probe.rs`, drives a `LiveSession` the way the desktop's core thread
+does and prints what the user waits for.
+
+**Measured** (release build, the Debian 13 container, a PulseAudio null sink, YouTube
+Music, "let it happen" with every match queued):
+
+| | before | after |
+|---|---|---|
+| Enter → sound | 9.73 s | 6.95–8.14 s |
+| next → sound | 6.42 s | 0.01–0.02 s |
+| next again | 5.66 s | 0.01–0.03 s |
+| previous | 7.02 s | 0.16–0.59 s |
+| a far track in the queue | 6.95 s | 4.76–5.06 s |
+| three "next"s half a second apart | — | 0.01–0.03 s each |
+| the longest round of `tick` | 4.71 s | under 5 ms |
+
+**Not done, and why:**
+
+- **The first track after Enter** still waits for the search and its address: there is
+  nothing to read ahead. Left: yt-dlp's unpacked builds (`yt-dlp_linux.zip` and the
+  others) might cut its ~1.15 s start — not measured; the busy label says "searching for
+  the track" for the whole wait, although most of it is resolving.
+- **A lifetime the provider states:** the plugin knows it (YouTube's `expire`,
+  SoundCloud's policy); the core trusts 8 minutes for every address. Carrying it would
+  change the plugin contract and `AudioSource`.
+- **Resuming a stream that breaks mid-way:** the continuation that follows a head could
+  resume any stream, but that changes every stream's behaviour and was not asked.
+- **A fourth quick "next"** waits for the third track planned after the third one.
+
+**Testing:** the read-ahead thread against a provider answering from memory — the plan's
+order, a start waiting for the track in flight instead of resolving it twice, a failing
+track asked once, a resolution that gave way asked again, an address past its lifetime,
+a stale stream resolved first, heads kept and dropped with the plan; heads and the rest
+on a local server — the rest only from exactly that byte of exactly that file, no head
+from a server that ignores ranges, a stale address replaced, no new address an error and
+not a short track; the plugin gate, and a stopped tool on Unix and on Windows; the third
+track's guess; the listening profile; a real local queue played with next and previous,
+the plan's reasons and the habits checked; `headshell prefetch --json`'s snapshot. The
+two fixes were measured not to be empty: with `byte_len` reporting the length, the
+stream test waits 3.006 s and fails; without the tool being stopped, the user's call
+waits 4.3 s and the gate test fails.
+
+**Verification:** `examples/latency_probe.rs` in the container, before and after, twice
+each, and `--breakdown` for one start's parts; the live plugin tests. One run of the live
+SoundCloud tests failed at the plugin's client_id discovery and passed when run again:
+the service, not this change.

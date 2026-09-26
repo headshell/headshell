@@ -1507,6 +1507,108 @@ impl Session {
         })
     }
 
+    /// Makes the first tracks a play query finds ready, the way a playing
+    /// session reads its queue ahead (D-077): the address of each resolved
+    /// and the head of its stream fetched, one after another, each said how
+    /// it went. The track `play` would start, then the next two.
+    ///
+    /// # Errors
+    /// If nothing matches the query or no provider can stream. A track that
+    /// cannot be made ready is not an error of the command: it is in the
+    /// report, with the stage it failed at (K9).
+    pub async fn prefetch(
+        &mut self,
+        registry: &ProviderRegistry,
+        query: &str,
+        all: bool,
+    ) -> Result<crate::playback::PrefetchReport> {
+        use crate::playback::prefetch::{self, PlanItem};
+        use crate::playback::{PlanReason, PrefetchCounters, PrefetchReport, PrefetchSummary};
+
+        let mut rec = Recorder::start(
+            format!("prefetch {query:?}"),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = async {
+            let queue = self
+                .queue_from_search(registry, query, all, PlayOptions::new(String::new()).limit)
+                .await?;
+            let reasons = [PlanReason::First, PlanReason::Next, PlanReason::AfterNext];
+            let plan: Vec<PlanItem> = queue
+                .into_iter()
+                .zip(reasons)
+                .enumerate()
+                .map(|(index, (item, reason))| PlanItem {
+                    item,
+                    index,
+                    reason,
+                    why: None,
+                })
+                .collect();
+            Ok(prefetch::prepare_now(registry, &plan))
+        }
+        .await;
+
+        if let Ok(items) = &result {
+            let summary = PrefetchSummary::of(items);
+            let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+            rec.set("prefetch.planned", count(summary.planned));
+            rec.set("prefetch.ready", count(summary.ready));
+            rec.set("prefetch.with_head", count(summary.with_head));
+            rec.set("prefetch.failed", count(summary.failed));
+            for item in items {
+                if let crate::playback::PrefetchStatus::Failed { chain } = &item.status {
+                    rec.note(format!(
+                        "{} — {}: {}",
+                        item.artist,
+                        item.title,
+                        chain.replace('\n', " ")
+                    ));
+                }
+            }
+        }
+        let subject = query.to_owned();
+        self.finish(rec, result, move |items, diag| PrefetchReport {
+            subject,
+            summary: PrefetchSummary::of(&items),
+            items,
+            counters: PrefetchCounters::default(),
+            habits: crate::playback::Habits::default(),
+            diag: Some(diag),
+        })
+    }
+
+    /// How each queued track, and its artist, was listened to in the history
+    /// (D-077): what reading ahead guesses its third track with. A track
+    /// whose history cannot be read is left out — the guess goes on without
+    /// it, and the log says why.
+    pub(crate) fn listening_profiles(
+        &self,
+        items: &[crate::playback::QueueItem],
+        rule: PlayRule,
+    ) -> std::collections::HashMap<crate::ids::ProviderTrackId, crate::library::ListeningProfile>
+    {
+        let mut profiles = std::collections::HashMap::new();
+        for item in items {
+            match self
+                .library
+                .listening_profile(&item.track.artist, &item.track.title, rule)
+            {
+                Ok(profile) => {
+                    profiles.insert(item.id.clone(), profile);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        track = item.track.display_name(),
+                        error = %err.chain_text().replace('\n', " "),
+                        "reading ahead: the track's history could not be read"
+                    );
+                }
+            }
+        }
+        profiles
+    }
+
     /// Writes the listen records of played tracks to the library (§1.6).
     ///
     /// They go into the **same table** as imported data: past and present

@@ -36,6 +36,8 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -132,6 +134,9 @@ struct Job {
     function: &'static str,
     args: Vec<serde_json::Value>,
     timeout: Duration,
+    /// Set by the caller's side to stop a call made ahead of time (D-077):
+    /// the engine's gates look at it, and a running tool is stopped.
+    cancel: Option<Arc<AtomicBool>>,
     reply: mpsc::SyncSender<Outcome>,
 }
 
@@ -201,6 +206,7 @@ impl ScriptWorker {
         function: &'static str,
         args: Vec<serde_json::Value>,
         timeout: Duration,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<serde_json::Value> {
         let Some(jobs) = &self.jobs else {
             return Err(crashed(
@@ -213,6 +219,7 @@ impl ScriptWorker {
             function,
             args,
             timeout,
+            cancel,
             reply: reply_tx,
         })
         .map_err(|_| crashed(&self.plugin, "the thread no longer exists".to_owned()))?;
@@ -382,7 +389,9 @@ fn worker_main(
         while let Ok(job) = jobs.recv() {
             fired.set(false);
             deadline.set(Some(Instant::now() + job.timeout));
+            host.set_cancel(job.cancel);
             let outcome = invoke(&ctx, &module, job.function, job.args, &fired);
+            host.set_cancel(None);
             deadline.set(None);
             // If the caller stopped waiting, the answer has nowhere to go.
             let _ = job.reply.send(outcome);

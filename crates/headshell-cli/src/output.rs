@@ -5,6 +5,7 @@
 
 use headshell_core::artwork::{ArtworkReport, ArtworkSource, ArtworkStatus};
 use headshell_core::library::SearchHit;
+use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
 use headshell_core::plugin::catalog::UpdateOutcome;
 use headshell_core::session::{
     ImportReport, PlayReport, PluginCatalogReport, PluginConsentReport, PluginIndexReport,
@@ -991,6 +992,84 @@ pub fn play(report: &PlayReport) -> String {
 }
 
 /// Cuts text to the given width (by Unicode character count).
+/// What `headshell prefetch` made ready, and how long each track took
+/// (D-077).
+pub fn prefetch(report: &PrefetchReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "read ahead · {}", report.subject);
+    for item in &report.items {
+        let reason = match item.reason {
+            PlanReason::First => "first",
+            PlanReason::Next => "next",
+            PlanReason::AfterNext => "after next",
+            PlanReason::Again => "again",
+            PlanReason::Likely => "likely",
+        };
+        let (mark, detail) = match &item.status {
+            PrefetchStatus::Ready {
+                resolve_ms,
+                head_bytes,
+                total_bytes,
+                no_head,
+            } => {
+                let head = match (head_bytes, total_bytes, no_head) {
+                    (Some(head), Some(total), _) => {
+                        format!("head {} of {}", size(*head), size(*total))
+                    }
+                    (_, _, Some(why)) => format!("no head: {why}"),
+                    _ => "no head".to_owned(),
+                };
+                (
+                    "✓",
+                    format!("address {:.2} s · {head}", *resolve_ms as f64 / 1000.0),
+                )
+            }
+            PrefetchStatus::Failed { chain } => ("✗", chain.clone()),
+            PrefetchStatus::Waiting => ("·", "waiting".to_owned()),
+            PrefetchStatus::Resolving => ("…", "resolving".to_owned()),
+        };
+        let _ = writeln!(
+            out,
+            "  {mark} {reason:<10} {:>2}. {} — {}",
+            item.index + 1,
+            truncate(&item.artist, 28),
+            truncate(&item.title, 40),
+        );
+        if let Some(why) = &item.why {
+            let _ = writeln!(out, "                  why: {why}");
+        }
+        for line in detail.lines() {
+            let _ = writeln!(out, "                  {line}");
+        }
+    }
+    let summary = &report.summary;
+    let _ = writeln!(
+        out,
+        "{} · {} ready ({} with a head) · {} failed",
+        count(summary.planned, "track"),
+        summary.ready,
+        summary.with_head,
+        summary.failed,
+    );
+    out
+}
+
+/// A byte count as KB or MB.
+fn size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a size shown to one decimal; the loss is invisible there"
+    )]
+    let bytes = bytes as f64;
+    if bytes < KB * KB {
+        format!("{:.0} KB", bytes / KB)
+    } else {
+        format!("{:.1} MB", bytes / (KB * KB))
+    }
+}
+
 fn truncate(input: &str, width: usize) -> String {
     if input.chars().count() <= width {
         return input.to_owned();

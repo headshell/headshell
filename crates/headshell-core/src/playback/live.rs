@@ -78,19 +78,61 @@ pub struct LiveSession {
     artwork: Option<ArtworkWorker>,
     /// The queue last handed to it: play order and position.
     artwork_seen: Option<(Vec<ProviderTrackId>, usize)>,
+    /// The queue whose listening history the player last got (D-077).
+    history_seen: Option<Vec<ProviderTrackId>>,
+    /// Reads the queue ahead (D-077). The session's, not a player's: a new
+    /// search replaces the player, and an address resolved for the last queue
+    /// is not resolved again for this one.
+    #[cfg(feature = "audio")]
+    prefetch: crate::playback::prefetch::Prefetcher,
 }
 
 impl LiveSession {
     /// Wires a session and a player together.
     #[must_use]
     pub fn new(session: Session, player: Player) -> Self {
+        #[cfg(feature = "audio")]
+        let (player, prefetch) = {
+            let mut player = player;
+            let prefetch = crate::playback::prefetch::Prefetcher::new();
+            player.attach_prefetcher(prefetch.clone());
+            (player, prefetch)
+        };
         Self {
             session,
             player,
             pending: Vec::new(),
             artwork: None,
             artwork_seen: None,
+            history_seen: None,
+            #[cfg(feature = "audio")]
+            prefetch,
         }
+    }
+
+    /// Hands the player its queue's listening history when the queue
+    /// changed (D-077): what reading ahead guesses its third track with. The
+    /// history is read here, on the session's thread, once per queue.
+    fn sync_history(&mut self) {
+        let items = self.player.queue().items();
+        let ids: Vec<ProviderTrackId> = items.iter().map(|item| item.id.clone()).collect();
+        if self.history_seen.as_ref() == Some(&ids) {
+            return;
+        }
+        let profiles = self
+            .session
+            .listening_profiles(&items, crate::model::PlayRule::default());
+        self.player.set_history(profiles);
+        self.history_seen = Some(ids);
+    }
+
+    /// What is being read ahead for the queue, and how it went (D-077).
+    ///
+    /// # Errors
+    /// In a build without the audio pipeline — nothing plays, so nothing is
+    /// read ahead — or if the read-ahead lock is poisoned.
+    pub fn prefetch_report(&self) -> Result<crate::playback::PrefetchReport> {
+        self.player.prefetch_report()
     }
 
     /// Starts the cover worker (D-076). From then on every queue the player
@@ -206,7 +248,12 @@ impl LiveSession {
     pub fn replace_player(&mut self, player: Player) {
         self.player.stop();
         self.pending.extend(self.player.take_listens());
+        let habits = self.player.habits();
         self.player = player;
+        self.player.adopt_habits(habits);
+        self.history_seen = None;
+        #[cfg(feature = "audio")]
+        self.player.attach_prefetcher(self.prefetch.clone());
         // The new player may carry a newer registry (a server was added):
         // the same queue is handed to the cover worker again with it.
         self.artwork_seen = None;
@@ -240,6 +287,7 @@ impl LiveSession {
             self.player.queue().position(),
         );
 
+        self.sync_history();
         let tick_result = self.player.tick().await;
 
         // The accumulated listens must be written even if the player failed:

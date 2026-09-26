@@ -116,6 +116,15 @@ impl Chain {
                         )),
                     },
                     Ok(None) => {}
+                    // It gave way to a call for the user (D-077): not an
+                    // answer. The row stays pending and the worker asks again.
+                    Err(err) if matches!(err.kind(), ErrorKind::PluginPreempted { .. }) => {
+                        return Outcome {
+                            key,
+                            status: ArtworkStatus::Pending,
+                            notes,
+                        };
+                    }
                     Err(err) => notes.push(format!(
                         "{} could not give its cover — {}",
                         id.provider,

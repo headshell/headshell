@@ -10,11 +10,21 @@
 #![cfg(feature = "audio")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use headshell_core::playback::{AudioEngine, PlayState};
-use headshell_core::provider::AudioSource;
+use headshell_core::config::Config;
+use headshell_core::ids::{ProviderId, ProviderTrackId};
+use headshell_core::model::TrackRef;
+use headshell_core::playback::{
+    AudioEngine, LiveSession, PlanReason, PlayState, Player, PrefetchStatus, QueueItem,
+};
+use headshell_core::provider::local::LocalProvider;
+use headshell_core::provider::{AudioSource, ProviderRegistry};
+use headshell_core::session::Session;
 
 /// A local file source (a shortcut).
 fn local(path: &std::path::Path) -> AudioSource {
@@ -216,6 +226,108 @@ fn two_tracks_play_back_to_back_without_the_output_ever_stopping() {
         "the second track must start from the beginning: {}ms",
         engine.position_ms()
     );
+}
+
+/// D-077, wired end to end: in a playing session the read-ahead thread makes
+/// the next track ready, "next" starts from it, and "previous" finds the
+/// address the session kept — the counts say so.
+#[tokio::test]
+async fn next_and_previous_start_from_what_was_read_ahead() {
+    if !has_output_device() {
+        eprintln!("no audio output — skipping the read-ahead test (this is not a failure)");
+        return;
+    }
+    let dir = support::TempDir::new("read-ahead");
+    let session = Session::open(Config::with_data_dir(dir.path())).unwrap();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(LocalProvider::new(vec![fixture("")])));
+    let items: Vec<QueueItem> = [
+        "tagged.flac",
+        "Test Artist - Mp3 Track.mp3",
+        "Other Artist - Ogg Track.ogg",
+        "fingerprint_sample.flac",
+    ]
+    .iter()
+    .map(|name| QueueItem {
+        id: ProviderTrackId::new(ProviderId::new("local"), fixture(name).to_string_lossy()),
+        track: TrackRef::new("Artist", *name),
+    })
+    .collect();
+
+    let mut player = Player::new(registry.clone());
+    if let Err(err) = player.play_items(items.clone()).await {
+        eprintln!(
+            "could not open the audio device, skipping the test:\n{}",
+            err.chain_text()
+        );
+        return;
+    }
+    // Paused, the first track does not end on its own while the test looks.
+    player.pause();
+    let mut live = LiveSession::new(session, player);
+
+    // A round hands the plan over; the thread makes the next track ready.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let planned = loop {
+        live.tick().await.unwrap();
+        let report = live.prefetch_report().unwrap();
+        if report
+            .items
+            .iter()
+            .all(|item| matches!(item.status, PrefetchStatus::Ready { .. }))
+            && !report.items.is_empty()
+            || Instant::now() > deadline
+        {
+            break report;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let reasons: Vec<PlanReason> = planned.items.iter().map(|item| item.reason).collect();
+    assert_eq!(
+        reasons,
+        [PlanReason::Next, PlanReason::AfterNext, PlanReason::Likely],
+        "{planned:?}"
+    );
+    assert_eq!(
+        planned.items[2].why.as_deref(),
+        Some("the queue's own continuation"),
+        "with no history and no habits yet, the third is where the queue goes on"
+    );
+
+    live.player_mut().next().await.unwrap();
+    let report = live.prefetch_report().unwrap();
+    let counters = report.counters;
+    assert!(
+        counters.hits >= 1,
+        "next did not start from the read-ahead: {counters:?}"
+    );
+    assert_eq!(counters.misses, 0, "{counters:?}");
+    assert_eq!(
+        report.habits.skipped, 1,
+        "a track left at once is a skip: {report:?}"
+    );
+
+    live.player_mut().previous().await.unwrap();
+    let counters = live.prefetch_report().unwrap().counters;
+    assert!(
+        counters.hits >= 2,
+        "previous did not find the kept address: {counters:?}"
+    );
+    assert_eq!(counters.misses, 0, "{counters:?}");
+
+    // A new search replaces the player; the session's read-ahead stays with
+    // the session, and what it kept goes on to the new queue.
+    let mut replacement = Player::new(registry);
+    replacement.queue_mut().replace(vec![items[1].clone()]);
+    live.replace_player(replacement);
+    let kept = live
+        .prefetch_report()
+        .expect("the new player reads ahead with the session's thread");
+    assert_eq!(
+        kept.counters, counters,
+        "the session's counts went with the old player"
+    );
+    live.player_mut().stop();
 }
 
 #[test]

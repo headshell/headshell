@@ -2120,6 +2120,68 @@ plugin's cover (they skip without a network, D-043).
 and MP3 tags, a folder cover, a coverless made-up band and a coverless real
 recording, offline and with `HEADSHELL_ONLINE=1`.
 
+### 3.11 Reading the queue ahead — DONE (D-077)
+
+**The problem:** with YouTube Music, "next" waited 5.6–7 s and Enter ~10 s
+(release build, measured). Nearly all of it was yt-dlp resolving the address
+(4.7 s); the audio is cheap. D-024 read the next track ahead, but inside
+`tick`: a round held the core's thread 4.7 s, and pause waited that long.
+
+**Done:**
+
+1. **A read-ahead thread** per playing session (`playback::prefetch`): the
+   next track and the one after it, always, and a third that statistics pick
+   — three at most (the user's decision). Each one's address is resolved and
+   the first 512 KB of its stream fetched. The player hands the plan over and
+   never waits for it; `tick` takes no time.
+2. **Memory only** (the user's decision): no audio is written to disk. An
+   address is trusted for 8 minutes — SoundCloud signs for eleven, YouTube for
+   six hours (measured). A head is kept while its track is planned.
+3. **Starts begin from what is ready:** "next" starts from the head, "previous"
+   from the address kept; a track being resolved at that moment is waited for,
+   not resolved twice. An address that no longer opens is resolved once more;
+   a stream begun from its head whose address went stale gets a new one while
+   the head plays.
+4. **The user's calls first:** a plugin runs one call at a time; a call made on
+   the user's behalf goes before the read-ahead's and the covers', and a tool
+   a background call is running is stopped for it (`PluginPreempted`: "gave
+   way", not "failed").
+5. **The third track** is guessed from how the user listens
+   (`prefetch::likely`): the queue's continuation for someone skipping
+   through it, a track or artist they often play for someone who picks from
+   it. The session's habits (skips, picks, going back) and the history's plays
+   and skips (`SqliteLibrary::listening_profile`, by the play rule) weigh it;
+   the report says why in a sentence.
+6. **Every HTTP stream waited for its whole file** (found on the way):
+   symphonia 0.6 reads a source's end first when told its length. The source
+   no longer reports it; opening the 7.5 MB m4a went from 1.77 s to 0.1–0.6 s.
+7. **`headshell prefetch "<query>" [--all]`**: what a playing session does for
+   its queue, as a command, timed. The desktop mirrors it as `prefetch`;
+   `prefetch_queue` is the playing queue's plan and counts.
+
+**Measured** (release, YouTube Music, `examples/latency_probe.rs`): next 6.42 s
+→ 0.02 s, previous 7.02 s → 0.16–0.59 s, a far track 6.95 s → ~5 s, Enter 9.73 s
+→ ~7 s, three "next"s half a second apart 0.01–0.03 s each, the longest round of
+`tick` 4.71 s → under 5 ms.
+
+**Not done:** the first track after Enter still waits for the search and the
+address — there is nothing to read ahead; yt-dlp's unpacked builds may cut its
+~1.15 s start (not measured). Lifetimes a provider could declare (the core
+trusts 8 minutes for all). Resuming a stream that breaks mid-way (not after a
+head).
+
+**Testing:** the read-ahead thread against a provider answering from memory
+(order, in-flight waits, failures asked once, giving way, lifetimes, stale
+streams, heads kept and dropped with the plan); heads and the rest on a local
+server (a range from exactly that byte of exactly that file, a server that
+ignores ranges gives no head, a stale address replaced, no new address is an
+error, not a short track); the plugin gate and a stopped tool (Unix and
+Windows); the third track's guess; the listening profile; a real local queue
+played with next and previous; `headshell prefetch --json` has a snapshot.
+
+**Verification:** `examples/latency_probe.rs` in a Debian 13 container with a
+PulseAudio null sink, before and after, and the live plugin tests.
+
 ---
 
 # PHASE 4 — Rooms (the backend starts here)

@@ -94,7 +94,12 @@ impl ArtworkWorker {
         let thread_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("headshell-artwork".to_owned())
-            .spawn(move || run(&thread_shared, chain))
+            .spawn(move || {
+                // Covers are looked up ahead of time: a plugin puts the user's
+                // calls before them (D-077).
+                crate::provider::ahead_of_time::mark_this_thread();
+                run(&thread_shared, chain);
+            })
             .map_err(|source| crate::error::io_err(Stage::ArtworkStore, cache_dir, source))?;
         Ok(Self { shared })
     }
@@ -296,6 +301,12 @@ fn run(shared: &Shared, mut chain: Chain) {
         if state.generation != generation {
             // The queue changed meanwhile; the answer is in the cache if it was
             // one to keep, and the new queue reads it from there.
+            continue;
+        }
+        if outcome.status == ArtworkStatus::Pending {
+            // The plugin was needed for a call the user made (D-077): this row
+            // is asked again, first, once that call is through.
+            state.todo.push_front(index);
             continue;
         }
         // Every row of the same album gets the answer at once.

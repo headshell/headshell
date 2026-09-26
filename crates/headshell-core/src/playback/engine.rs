@@ -28,6 +28,7 @@ use symphonia::core::meta::MetadataOptions;
 
 use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result};
+use crate::net::StreamHead;
 use crate::provider::AudioSource;
 
 use super::anchor::PlayState;
@@ -144,7 +145,12 @@ struct Span {
 /// is hidden while the buffer drains.
 enum Job {
     Prepared(Box<PreparedTrack>),
-    Lazy { seq: u64, source: AudioSource },
+    Lazy {
+        seq: u64,
+        source: AudioSource,
+        /// The stream's first bytes, fetched ahead of time (D-077).
+        head: Option<Arc<StreamHead>>,
+    },
 }
 
 /// An opened track, ready to decode.
@@ -156,6 +162,10 @@ struct PreparedTrack {
     source_rate: u32,
     source_channels: usize,
     duration_ms: Option<u64>,
+    /// A stream started from a head: through this it asks for a new address
+    /// (D-077).
+    #[cfg(feature = "http-client")]
+    stream: Option<super::http_source::StreamHandle>,
 }
 
 /// The state shared between the decoding thread and the player.
@@ -188,6 +198,10 @@ struct Shared {
     /// An error that occurred while decoding (if any) — the caller takes it with
     /// `take_error`.
     error: Mutex<Option<String>>,
+    /// The streams started from a head, by slice (D-077): the ones that may
+    /// ask for a new address while they play.
+    #[cfg(feature = "http-client")]
+    streams: Mutex<Vec<(u64, super::http_source::StreamHandle)>>,
 }
 
 const STATE_STOPPED: u8 = 0;
@@ -339,6 +353,28 @@ impl Shared {
             }
         }
     }
+
+    /// Keeps a head-started stream's handle under its slice number.
+    fn keep_stream(&self, seq: u64, prepared: &PreparedTrack) {
+        #[cfg(feature = "http-client")]
+        if let Some(stream) = &prepared.stream
+            && let Ok(mut streams) = self.streams.lock()
+        {
+            streams.push((seq, stream.clone()));
+        }
+        #[cfg(not(feature = "http-client"))]
+        let _ = (seq, prepared);
+    }
+
+    /// A slice is decoded: its stream will not ask for anything any more.
+    fn forget_stream(&self, seq: u64) {
+        #[cfg(feature = "http-client")]
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.retain(|(kept, _)| *kept != seq);
+        }
+        #[cfg(not(feature = "http-client"))]
+        let _ = seq;
+    }
 }
 
 /// The audio engine: **one** output stream, fed tracks in order (D-024).
@@ -380,9 +416,12 @@ impl AudioEngine {
         // The source is opened **before the device**: a corrupt or missing file
         // must fail at the decoding stage even in an environment with no audio
         // output at all (CI) — a "no device" error would hide the real cause.
-        let prepared = open_source(&AudioSource::LocalFile {
-            path: path.to_path_buf(),
-        })?;
+        let prepared = open_source(
+            &AudioSource::LocalFile {
+                path: path.to_path_buf(),
+            },
+            None,
+        )?;
         let engine = Self::open()?;
         engine.play_prepared(prepared);
         Ok(engine)
@@ -400,10 +439,13 @@ impl AudioEngine {
     /// ([`Stage::PlaybackDecode`]).
     #[cfg(feature = "http-client")]
     pub fn play_http(url: &str, headers: &[crate::net::HttpHeader]) -> Result<Self> {
-        let prepared = open_source(&AudioSource::HttpStream {
-            url: url.to_owned(),
-            headers: headers.to_vec(),
-        })?;
+        let prepared = open_source(
+            &AudioSource::HttpStream {
+                url: url.to_owned(),
+                headers: headers.to_vec(),
+            },
+            None,
+        )?;
         let engine = Self::open()?;
         engine.play_prepared(prepared);
         Ok(engine)
@@ -419,13 +461,28 @@ impl AudioEngine {
     /// # Errors
     /// If the source cannot be opened or decoded.
     pub fn play_source(&self, source: &AudioSource) -> Result<u64> {
-        Ok(self.play_prepared(open_source(source)?))
+        Ok(self.play_prepared(open_source(source, None)?))
+    }
+
+    /// [`Self::play_source`] from a head fetched ahead of time (D-077): the
+    /// head is the stream's start, so no request stands between the call and
+    /// the sound.
+    ///
+    /// # Errors
+    /// If the source cannot be opened or decoded.
+    pub(crate) fn play_source_from(
+        &self,
+        source: &AudioSource,
+        head: Option<&StreamHead>,
+    ) -> Result<u64> {
+        Ok(self.play_prepared(open_source(source, head)?))
     }
 
     /// Queues an opened track and returns its slice number.
     fn play_prepared(&self, mut prepared: PreparedTrack) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
         prepared.seq = seq;
+        self.shared.keep_stream(seq, &prepared);
         // We announce the slice **now**: the duration is known here, and the
         // caller can ask for `duration_ms()` as soon as it has set up the engine.
         // Where it will start becomes known when the decoding thread gets there.
@@ -459,15 +516,69 @@ impl AudioEngine {
     /// caller is not waiting at that moment, but the error **is not swallowed**
     /// (K9).
     pub fn enqueue(&self, source: &AudioSource) -> u64 {
+        self.enqueue_from(source, None)
+    }
+
+    /// [`Self::enqueue`] with the stream's head fetched ahead of time
+    /// (D-077).
+    pub(crate) fn enqueue_from(&self, source: &AudioSource, head: Option<Arc<StreamHead>>) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
         self.shared.idle.store(false, Ordering::Release);
         if let Ok(mut pending) = self.shared.pending.lock() {
             pending.push_back(Job::Lazy {
                 seq,
                 source: source.clone(),
+                head,
             });
         }
         seq
+    }
+
+    /// The slices whose stream, started from a head, asks for a new address
+    /// (D-077): the one it had no longer answers.
+    #[must_use]
+    pub(crate) fn wanting_address(&self) -> Vec<u64> {
+        #[cfg(feature = "http-client")]
+        {
+            self.shared.streams.lock().map_or_else(
+                |_| Vec::new(),
+                |streams| {
+                    streams
+                        .iter()
+                        .filter(|(_, stream)| stream.wants_address())
+                        .map(|(seq, _)| *seq)
+                        .collect()
+                },
+            )
+        }
+        #[cfg(not(feature = "http-client"))]
+        Vec::new()
+    }
+
+    /// Gives a slice's stream a new address; it carries on from the byte it
+    /// stopped at. `false` when that slice has no stream asking.
+    pub(crate) fn give_address(&self, seq: u64, source: &AudioSource) -> bool {
+        #[cfg(feature = "http-client")]
+        {
+            let AudioSource::HttpStream { url, headers } = source else {
+                return false;
+            };
+            let Ok(streams) = self.shared.streams.lock() else {
+                return false;
+            };
+            match streams.iter().find(|(kept, _)| *kept == seq) {
+                Some((_, stream)) if stream.wants_address() => {
+                    stream.give_address(url.clone(), headers.clone());
+                    true
+                }
+                _ => false,
+            }
+        }
+        #[cfg(not(feature = "http-client"))]
+        {
+            let _ = (seq, source);
+            false
+        }
     }
 
     /// The number of jobs waiting in the queue (not yet started decoding).
@@ -542,6 +653,8 @@ impl AudioEngine {
             pending: Mutex::new(VecDeque::new()),
             spans: Mutex::new(Vec::new()),
             error: Mutex::new(None),
+            #[cfg(feature = "http-client")]
+            streams: Mutex::new(Vec::new()),
         });
 
         // — The decoding thread: it lives as long as the engine, not the track.
@@ -567,19 +680,23 @@ impl AudioEngine {
 
                     let prepared = match job {
                         Job::Prepared(track) => *track,
-                        Job::Lazy { seq, source } => match open_source(&source) {
-                            Ok(mut track) => {
-                                track.seq = seq;
-                                track
+                        Job::Lazy { seq, source, head } => {
+                            match open_source(&source, head.as_deref()) {
+                                Ok(mut track) => {
+                                    track.seq = seq;
+                                    decode_shared.keep_stream(seq, &track);
+                                    track
+                                }
+                                Err(err) => {
+                                    // The read-ahead track could not be opened: do not swallow it,
+                                    // record it and move on to the next (K9).
+                                    decode_shared.record_error(
+                                        err.chain_text().replace('\n', " ").to_string(),
+                                    );
+                                    continue;
+                                }
                             }
-                            Err(err) => {
-                                // The read-ahead track could not be opened: do not swallow it,
-                                // record it and move on to the next (K9).
-                                decode_shared
-                                    .record_error(err.chain_text().replace('\n', " ").to_string());
-                                continue;
-                            }
-                        },
+                        }
                     };
 
                     decode_shared.idle.store(false, Ordering::Release);
@@ -729,7 +846,9 @@ fn take_job(shared: &Arc<Shared>) -> Option<Job> {
 ///
 /// `play_source` calls this on the caller's thread, read-ahead on the
 /// decoding thread — the body is the same in both.
-fn open_source(source: &AudioSource) -> Result<PreparedTrack> {
+fn open_source(source: &AudioSource, head: Option<&StreamHead>) -> Result<PreparedTrack> {
+    #[cfg(not(feature = "http-client"))]
+    let _ = head;
     match source {
         AudioSource::LocalFile { path } => {
             let file = std::fs::File::open(path)
@@ -742,7 +861,6 @@ fn open_source(source: &AudioSource) -> Result<PreparedTrack> {
         }
         #[cfg(feature = "http-client")]
         AudioSource::HttpStream { url, headers } => {
-            let stream = super::http_source::HttpMediaSource::open(url, headers)?;
             let mut hint = Hint::new();
             // The extension is only a **hint**: servers give extension-less
             // addresses like `?id=...`, and then symphonia recognises the container
@@ -750,7 +868,20 @@ fn open_source(source: &AudioSource) -> Result<PreparedTrack> {
             if let Some(ext) = extension_from_url(url) {
                 hint.with_extension(&ext);
             }
-            prepare(Box::new(stream), hint, crate::net::without_query(url))
+            let label = crate::net::without_query(url);
+            match head {
+                Some(head) => {
+                    let (stream, handle) =
+                        super::http_source::HttpMediaSource::open_with_head(url, headers, head)?;
+                    let mut prepared = prepare(Box::new(stream), hint, label)?;
+                    prepared.stream = Some(handle);
+                    Ok(prepared)
+                }
+                None => {
+                    let stream = super::http_source::HttpMediaSource::open(url, headers)?;
+                    prepare(Box::new(stream), hint, label)
+                }
+            }
         }
         #[cfg(not(feature = "http-client"))]
         AudioSource::HttpStream { .. } => Err(Error::new(
@@ -828,6 +959,8 @@ fn prepare(source: Box<dyn MediaSource>, hint: Hint, label: &str) -> Result<Prep
         source_rate,
         source_channels,
         duration_ms,
+        #[cfg(feature = "http-client")]
+        stream: None,
     })
 }
 
@@ -852,6 +985,7 @@ fn decode_track(
         source_rate,
         source_channels,
         duration_ms,
+        ..
     } = prepared;
 
     // If it could not be read from the container, fall back to the output's
@@ -917,6 +1051,7 @@ fn decode_track(
     }
 
     shared.close_span(seq);
+    shared.forget_stream(seq);
 }
 
 /// Turns a symphonia buffer into interleaved `f32` samples.
@@ -1111,6 +1246,8 @@ mod tests {
             pending: Mutex::new(VecDeque::new()),
             spans: Mutex::new(Vec::new()),
             error: Mutex::new(None),
+            #[cfg(feature = "http-client")]
+            streams: Mutex::new(Vec::new()),
         })
     }
 

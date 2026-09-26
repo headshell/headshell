@@ -75,6 +75,25 @@ pub struct SearchOutcome {
     pub listen_events: usize,
 }
 
+/// How a track, and its artist, were listened to in the history (D-077):
+/// what reading the queue ahead weighs its third track with.
+///
+/// "Skips" are the listens that stopped before [`PlayRule`] counted them —
+/// the same line `stats` draws, from the other side. The history keeps them
+/// when an export carries them (Spotify's does); the app's own playback
+/// writes only counted plays.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListeningProfile {
+    /// Plays of the track that the rule counts.
+    pub plays: u64,
+    /// Listens of the track that stopped before it.
+    pub skips: u64,
+    /// Plays of the artist's tracks that the rule counts.
+    pub artist_plays: u64,
+    /// Listens of the artist's tracks that stopped before it.
+    pub artist_skips: u64,
+}
+
 /// The listen store. SQLite is its only real implementation; tests use a
 /// fake.
 pub trait ListenStore {
@@ -261,6 +280,55 @@ impl SqliteLibrary {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// How a track and its artist were listened to (D-077). A track the
+    /// history has never seen is all zeros — no history, not an error.
+    ///
+    /// The artist is found by its part of the grouping key: every key that
+    /// begins with `artist\u{1}`, a range the key's index answers.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn listening_profile(
+        &self,
+        artist: &str,
+        title: &str,
+        rule: PlayRule,
+    ) -> Result<ListeningProfile> {
+        let play = play_predicate_sql(rule);
+        let counts = |filter: &str, low: &str, high: Option<&str>| -> Result<(u64, u64)> {
+            let sql = format!(
+                "SELECT COALESCE(SUM(CASE WHEN {play} THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN {play} THEN 0 ELSE 1 END), 0)
+                 FROM listens l JOIN tracks t ON t.id = l.track_id
+                 WHERE {filter}"
+            );
+            let row = |row: &rusqlite::Row<'_>| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
+            let (plays, skips) = match high {
+                Some(high) => self.conn.query_row(&sql, [low, high], row),
+                None => self.conn.query_row(&sql, [low], row),
+            }
+            .map_err(db_err(Stage::LibraryQuery))?;
+            Ok((
+                u64::try_from(plays).unwrap_or(0),
+                u64::try_from(skips).unwrap_or(0),
+            ))
+        };
+        let key = track_key(artist, title);
+        let (plays, skips) = counts("t.norm_key = ?1", &key, None)?;
+        let artist_key = crate::identity::normalize::normalize_artist(artist);
+        let (artist_plays, artist_skips) = counts(
+            "t.norm_key >= ?1 AND t.norm_key < ?2",
+            &format!("{artist_key}\u{1}"),
+            Some(&format!("{artist_key}\u{2}")),
+        )?;
+        Ok(ListeningProfile {
+            plays,
+            skips,
+            artist_plays,
+            artist_skips,
+        })
     }
 
     fn configure(&self) -> Result<()> {
@@ -908,6 +976,44 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("the version must be readable");
         assert_eq!(usize::try_from(version).unwrap(), schema::MIGRATIONS.len());
+    }
+
+    /// D-077: a track's plays and skips, and its artist's, by the same rule
+    /// `stats` counts with — the artist found by its part of the key, not by
+    /// a prefix of its name.
+    #[test]
+    fn a_listening_profile_counts_plays_and_skips_by_the_play_rule() {
+        let mut library = SqliteLibrary::open_in_memory().unwrap();
+        library
+            .insert_listens(&[
+                listen("Radiohead", "Creep", "2023-01-01T00:00:00Z", 200_000),
+                listen("Radiohead", "Creep", "2023-01-02T00:00:00Z", 190_000),
+                listen("Radiohead", "Creep", "2023-01-03T00:00:00Z", 4_000),
+                listen("Radiohead", "Karma Police", "2023-01-04T00:00:00Z", 3_000),
+                listen("Radiohead", "Nude", "2023-01-05T00:00:00Z", 250_000),
+                listen("Radioheads", "Creep", "2023-01-06T00:00:00Z", 250_000),
+            ])
+            .unwrap();
+
+        let profile = library
+            .listening_profile("radiohead", "Creep (Remastered 2011)", PlayRule::default())
+            .unwrap();
+        assert_eq!(
+            profile,
+            ListeningProfile {
+                plays: 2,
+                skips: 1,
+                artist_plays: 3,
+                artist_skips: 2,
+            }
+        );
+        assert_eq!(
+            library
+                .listening_profile("Nobody", "Nothing", PlayRule::default())
+                .unwrap(),
+            ListeningProfile::default(),
+            "a track never heard is no history, not an error"
+        );
     }
 
     #[test]

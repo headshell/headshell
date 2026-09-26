@@ -372,6 +372,13 @@ after installation isn't run.
   call left behind.
 - After three starts it gives up; endless restarts would hide a crash loop. On
   a contract violation (a missing export) it isn't retried at all.
+- **A call made ahead of time can give way (D-077).** The core reads the
+  queue ahead and looks covers up in the background; meanwhile a call the
+  user makes goes first. A tool your `resolve_source` or `artwork` is running
+  for a call made ahead of time is then stopped: `host.tools.run` throws, and
+  so does a `host.http` request started after that. Let the error through —
+  the core counts it as "gave way", not as a failure, and asks again later.
+  Catching it and returning `null` would read as "this track has no source".
 - **A known limit:** a crash in QuickJS's own C code brings the core down too —
   in api 1 the plugin was a separate process; since api 2 it isn't (D-069's
   trade-off). Nothing JS can do (an infinite loop, a memory overflow, deep

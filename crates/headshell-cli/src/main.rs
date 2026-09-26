@@ -126,6 +126,18 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Make the first tracks a play query finds ready ahead of time (D-077):
+    /// the track `play` would start and the two after it — each one's address
+    /// resolved and the first bytes of its stream fetched — and say how long
+    /// each took. What a playing session does for its queue, as a command.
+    Prefetch {
+        /// The play query.
+        query: String,
+        /// Queue every matching track, so the two after the first are made
+        /// ready too.
+        #[arg(long)]
+        all: bool,
+    },
     /// Produce a shareable listening card (Sleeve).
     Sleeve {
         /// Only this year (UTC).
@@ -463,6 +475,15 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                 *succeeded = false;
             }
             render(cli.json, &report, || output::artwork(&report))
+        }
+        Command::Prefetch { query, all } => {
+            let registry = provider::default_registry(session.config())?;
+            let report = session.prefetch(&registry, query, *all).await?;
+            // A track that could not be made ready is a partial failure.
+            if report.summary.failed > 0 {
+                *succeeded = false;
+            }
+            render(cli.json, &report, || output::prefetch(&report))
         }
         Command::Library { command } => match command {
             LibraryCommand::Search {

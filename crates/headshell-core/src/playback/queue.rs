@@ -283,6 +283,25 @@ impl Queue {
             .and_then(|index| self.items.get(*index))
     }
 
+    /// The tracks after the playing one, in play order, **without moving the
+    /// cursor**: at most `count`, the next one first (D-077).
+    ///
+    /// What "next" plays — the user's key — in every repeat mode, so under
+    /// `RepeatMode::One` too it is the track after the playing one. It does
+    /// not wrap to the start: wrapping reshuffles, and which track comes then
+    /// is not known yet ([`Queue::peek_after_finish`] stops there for the
+    /// same reason).
+    #[must_use]
+    pub fn upcoming(&self, count: usize) -> Vec<&QueueItem> {
+        let first = self.position.saturating_add(1);
+        self.order
+            .iter()
+            .skip(first)
+            .take(count)
+            .filter_map(|&index| self.items.get(index))
+            .collect()
+    }
+
     /// Picks the next track when the track **ends naturally**.
     ///
     /// The difference from [`Queue::next`]: here `RepeatMode::One` gives the same
@@ -352,6 +371,47 @@ mod tests {
 
     fn current_title(queue: &Queue) -> Option<String> {
         queue.current().map(|item| item.track.title.clone())
+    }
+
+    fn titles(items: &[&QueueItem]) -> Vec<String> {
+        items.iter().map(|item| item.track.title.clone()).collect()
+    }
+
+    /// D-077: what comes after the playing track, in play order, without
+    /// moving the cursor — shuffled, it follows the shuffled order.
+    #[test]
+    fn upcoming_follows_play_order_without_moving() {
+        let mut queue = queue_of(&["a", "b", "c", "d"]);
+        assert_eq!(titles(&queue.upcoming(2)), ["b", "c"]);
+        assert_eq!(
+            current_title(&queue).as_deref(),
+            Some("a"),
+            "the cursor did not move"
+        );
+
+        queue.jump_to(2);
+        assert_eq!(
+            titles(&queue.upcoming(5)),
+            ["d"],
+            "it does not wrap to the start"
+        );
+        queue.set_repeat(RepeatMode::All);
+        assert_eq!(titles(&queue.upcoming(5)), ["d"], "not even when repeating");
+        queue.set_repeat(RepeatMode::One);
+        assert_eq!(
+            titles(&queue.upcoming(1)),
+            ["d"],
+            "\"next\" leaves a repeated track"
+        );
+
+        queue.jump_to(0);
+        queue.set_shuffle(true);
+        let order: Vec<String> = queue
+            .items()
+            .iter()
+            .map(|item| item.track.title.clone())
+            .collect();
+        assert_eq!(titles(&queue.upcoming(3)), order[1..4]);
     }
 
     #[test]

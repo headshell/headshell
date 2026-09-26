@@ -29,6 +29,8 @@ const VOLATILE_KEYS: &[&str] = &[
     "platform",
     // What `artwork` looked at: a file's path depends on the checkout (D-076).
     "subject",
+    // How long resolving an address took (D-077).
+    "resolve_ms",
 ];
 
 fn fixtures() -> PathBuf {
@@ -659,6 +661,33 @@ fn a_deleted_file_leaves_the_catalog_but_keeps_its_history() {
         stdout.contains("Test Artist"),
         "the listening history must be kept:\n{stdout}"
     );
+}
+
+/// `prefetch` (D-077): the tracks `play` would start with, made ready one
+/// after another, each saying how — a local file has no head to fetch, and
+/// says so rather than leaving it blank (K9).
+#[test]
+fn prefetch_makes_the_first_tracks_ready_and_says_why_a_file_has_no_head() {
+    let dir = temp_dir("prefetch");
+    let music = fixtures().join("artwork");
+    let (_, stderr, ok) = run_with_music(&dir, Some(&music), &["provider", "scan"]);
+    assert!(ok, "scan failed: {stderr}");
+
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&music),
+        &["--json", "prefetch", "cover artist", "--all"],
+    );
+    assert!(ok, "prefetch failed: {stderr}");
+    assert_snapshot("prefetch", &stdout);
+    let report = json(&stdout);
+    let reasons: Vec<&str> = report["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["reason"].as_str().unwrap_or("-"))
+        .collect();
+    assert_eq!(reasons, ["first", "next"], "{report}");
 }
 
 #[test]

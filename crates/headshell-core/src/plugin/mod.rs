@@ -50,6 +50,7 @@ mod script;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -429,7 +430,84 @@ pub struct PluginProvider {
     spec: ScriptSpec,
     start_timeout: Duration,
     call_timeout: Duration,
+    /// Who gets the engine next (D-077).
+    gate: Gate,
     state: std::sync::Mutex<SessionState>,
+}
+
+/// The order in which calls get a plugin's one engine (D-077).
+///
+/// The engine runs one call at a time. A call made on the user's behalf goes
+/// first: it waits only for the call already running, and if that one was
+/// made ahead of time ([`crate::provider::ahead_of_time`]) it is asked to
+/// give way — a tool it is running is stopped. A call made ahead of time
+/// waits while any call for the user waits. Measured before this: pressing
+/// "next" while yt-dlp resolved the track after it waited for that whole
+/// run, 4–5 s.
+#[derive(Default)]
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    turn: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    busy: bool,
+    /// The running call's stop flag, when it was made ahead of time.
+    running_ahead: Option<Arc<AtomicBool>>,
+    /// Calls for the user waiting for their turn.
+    waiting_for_user: usize,
+}
+
+/// A turn at the engine; it ends when dropped.
+struct Turn<'a> {
+    gate: &'a Gate,
+    /// Raised when a call for the user asks this one to give way. `None`
+    /// for a call for the user: nothing stops it.
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Gate {
+    /// Waits for a turn. `None` only if the lock is poisoned.
+    fn enter(&self, ahead_of_time: bool) -> Option<Turn<'_>> {
+        let mut state = self.state.lock().ok()?;
+        if ahead_of_time {
+            while state.busy || state.waiting_for_user > 0 {
+                state = self.turn.wait(state).ok()?;
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            state.busy = true;
+            state.running_ahead = Some(Arc::clone(&flag));
+            return Some(Turn {
+                gate: self,
+                cancel: Some(flag),
+            });
+        }
+        state.waiting_for_user += 1;
+        while state.busy {
+            if let Some(flag) = &state.running_ahead {
+                flag.store(true, Ordering::Release);
+            }
+            state = self.turn.wait(state).ok()?;
+        }
+        state.waiting_for_user -= 1;
+        state.busy = true;
+        state.running_ahead = None;
+        Some(Turn {
+            gate: self,
+            cancel: None,
+        })
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.gate.state.lock() {
+            state.busy = false;
+            state.running_ahead = None;
+        }
+        self.gate.turn.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -535,6 +613,7 @@ impl PluginProvider {
             spec,
             start_timeout: START_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
+            gate: Gate::default(),
             state: std::sync::Mutex::new(SessionState::default()),
         })
     }
@@ -553,11 +632,25 @@ impl PluginProvider {
     /// A timeout and a dead thread drop the engine: the next call restarts it.
     /// An error the plugin throws does not drop the engine — a rejected request
     /// is not a broken engine (the plugin version of D-023).
+    ///
+    /// The call waits for its turn at the [`Gate`]: one made on the user's
+    /// behalf goes first; one made ahead of time may be asked to give way and
+    /// then fails with [`ErrorKind::PluginPreempted`].
     fn call(
         &self,
         function: &'static str,
         args: Vec<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        let ahead = crate::provider::ahead_of_time::on_this_thread();
+        let turn = self.gate.enter(ahead).ok_or_else(|| {
+            Error::new(
+                Stage::ProviderCall,
+                ErrorKind::PluginCrashed {
+                    plugin: self.id.as_str().to_owned(),
+                    detail: "the lock ordering the plugin's calls is poisoned".to_owned(),
+                },
+            )
+        })?;
         let mut state = self.state.lock().map_err(|_| {
             Error::new(
                 Stage::ProviderCall,
@@ -592,7 +685,7 @@ impl PluginProvider {
             ));
         };
 
-        let outcome = worker.call(function, args, self.call_timeout);
+        let outcome = worker.call(function, args, self.call_timeout, turn.cancel.clone());
         if let Err(err) = &outcome
             && matches!(
                 err.kind(),
@@ -603,7 +696,30 @@ impl PluginProvider {
             // the engine is dropped and the next call starts clean.
             state.worker = None;
         }
-        outcome
+        // Asked to give way and failed: it gave way — whatever the plugin made
+        // of the stopped tool, this is not the track failing (K9).
+        let gave_way = turn
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        match outcome {
+            Err(err) if gave_way => {
+                tracing::debug!(
+                    plugin = %self.id,
+                    method = function,
+                    error = %err.chain_text().replace('\n', " "),
+                    "a call made ahead of time gave way"
+                );
+                Err(Error::new(
+                    Stage::ProviderCall,
+                    ErrorKind::PluginPreempted {
+                        plugin: self.id.as_str().to_owned(),
+                        method: function.to_owned(),
+                    },
+                ))
+            }
+            outcome => outcome,
+        }
     }
 
     fn start(&self, state: &mut SessionState) -> Result<()> {
@@ -922,6 +1038,7 @@ mod unavailable {
             _function: &'static str,
             _args: Vec<serde_json::Value>,
             _timeout: Duration,
+            _cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         ) -> Result<serde_json::Value> {
             Err(missing("?"))
         }

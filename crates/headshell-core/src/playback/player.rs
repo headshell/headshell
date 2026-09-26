@@ -17,9 +17,12 @@ use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result};
 use crate::ids::{CanonicalId, ProviderId, ProviderTrackId};
 use crate::model::{Listen, ListenSource, PlayRule, TrackRef};
-use crate::provider::{AudioSource, Capabilities, Provider, ProviderRegistry};
+use crate::provider::{AudioSource, Provider, ProviderRegistry};
 
 use super::anchor::{PlayState, PlaybackAnchor};
+use super::prefetch;
+#[cfg(feature = "audio")]
+use super::prefetch::{PlanItem, PlanReason, Prefetcher, Prepared};
 use super::queue::{Queue, QueueItem};
 
 /// The tracking record of the track being played.
@@ -39,6 +42,9 @@ struct NowPlaying {
     /// track has changed.
     #[cfg(feature = "audio")]
     seq: u64,
+    /// The address it plays from: kept for "previous" and a replay (D-077).
+    #[cfg(feature = "audio")]
+    source: AudioSource,
 }
 
 /// The player.
@@ -56,9 +62,26 @@ pub struct Player {
     #[cfg(feature = "audio")]
     engine: Option<super::engine::AudioEngine>,
     /// The next track handed to the engine ahead of time (D-024): segment
-    /// number + item. It becomes `now_playing` when the transition is heard.
+    /// number, item and the address it plays from. It becomes `now_playing`
+    /// when the transition is heard.
     #[cfg(feature = "audio")]
-    prefetched: Option<(u64, QueueItem)>,
+    prefetched: Option<(u64, QueueItem, AudioSource)>,
+    /// Reads the queue ahead (D-077). A playing session hands its own over;
+    /// a player on its own starts one when it first has a plan.
+    #[cfg(feature = "audio")]
+    prefetch: Option<Prefetcher>,
+    /// The plan last handed over — its tracks and the queue position — so
+    /// the same plan is not handed over every round.
+    #[cfg(feature = "audio")]
+    planned: Option<(Vec<ProviderTrackId>, usize)>,
+    /// Streams that asked for a new address: slice, track, since when.
+    #[cfg(feature = "audio")]
+    refreshing: Vec<(u64, QueueItem, std::time::Instant)>,
+    /// How the user moves through the queue this session (D-077).
+    habits: super::prefetch::Habits,
+    /// How each queued track and its artist were listened to, as the
+    /// playing session read it from the history (D-077).
+    history: std::collections::HashMap<ProviderTrackId, crate::library::ListeningProfile>,
 }
 
 impl std::fmt::Debug for Player {
@@ -84,7 +107,91 @@ impl Player {
             engine: None,
             #[cfg(feature = "audio")]
             prefetched: None,
+            #[cfg(feature = "audio")]
+            prefetch: None,
+            #[cfg(feature = "audio")]
+            planned: None,
+            #[cfg(feature = "audio")]
+            refreshing: Vec::new(),
+            habits: super::prefetch::Habits::default(),
+            history: std::collections::HashMap::new(),
         }
+    }
+
+    /// How the user moved through queues in this session (D-077).
+    #[must_use]
+    pub fn habits(&self) -> super::prefetch::Habits {
+        self.habits
+    }
+
+    /// Carries on counting from `habits`: a new search replaces the player,
+    /// not the listener.
+    pub(crate) fn adopt_habits(&mut self, habits: super::prefetch::Habits) {
+        self.habits = habits;
+    }
+
+    /// The queue's listening history, read by the playing session (D-077).
+    pub(crate) fn set_history(
+        &mut self,
+        history: std::collections::HashMap<ProviderTrackId, crate::library::ListeningProfile>,
+    ) {
+        self.history = history;
+        #[cfg(feature = "audio")]
+        {
+            self.planned = None;
+        }
+    }
+
+    /// Does the playing track count as played yet (D-008's rule)? What tells
+    /// leaving it apart from skipping it.
+    fn current_counts(&self) -> bool {
+        let Some(now) = &self.now_playing else {
+            return false;
+        };
+        #[cfg(feature = "audio")]
+        let (played, duration) = self.engine.as_ref().map_or((0, None), |engine| {
+            (
+                engine
+                    .played_ms_of(now.seq)
+                    .unwrap_or_else(|| engine.position_ms()),
+                engine.duration_of(now.seq).or(now.item.track.duration_ms),
+            )
+        });
+        #[cfg(not(feature = "audio"))]
+        let (played, duration) = (0, now.item.track.duration_ms);
+        self.rule.counts(played, duration)
+    }
+
+    /// Reads the queue ahead with `prefetcher` from now on (D-077): a playing
+    /// session shares one across the players it replaces, so an address
+    /// resolved for one queue is not resolved again for the next.
+    #[cfg(feature = "audio")]
+    pub(crate) fn attach_prefetcher(&mut self, prefetcher: Prefetcher) {
+        if let Some(now) = &self.now_playing {
+            prefetcher.remember(&now.item.id, &now.source);
+        }
+        self.prefetch = Some(prefetcher);
+        self.planned = None;
+    }
+
+    /// What is being read ahead, and how it went (D-077).
+    ///
+    /// # Errors
+    /// If nothing reads ahead in this player — "not started" is not "nothing
+    /// planned" (K9) — or its lock is poisoned.
+    pub fn prefetch_report(&self) -> Result<crate::playback::PrefetchReport> {
+        #[cfg(feature = "audio")]
+        if let Some(prefetch) = &self.prefetch {
+            let mut report = prefetch.report()?;
+            report.habits = self.habits;
+            return Ok(report);
+        }
+        Err(Error::new(
+            Stage::PlaybackResolve,
+            ErrorKind::Audio {
+                detail: "nothing reads ahead in this player (no queue has played yet)".to_owned(),
+            },
+        ))
     }
 
     /// Changes the "counted play" rule (the single definition from D-008).
@@ -196,44 +303,45 @@ impl Player {
         // produced.
         self.finish_current_listen();
 
+        // Read ahead (D-077): the track may be ready, or being made ready at
+        // this moment — then it is waited for, not resolved a second time.
+        #[cfg(feature = "audio")]
+        if let Some(prepared) = self.prefetch.as_ref().and_then(|p| p.for_start(&item.id)) {
+            match self.start_prepared(&prepared, item.clone()) {
+                Ok(()) => return Ok(()),
+                // The address kept for it no longer opens: resolved again below.
+                Err(err) => {
+                    tracing::info!(
+                        track = item.track.display_name(),
+                        error = %err.chain_text().replace('\n', " "),
+                        "the address read ahead no longer opens; resolving it again"
+                    );
+                    if let Some(prefetch) = &self.prefetch {
+                        prefetch.forget_stale(&item.id);
+                    }
+                }
+            }
+        }
+
         let source = self.resolve_source(&item.id).await?;
+        #[cfg(feature = "audio")]
+        if let Some(prefetch) = &self.prefetch {
+            prefetch.remember(&item.id, &source);
+        }
         self.start_source(&source, item)?;
         Ok(())
     }
 
     /// Asks the provider for a playable source.
+    ///
+    /// Asking a provider without the capability for a stream is not "no
+    /// results" but an explicit "I can't" (K9).
     async fn resolve_source(&self, id: &ProviderTrackId) -> Result<AudioSource> {
-        let provider = self.providers.get(&id.provider).ok_or_else(|| {
-            Error::new(
-                Stage::PlaybackResolve,
-                ErrorKind::NotFound {
-                    what: format!("provider: {}", id.provider),
-                },
-            )
-        })?;
-
-        let info = provider.info();
-        // Asking a provider without the capability for a stream is not "no
-        // results" but an explicit "I can't" (K9).
-        if !info.capabilities.contains(Capabilities::STREAM) {
-            return Err(Error::new(
-                Stage::PlaybackResolve,
-                ErrorKind::Unsupported {
-                    provider: info.id.to_string(),
-                    what: "audio stream".to_owned(),
-                    capabilities: info.capabilities.describe(),
-                },
-            ));
-        }
-
-        provider.resolve_source(id).await?.ok_or_else(|| {
-            Error::new(
-                Stage::PlaybackResolve,
-                ErrorKind::NotFound {
-                    what: format!("a playable source for {id}"),
-                },
-            )
-        })
+        let provider = prefetch::streaming_provider(&self.providers, id)?;
+        provider
+            .resolve_source(id)
+            .await?
+            .ok_or_else(|| prefetch::no_source(id))
     }
 
     /// Hands the source to the audio pipeline.
@@ -246,22 +354,11 @@ impl Player {
     fn start_source(&mut self, source: &AudioSource, item: QueueItem) -> Result<()> {
         #[cfg(feature = "audio")]
         {
-            // A start at the user's request: we set the engine up **again**.
-            // Gapless is only for natural transitions; when the user presses a key,
-            // playing read-ahead audio would mean playing the wrong track.
-            let engine = super::engine::AudioEngine::open()?;
-            let seq = engine.play_source(source)?;
-            self.engine = Some(engine);
-            self.prefetched = None;
-
-            self.now_playing = Some(NowPlaying {
-                provider: item.id.provider.clone(),
-                canonical_id: None,
-                started_at: jiff::Timestamp::now(),
-                item,
-                seq,
-            });
-            Ok(())
+            let prepared = Prepared {
+                source: source.clone(),
+                head: None,
+            };
+            self.start_prepared(&prepared, item)
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -274,6 +371,30 @@ impl Player {
                 },
             ))
         }
+    }
+
+    /// Hands a source to the audio pipeline — from its head, when one was
+    /// fetched ahead of time (D-077).
+    #[cfg(feature = "audio")]
+    fn start_prepared(&mut self, prepared: &Prepared, item: QueueItem) -> Result<()> {
+        // A start at the user's request: we set the engine up **again**.
+        // Gapless is only for natural transitions; when the user presses a key,
+        // playing read-ahead audio would mean playing the wrong track.
+        let engine = super::engine::AudioEngine::open()?;
+        let seq = engine.play_source_from(&prepared.source, prepared.head.as_deref())?;
+        self.engine = Some(engine);
+        self.prefetched = None;
+        self.refreshing.clear();
+
+        self.now_playing = Some(NowPlaying {
+            provider: item.id.provider.clone(),
+            canonical_id: None,
+            started_at: jiff::Timestamp::now(),
+            item,
+            seq,
+            source: prepared.source.clone(),
+        });
+        Ok(())
     }
 
     /// Pauses.
@@ -306,6 +427,13 @@ impl Player {
     /// # Errors
     /// If the next track cannot be played.
     pub async fn next(&mut self) -> Result<bool> {
+        if self.now_playing.is_some() {
+            if self.current_counts() {
+                self.habits.finished += 1;
+            } else {
+                self.habits.skipped += 1;
+            }
+        }
         if self.queue.next().is_none() {
             self.stop();
             return Ok(false);
@@ -322,6 +450,7 @@ impl Player {
         if self.queue.previous().is_none() {
             return Ok(false);
         }
+        self.habits.went_back += 1;
         self.start_current().await?;
         Ok(true)
     }
@@ -337,6 +466,7 @@ impl Player {
         if !self.queue.jump_to(position) {
             return Ok(false);
         }
+        self.habits.jumped += 1;
         self.start_current().await?;
         Ok(true)
     }
@@ -370,15 +500,17 @@ impl Player {
                 .as_ref()
                 .map(|engine| (engine.current_seq(), engine.finished()))
             else {
+                self.sync_plan();
                 return Ok(());
             };
 
             // — 1. Was the transition **heard**? If the engine moved on to the
             // segment we handed it ahead of time, the track has changed; the
             // audio never stopped.
-            if let Some((seq, item)) = self.prefetched.clone()
+            if let Some((seq, item, source)) = self.prefetched.clone()
                 && current_seq == Some(seq)
             {
+                self.habits.finished += 1;
                 self.finish_current_listen();
                 self.queue.advance_after_finish();
                 self.now_playing = Some(NowPlaying {
@@ -387,6 +519,7 @@ impl Player {
                     started_at: jiff::Timestamp::now(),
                     item,
                     seq,
+                    source,
                 });
                 self.prefetched = None;
             }
@@ -399,6 +532,9 @@ impl Player {
                     // Do not swallow the decoding error — carry it to diagnostics (K9).
                     tracing::warn!(error = %detail, "error while playing");
                 }
+                if self.now_playing.is_some() {
+                    self.habits.finished += 1;
+                }
                 self.finish_current_listen();
                 // If the read-ahead could not be done (a provider error, wrapping at
                 // the end of the queue) we fall back to the old way: set the engine
@@ -408,23 +544,94 @@ impl Player {
                 }
                 self.engine = None;
                 self.prefetched = None;
+                self.sync_plan();
                 return Ok(());
             }
 
-            // — 3. Decode the next one ahead of time (where gapless happens).
-            self.prefetch_next().await;
+            // — 3. None of this waits (D-077): the plan goes to the read-ahead
+            // thread, the next track goes to the engine once it is ready, and a
+            // stream whose address went stale gets a new one once it is.
+            self.sync_plan();
+            self.hand_over_next();
+            self.refresh_stale_streams();
         }
         Ok(())
     }
 
-    /// Hands the next track to the engine while today's is still playing
-    /// (D-024).
-    ///
-    /// An error **does not stop playback**: read-ahead is an improvement; if the
-    /// transition does not happen, `tick` carries on the old way. But the error
-    /// does not stay silent either.
+    /// Hands the read-ahead thread the tracks likely to play next, when they
+    /// changed (D-077). Nothing is planned while nothing plays.
     #[cfg(feature = "audio")]
-    async fn prefetch_next(&mut self) {
+    fn sync_plan(&mut self) {
+        let mut plan: Vec<PlanItem> = Vec::new();
+        if self.engine.is_some() {
+            let position = self.queue.position();
+            // Repeat one plays the same track again when it ends: that one is
+            // the likeliest, then what "next" would play.
+            if self.queue.repeat() == super::queue::RepeatMode::One
+                && let Some(current) = self.queue.current()
+            {
+                plan.push(PlanItem {
+                    item: current.clone(),
+                    index: position,
+                    reason: PlanReason::Again,
+                    why: None,
+                });
+            }
+            let reasons = [PlanReason::Next, PlanReason::AfterNext];
+            plan.extend(
+                self.queue
+                    .upcoming(reasons.len())
+                    .into_iter()
+                    .zip(reasons)
+                    .enumerate()
+                    .map(|(step, (item, reason))| PlanItem {
+                        item: item.clone(),
+                        index: position + 1 + step,
+                        reason,
+                        why: None,
+                    }),
+            );
+            // The third: guessed from how the user listens (D-077).
+            if plan.len() < prefetch::PLAN_DEPTH {
+                let order = self.queue.items();
+                if let Some(pick) =
+                    prefetch::likely::third(&order, position, &self.history, self.habits)
+                    && let Some(item) = order.get(pick.index)
+                    && !plan.iter().any(|planned| planned.item.id == item.id)
+                {
+                    plan.push(PlanItem {
+                        item: item.clone(),
+                        index: pick.index,
+                        reason: PlanReason::Likely,
+                        why: Some(pick.why),
+                    });
+                }
+            }
+            plan.truncate(prefetch::PLAN_DEPTH);
+        }
+        let stamp = (
+            plan.iter().map(|planned| planned.item.id.clone()).collect(),
+            self.queue.position(),
+        );
+        if self.planned.as_ref() == Some(&stamp) {
+            return;
+        }
+        if plan.is_empty() && self.prefetch.is_none() {
+            return;
+        }
+        let prefetch = self.prefetch.get_or_insert_with(Prefetcher::new);
+        if let Some(now) = &self.now_playing {
+            prefetch.remember(&now.item.id, &now.source);
+        }
+        prefetch.plan(plan, self.providers.clone());
+        self.planned = Some(stamp);
+    }
+
+    /// Hands the next track to the engine while today's is still playing
+    /// (D-024) — once the read-ahead thread has it ready, never by waiting
+    /// for it here (D-077).
+    #[cfg(feature = "audio")]
+    fn hand_over_next(&mut self) {
         if self.prefetched.is_some() {
             return;
         }
@@ -436,21 +643,44 @@ impl Player {
         let Some(item) = self.queue.peek_after_finish().cloned() else {
             return;
         };
+        let Some(prepared) = self.prefetch.as_ref().and_then(|p| p.ready(&item.id)) else {
+            return;
+        };
+        let seq = engine.enqueue_from(&prepared.source, prepared.head.clone());
+        self.prefetched = Some((seq, item, prepared.source));
+    }
 
-        match self.resolve_source(&item.id).await {
-            Ok(source) => {
-                if let Some(engine) = &self.engine {
-                    let seq = engine.enqueue(&source);
-                    self.prefetched = Some((seq, item));
+    /// A stream begun from its head whose address no longer answers asks for
+    /// a new one (D-077): the read-ahead thread resolves it before anything
+    /// else, and it is handed over the round it is ready. The head plays
+    /// meanwhile.
+    #[cfg(feature = "audio")]
+    fn refresh_stale_streams(&mut self) {
+        let Some(engine) = &self.engine else { return };
+        let wanting = engine.wanting_address();
+        self.refreshing.retain(|(seq, ..)| wanting.contains(seq));
+        let Some(prefetch) = &self.prefetch else {
+            return;
+        };
+        for seq in wanting {
+            if let Some((_, item, since)) = self.refreshing.iter().find(|(kept, ..)| *kept == seq) {
+                if let Some(source) = prefetch.resolved_since(&item.id, *since)
+                    && engine.give_address(seq, &source)
+                {
+                    tracing::info!(
+                        track = item.track.display_name(),
+                        "a stream got a new address"
+                    );
                 }
+                continue;
             }
-            Err(err) => {
-                tracing::warn!(
-                    track = item.track.display_name(),
-                    error = %err.chain_text().replace('\n', " "),
-                    "the next track could not be decoded ahead of time; there may be a gap at the transition"
-                );
-            }
+            let item = match (&self.now_playing, &self.prefetched) {
+                (Some(now), _) if now.seq == seq => now.item.clone(),
+                (_, Some((handed, item, _))) if *handed == seq => item.clone(),
+                _ => continue,
+            };
+            prefetch.refresh(&item);
+            self.refreshing.push((seq, item, std::time::Instant::now()));
         }
     }
 
@@ -540,7 +770,9 @@ pub fn with_provider(provider: Arc<dyn Provider>) -> Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ProviderFuture, ProviderHealth, ProviderInfo, ProviderTrack};
+    use crate::provider::{
+        Capabilities, ProviderFuture, ProviderHealth, ProviderInfo, ProviderTrack,
+    };
 
     /// A fake provider without the capability: no `STREAM`.
     struct ControlOnlyProvider;
@@ -639,6 +871,10 @@ mod tests {
             provider: ProviderId::new("local"),
             #[cfg(feature = "audio")]
             seq: 0,
+            #[cfg(feature = "audio")]
+            source: AudioSource::LocalFile {
+                path: std::path::PathBuf::from("x"),
+            },
         });
         player.finish_current_listen();
         assert!(

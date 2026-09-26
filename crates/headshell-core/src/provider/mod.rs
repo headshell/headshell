@@ -148,6 +148,32 @@ pub enum AudioSource {
 /// learn two paths.
 pub use crate::net::HttpHeader;
 
+/// Calls made **ahead of time** (D-077): reading the queue ahead, covers.
+///
+/// A provider that does one call at a time — a plugin's engine — puts a
+/// call made on the user's behalf first, and stops a tool a call made ahead
+/// of time is running for it. Which one a call is, is a property of the
+/// thread it is made on: the background workers mark their threads once,
+/// and nothing in the provider's signature has to carry it.
+pub(crate) mod ahead_of_time {
+    use std::cell::Cell;
+
+    thread_local! {
+        static MARKED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Marks the calling thread: every provider call made on it from now
+    /// on is made ahead of time.
+    pub(crate) fn mark_this_thread() {
+        MARKED.with(|marked| marked.set(true));
+    }
+
+    /// Is the calling thread a background worker's.
+    pub(crate) fn on_this_thread() -> bool {
+        MARKED.with(Cell::get)
+    }
+}
+
 /// A track returned by a provider.
 ///
 /// [`TrackRef`] metadata + the provider's own id. The canonical identity is

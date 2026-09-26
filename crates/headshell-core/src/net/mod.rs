@@ -420,6 +420,59 @@ pub(crate) fn without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
+/// The first bytes of an audio stream, fetched before the track is asked
+/// for (D-077), and the stream's whole length as the server stated it.
+///
+/// Only a stream the server cut as a range is kept this way: the rest is
+/// fetched later from where the head ends, and two bodies that were not cut
+/// from the same file cannot be joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamHead {
+    pub bytes: Vec<u8>,
+    /// The whole stream's length, from the head's `Content-Range`.
+    pub total: u64,
+}
+
+/// The headers with `Range` set to `value`, whatever `Range` they carried.
+///
+/// A plugin may hand its stream over with a `Range` of its own (YouTube's
+/// `bytes=0-`, D-048); fetching a head or the rest after it has to ask for
+/// its own range instead.
+#[cfg(feature = "http-client")]
+#[must_use]
+pub(crate) fn with_range(headers: &[HttpHeader], value: &str) -> Vec<HttpHeader> {
+    let mut out: Vec<HttpHeader> = headers
+        .iter()
+        .filter(|header| !header.name.eq_ignore_ascii_case("range"))
+        .cloned()
+        .collect();
+    out.push(HttpHeader::new("Range", value));
+    out
+}
+
+/// Reads `Content-Range: bytes <start>-<end>/<total>`.
+///
+/// Returns the first byte, the last byte and the total; the total is `None`
+/// when the server wrote `*`. Anything else — another unit, an unsatisfied
+/// range (`*/<total>`), a last byte before the first — is `None`.
+#[cfg(feature = "http-client")]
+#[must_use]
+pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    let (range, total) = rest.split_once('/')?;
+    let (start, end) = range.trim().split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let end = end.trim().parse::<u64>().ok()?;
+    if end < start {
+        return None;
+    }
+    let total = match total.trim() {
+        "*" => None,
+        text => Some(text.parse::<u64>().ok()?),
+    };
+    Some((start, end, total))
+}
+
 #[cfg(test)]
 pub(crate) mod fake;
 
@@ -438,6 +491,43 @@ mod tests {
             "https://cf-media.sndcdn.com/x.mp3"
         );
         assert_eq!(without_query("http://ev/rest/ping"), "http://ev/rest/ping");
+    }
+
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn a_content_range_gives_its_first_byte_last_byte_and_total() {
+        assert_eq!(
+            parse_content_range("bytes 0-524287/7570557"),
+            Some((0, 524_287, Some(7_570_557)))
+        );
+        assert_eq!(
+            parse_content_range("bytes 524288-7570556/*"),
+            Some((524_288, 7_570_556, None))
+        );
+        // An unsatisfied range, another unit, a backwards range: none is a range.
+        assert_eq!(parse_content_range("bytes */7570557"), None);
+        assert_eq!(parse_content_range("items 0-9/10"), None);
+        assert_eq!(parse_content_range("bytes 10-9/20"), None);
+        assert_eq!(parse_content_range("bytes 0-9/lots"), None);
+    }
+
+    /// The plugin's own `Range` (YouTube's `bytes=0-`) gives way to the one
+    /// asked for; the other headers stay.
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn asking_for_a_range_replaces_the_range_the_source_carried() {
+        let headers = vec![
+            HttpHeader::new("range", "bytes=0-"),
+            HttpHeader::new("Authorization", "MediaBrowser Token=x"),
+        ];
+        let out = with_range(&headers, "bytes=100-");
+        assert_eq!(
+            out,
+            vec![
+                HttpHeader::new("Authorization", "MediaBrowser Token=x"),
+                HttpHeader::new("Range", "bytes=100-"),
+            ]
+        );
     }
 
     #[test]

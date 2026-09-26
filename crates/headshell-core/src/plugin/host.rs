@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::Opt;
@@ -57,6 +58,9 @@ const MAX_REDIRECTS: usize = 5;
 /// exceeded, the write is **refused** and old values are not silently
 /// dropped.
 const STORAGE_LIMIT: usize = 1024 * 1024;
+
+/// What a call made ahead of time is told when it has to give way (D-077).
+pub(crate) const GAVE_WAY: &str = "a call made ahead of time gave way to one the user asked for";
 
 /// The most bytes taken from a tool's stdout/stderr.
 ///
@@ -83,6 +87,8 @@ pub(crate) struct HostState {
     loading: Cell<bool>,
     storage: RefCell<Option<BTreeMap<String, String>>>,
     secret_files: RefCell<BTreeMap<String, PathBuf>>,
+    /// The running call's stop flag, when it was made ahead of time (D-077).
+    cancel: RefCell<Option<Arc<AtomicBool>>>,
 }
 
 impl HostState {
@@ -100,6 +106,7 @@ impl HostState {
             loading: Cell::new(false),
             storage: RefCell::new(None),
             secret_files: RefCell::new(BTreeMap::new()),
+            cancel: RefCell::new(None),
         }
     }
 
@@ -113,6 +120,25 @@ impl HostState {
 
     pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
         self.deadline.set(deadline);
+    }
+
+    /// The running call's stop flag (D-077); `None` for a call made on the
+    /// user's behalf, which nothing stops.
+    pub(crate) fn set_cancel(&self, cancel: Option<Arc<AtomicBool>>) {
+        *self.cancel.borrow_mut() = cancel;
+    }
+
+    /// Was the running call — one made ahead of time — asked to give way.
+    fn stop_asked(&self) -> std::result::Result<(), String> {
+        let asked = self
+            .cancel
+            .borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        if asked {
+            return Err(GAVE_WAY.to_owned());
+        }
+        Ok(())
     }
 
     /// The call's remaining time; if it ran out, why.
@@ -176,6 +202,7 @@ impl HostState {
                 return Err(reason);
             }
             self.remaining()?;
+            self.stop_asked()?;
 
             let request = HttpRequest {
                 method,
@@ -388,6 +415,7 @@ impl HostState {
         options: ToolOptions,
     ) -> std::result::Result<serde_json::Value, String> {
         self.forbid_while_loading("running tools")?;
+        self.stop_asked()?;
         let path = self.tool_path(name)?;
         let remaining = self.remaining()?;
         let budget = options
@@ -420,6 +448,13 @@ impl HostState {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
+                // A call made ahead of time gives way: the tool is stopped the
+                // same way a timed-out one is (D-077).
+                Ok(None) if self.stop_asked().is_err() => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{name} was stopped: {GAVE_WAY}"));
+                }
                 Ok(None) if started.elapsed() >= budget => {
                     let _ = child.kill();
                     let _ = child.wait();

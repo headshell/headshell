@@ -185,6 +185,9 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::artwork,
             commands::artwork_queue,
             commands::artwork_images,
+            // Reading ahead (D-077)
+            commands::prefetch,
+            commands::prefetch_queue,
             // Plugins and secrets (the Phase 2 surface)
             commands::plugins,
             commands::plugin_approve,

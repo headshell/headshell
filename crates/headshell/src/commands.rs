@@ -26,7 +26,7 @@ use headshell_core::artwork::{ArtworkKey, ArtworkPicture, ArtworkReport, Artwork
 use headshell_core::diag::Stage;
 use headshell_core::ids::ProviderId;
 use headshell_core::model::PlayRule;
-use headshell_core::playback::{PlaybackAnchor, QueueView, RepeatMode};
+use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueView, RepeatMode};
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::session::{
     self, ArtworkRequest, ImportReport, LookupMode, PlayOptions, PluginCatalogReport,
@@ -533,6 +533,41 @@ pub async fn artwork_images(
         .collect::<CommandResult<Vec<_>>>()?;
     state
         .run_on_core(move |core| Box::pin(async move { core.live.artwork_images(&keys, variant) }))
+        .await
+}
+
+// ————————————————————————————————————— Reading ahead (D-077)
+//
+// `prefetch` is `headshell prefetch`: the first tracks a query finds, made
+// ready one after another. `prefetch_queue` is the playing queue's side: what
+// the core's read-ahead thread has made ready, and how its session went.
+
+#[tauri::command]
+pub async fn prefetch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: String,
+    all: bool,
+) -> CommandResult<PrefetchReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let task = core
+                    .live
+                    .session_mut()
+                    .prefetch(&core.registry, &query, all);
+                busy(&app, "making tracks ready", task).await
+            })
+        })
+        .await
+}
+
+/// The playing queue's read-ahead: the tracks planned, where each stands,
+/// and the session's counts.
+#[tauri::command]
+pub async fn prefetch_queue(state: State<'_, AppState>) -> CommandResult<PrefetchReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.prefetch_report() }))
         .await
 }
 

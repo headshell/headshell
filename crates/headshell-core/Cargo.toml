@@ -78,6 +78,12 @@ required-features = ["http-client", "audio"]
 name = "playback_probe"
 required-features = ["audio"]
 
+# How long the user waits — play to sound, next to sound — and how long a round
+# of `tick` holds its thread (D-077).
+[[example]]
+name = "latency_probe"
+required-features = ["audio", "http-client", "plugin-engine"]
+
 # For seeing the fingerprint string that goes to AcoustID with your own eyes (D-046).
 [[example]]
 name = "fingerprint_probe"

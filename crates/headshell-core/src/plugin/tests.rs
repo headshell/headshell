@@ -267,6 +267,70 @@ fn block_on_waits_for_a_future_that_is_not_ready_on_the_first_poll() {
     assert_eq!(block_on(Later(false)), 7);
 }
 
+// --- the order of calls (D-077) ---------------------------------------------
+
+/// A call for the user arriving while one made ahead of time holds the
+/// engine raises that call's stop flag, and gets the engine when it ends.
+#[test]
+fn a_call_for_the_user_asks_the_running_call_made_ahead_of_time_to_give_way() {
+    let gate = Arc::new(Gate::default());
+    let ahead = gate.enter(true).expect("a turn");
+    let flag = Arc::clone(
+        ahead
+            .cancel
+            .as_ref()
+            .expect("a call made ahead of time can be stopped"),
+    );
+
+    let user = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            let turn = gate.enter(false).expect("a turn");
+            assert!(turn.cancel.is_none(), "nothing stops a call for the user");
+        })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !flag.load(std::sync::atomic::Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        flag.load(std::sync::atomic::Ordering::Acquire),
+        "the running call must be asked to give way"
+    );
+    drop(ahead);
+    user.join().unwrap();
+}
+
+/// A call made ahead of time does not take the engine while a call for the
+/// user is waiting for it, even if it asked first.
+#[test]
+fn a_call_made_ahead_of_time_waits_behind_every_call_for_the_user() {
+    let gate = Arc::new(Gate::default());
+    let first = gate.enter(false).expect("a turn");
+    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let ahead = {
+        let (gate, order) = (Arc::clone(&gate), Arc::clone(&order));
+        std::thread::spawn(move || {
+            let _turn = gate.enter(true).expect("a turn");
+            order.lock().unwrap().push("ahead");
+        })
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let user = {
+        let (gate, order) = (Arc::clone(&gate), Arc::clone(&order));
+        std::thread::spawn(move || {
+            let _turn = gate.enter(false).expect("a turn");
+            order.lock().unwrap().push("user");
+        })
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    drop(first);
+    user.join().unwrap();
+    ahead.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), vec!["user", "ahead"]);
+}
+
 // --- engine ---------------------------------------------------------------
 
 #[cfg(feature = "plugin-engine")]
@@ -275,6 +339,10 @@ mod engine {
     use crate::net::fake::FakeHttp;
 
     const CALL: Duration = Duration::from_secs(5);
+
+    /// The query that makes the give-way scripts run their slow tool.
+    #[cfg(any(unix, windows))]
+    const SLOW_QUERY: &str = "slow";
 
     /// Writes the script and the manifest, sets up the provider with a fake
     /// network.
@@ -316,6 +384,43 @@ mod engine {
 
     fn track_id(id: &str) -> ProviderTrackId {
         ProviderTrackId::new(ProviderId::new("demo"), id)
+    }
+
+    /// Starts `search("slow")` ahead of time on a background thread, then
+    /// searches for the user: the user's search must answer at once, and the
+    /// one made ahead of time must end as "gave way" (D-077).
+    #[cfg(any(unix, windows))]
+    async fn gives_way(provider: PluginProvider) {
+        let provider = Arc::new(provider);
+        let background = {
+            let provider = Arc::clone(&provider);
+            std::thread::spawn(move || {
+                crate::provider::ahead_of_time::mark_this_thread();
+                let started = std::time::Instant::now();
+                let outcome = crate::plugin::block_on(provider.search(SLOW_QUERY, 1));
+                (outcome, started.elapsed())
+            })
+        };
+        // Long enough for the tool to be running.
+        std::thread::sleep(Duration::from_millis(700));
+
+        let started = std::time::Instant::now();
+        let tracks = provider.search("for the user", 1).await.unwrap();
+        let user_waited = started.elapsed();
+        assert_eq!(tracks[0].track.artist, "user");
+        assert!(
+            user_waited < Duration::from_secs(2),
+            "the user waited for the tool run ahead of time: {user_waited:?}"
+        );
+
+        let (outcome, took) = background.join().unwrap();
+        let err = outcome.expect_err("the call made ahead of time was stopped");
+        assert!(
+            matches!(err.kind(), ErrorKind::PluginPreempted { .. }),
+            "{}",
+            err.chain_text()
+        );
+        assert!(took < Duration::from_secs(3), "{took:?}");
     }
 
     const BASIC: &str = r#"
@@ -1001,6 +1106,19 @@ mod engine {
             }
         "#;
 
+        /// Runs the slow tool with a budget longer than it takes, so only
+        /// giving way can stop it; any other query answers at once.
+        const PATIENT: &str = r#"
+            export function health() { return { reachable: true }; }
+            export function search(q) {
+                if (q === "slow") {
+                    const r = host.tools.run("slow", [], { timeoutMs: 8000 });
+                    return [{ id: String(r.code), artist: "slow", title: "done" }];
+                }
+                return [{ id: "1", artist: "user", title: q }];
+            }
+        "#;
+
         #[tokio::test]
         async fn a_declared_installed_tool_runs_and_its_output_comes_back() {
             let rig = Rig::new(
@@ -1046,6 +1164,21 @@ mod engine {
                 "{}",
                 err.chain_text()
             );
+        }
+
+        /// D-077: a tool run by a call made ahead of time is stopped when a
+        /// call for the user needs the engine — the user does not wait for
+        /// the rest of it — and the call made ahead of time says it gave way,
+        /// not that the track failed.
+        #[tokio::test]
+        async fn a_tool_run_ahead_of_time_is_stopped_for_a_call_for_the_user() {
+            let rig = Rig::new(
+                "gives-way",
+                &manifest(&sha256_hex(TOOL.as_bytes()), &sha256_hex(SLOW.as_bytes())),
+                PATIENT,
+            );
+            install(&rig, "slow", SLOW);
+            gives_way(rig.provider()).await;
         }
 
         #[tokio::test]
@@ -1179,6 +1312,28 @@ mod engine {
                 "{}",
                 err.chain_text()
             );
+        }
+
+        /// D-077, as on Unix: a call for the user stops a tool run ahead of
+        /// time.
+        #[tokio::test]
+        async fn a_tool_run_ahead_of_time_is_stopped_for_a_call_for_the_user() {
+            let rig = rig("gives-way-win");
+            std::fs::write(
+                rig.dir.join("main.js"),
+                r#"
+                export function health() { return { reachable: true }; }
+                export function search(q) {
+                    if (q === "slow") {
+                        const r = host.tools.run("tool", ["/D", "/C", "ping -n 6 127.0.0.1 >nul"], { timeoutMs: 8000 });
+                        return [{ id: String(r.code), artist: "slow", title: "done" }];
+                    }
+                    return [{ id: "1", artist: "user", title: q }];
+                }
+            "#,
+            )
+            .unwrap();
+            gives_way(rig.provider()).await;
         }
 
         #[tokio::test]

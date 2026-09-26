@@ -27,6 +27,8 @@ pub mod engine;
 pub mod http_source;
 pub mod live;
 pub mod player;
+/// Reading the queue ahead (D-077).
+pub mod prefetch;
 pub mod queue;
 
 pub use anchor::{PlayState, PlaybackAnchor};
@@ -34,4 +36,8 @@ pub use anchor::{PlayState, PlaybackAnchor};
 pub use engine::AudioEngine;
 pub use live::{LiveSession, TickReport};
 pub use player::Player;
+pub use prefetch::{
+    Habits, PlanReason, PrefetchCounters, PrefetchItem, PrefetchReport, PrefetchStatus,
+    PrefetchSummary,
+};
 pub use queue::{Queue, QueueItem, QueueView, RepeatMode};

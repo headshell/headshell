@@ -98,7 +98,7 @@ headshell/
 │   │   │   ├── library/        # SQLite + FTS
 │   │   │   ├── provider/       # provider traits + local + remote/{subsonic,jellyfin}
 │   │   │   ├── plugin/         # QuickJS engine (script) + host gates + artifacts + catalog
-│   │   │   ├── playback/       # symphonia + cpal
+│   │   │   ├── playback/       # symphonia + cpal, reading the queue ahead
 │   │   │   ├── net/            # HTTP trait + ureq client + fake
 │   │   │   ├── diag/           # diagnostics, see below
 │   │   │   └── session.rs      # the outward command surface (Session)
@@ -177,6 +177,7 @@ headshell import <zip|dir>                       # import an export
 headshell stats [--year N] [--top N] [--min-ms MS]
 headshell resolve "<artist> - <title>" | --file <audio>
 headshell artwork "<query>" [--all] | --file <audio> [--out <dir>]
+headshell prefetch "<query>" [--all]
 headshell library search <query> [--limit N] [--min-ms MS]
 headshell sleeve [--year N] [--out <file>] [--format square|story]
 headshell provider list | test <name> | scan [--if-stale]
