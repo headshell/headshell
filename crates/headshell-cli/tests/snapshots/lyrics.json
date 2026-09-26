@@ -1,0 +1,98 @@
+{
+  "diag": {
+    "command": "<variable>",
+    "counters": {
+      "lyrics.closest": 0,
+      "lyrics.failed": 0,
+      "lyrics.found": 4,
+      "lyrics.instrumental": 0,
+      "lyrics.not_found": 0,
+      "lyrics.synced": 3,
+      "lyrics.tracks": 4
+    },
+    "env": {
+      "arch": "<variable>",
+      "data_dir": "<variable>",
+      "headshell_version": "<variable>",
+      "os": "<variable>"
+    },
+    "error_chain": [],
+    "failed_at": null,
+    "finished_at": "<variable>",
+    "notes": [],
+    "started_at": "<variable>"
+  },
+  "items": [
+    {
+      "album": "Made-up Words",
+      "artist": "Lyric Artist",
+      "duration_ms": 1000,
+      "fit": "own",
+      "index": 0,
+      "key": "<variable>",
+      "offset_ms": 0,
+      "provider": "local",
+      "source": "<variable>",
+      "status": "found",
+      "synced": true,
+      "title": "Sidecar"
+    },
+    {
+      "album": "Made-up Words",
+      "artist": "Lyric Artist",
+      "duration_ms": 1000,
+      "fit": "own",
+      "index": 1,
+      "key": "<variable>",
+      "offset_ms": 0,
+      "provider": "local",
+      "source": "<variable>",
+      "status": "found",
+      "synced": true,
+      "title": "Flac Lrc"
+    },
+    {
+      "album": "Made-up Words",
+      "artist": "Lyric Artist",
+      "duration_ms": 2000,
+      "fit": "own",
+      "index": 2,
+      "key": "<variable>",
+      "offset_ms": 0,
+      "provider": "local",
+      "source": "<variable>",
+      "status": "found",
+      "synced": true,
+      "title": "Mp3 Sylt"
+    },
+    {
+      "album": "Made-up Words",
+      "artist": "Lyric Artist",
+      "duration_ms": 2000,
+      "fit": "own",
+      "index": 3,
+      "key": "<variable>",
+      "offset_ms": 0,
+      "provider": "local",
+      "source": "<variable>",
+      "status": "found",
+      "synced": false,
+      "title": "Mp3 Uslt"
+    }
+  ],
+  "subject": "<variable>",
+  "summary": {
+    "closest": 0,
+    "embedded": 3,
+    "failed": 0,
+    "instrumental": 0,
+    "lrclib": 0,
+    "not_found": 0,
+    "not_requested": 0,
+    "pending": 0,
+    "provider": 0,
+    "sidecar": 1,
+    "synced": 3,
+    "tracks": 4
+  }
+}

@@ -2,8 +2,9 @@
   "name": "echo",
   "display_name": "Echo (test)",
   "version": "0.2.0",
-  "api": 3,
+  "api": 4,
   "artwork": true,
+  "lyrics": true,
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {

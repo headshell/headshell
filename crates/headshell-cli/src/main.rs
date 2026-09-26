@@ -126,6 +126,28 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Find the lyrics of the tracks a play query finds (D-078): the file's
+    /// `.lrc` and tags, the server or plugin, then LRCLIB — its version of the
+    /// recording's length, or the nearest one, marked. Running this is
+    /// asking for lyrics: LRCLIB is asked without `--online`.
+    Lyrics {
+        /// The play query: the tracks it finds, in play order.
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        query: Option<String>,
+        /// Every matching track instead of the first.
+        #[arg(long)]
+        all: bool,
+        /// An audio file instead of a query.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Print the lyrics themselves, with the time of each line.
+        #[arg(long)]
+        print: bool,
+        /// Keep a shift for the tracks found, in milliseconds: positive, the
+        /// lines come sooner; 0 takes it back.
+        #[arg(long, value_name = "MS", allow_hyphen_values = true)]
+        shift: Option<i64>,
+    },
     /// Make the first tracks a play query finds ready ahead of time (D-077):
     /// the track `play` would start and the two after it — each one's address
     /// resolved and the first bytes of its stream fetched — and say how long
@@ -475,6 +497,28 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                 *succeeded = false;
             }
             render(cli.json, &report, || output::artwork(&report))
+        }
+        Command::Lyrics {
+            query,
+            all,
+            file,
+            print,
+            shift,
+        } => {
+            let registry = provider::default_registry(session.config())?;
+            let request = session::LyricsRequest {
+                query: query.clone(),
+                all: *all,
+                file: file.clone(),
+                print: *print,
+                shift_ms: *shift,
+            };
+            let report = session.lyrics(&registry, request).await?;
+            // Not found is an answer; a link that failed is a partial failure.
+            if report.summary.failed > 0 {
+                *succeeded = false;
+            }
+            render(cli.json, &report, || output::lyrics(&report))
         }
         Command::Prefetch { query, all } => {
             let registry = provider::default_registry(session.config())?;

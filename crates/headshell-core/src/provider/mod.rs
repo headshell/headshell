@@ -60,6 +60,8 @@ impl Capabilities {
     pub const CONTROL: Self = Self(1 << 3);
     /// Can hand over a track's cover art (D-076).
     pub const ARTWORK: Self = Self(1 << 4);
+    /// Can hand over a track's lyrics (D-078).
+    pub const LYRICS: Self = Self(1 << 5);
 
     /// No capability at all.
     pub const NONE: Self = Self(0);
@@ -95,6 +97,7 @@ impl Capabilities {
             (Self::STREAM, "STREAM"),
             (Self::CONTROL, "CONTROL"),
             (Self::ARTWORK, "ARTWORK"),
+            (Self::LYRICS, "LYRICS"),
         ];
         let names: Vec<&str> = all
             .iter()
@@ -196,6 +199,20 @@ pub struct ArtworkImage {
     /// Where the provider found it. The summary counts a picture in the
     /// file's tags apart from one in its folder and one a server sent (K9).
     pub source: crate::artwork::ArtworkSource,
+}
+
+/// A track's lyrics as the provider hands them over (D-078): parsed, but not
+/// yet weighed against the other links of the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLyrics {
+    /// The lines; synced when the provider knows when each is sung.
+    pub lyrics: crate::lyrics::Lyrics,
+    /// The provider says the track has no words. The lines are empty then.
+    pub instrumental: bool,
+    /// Where it found them: a `.lrc` next to the file, the file's tags, or
+    /// the server or plugin itself. The chain treats the file's own lyrics
+    /// apart — they win even unsynced (D-078).
+    pub source: crate::lyrics::LyricsSource,
 }
 
 /// A provider's identity and capabilities.
@@ -305,6 +322,33 @@ pub trait Provider: Send + Sync {
                 capabilities: info.capabilities.describe(),
             },
         ))))
+    }
+
+    /// The provider's own lyrics for a track (D-078). Needs the `LYRICS`
+    /// flag.
+    ///
+    /// `Ok(None)`: this provider has no lyrics for the track — "I looked,
+    /// there are none". Without the flag the default returns `Unsupported`,
+    /// because "I can't" is a different answer (K9).
+    fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
+        let _ = id;
+        let info = self.info();
+        Box::pin(std::future::ready(Err(crate::Error::new(
+            crate::diag::Stage::LyricsRead,
+            crate::error::ErrorKind::Unsupported {
+                provider: info.id.as_str().to_owned(),
+                what: "lyrics".to_owned(),
+                capabilities: info.capabilities.describe(),
+            },
+        ))))
+    }
+
+    /// Is this a plugin — a provider whose tracks come from an internet
+    /// service anyway (D-078)? A plugin track's lyrics are looked up at LRCLIB
+    /// the moment it starts; a local file's and a server's only once the user
+    /// asks for lyrics. Synchronous, like [`Self::info`].
+    fn is_plugin(&self) -> bool {
+        false
     }
 }
 

@@ -90,6 +90,17 @@ pub enum Stage {
     /// The cover cache: the image files and their index in the data directory
     /// (D-076).
     ArtworkStore,
+    /// Reading lyrics from where the track lives: a `.lrc` next to the file,
+    /// the file's tags, the server or the plugin (D-078).
+    LyricsRead,
+    /// Looking lyrics up with a third party: LRCLIB (D-078).
+    ///
+    /// Separate from `LyricsRead`: "the file's `.lrc` is broken" and "LRCLIB
+    /// is busy" are different diagnoses (K9). Not reaching the network at all
+    /// stays in `NetworkRequest`.
+    LyricsLookup,
+    /// The lyrics cache and the user's shifts in the data directory (D-078).
+    LyricsStore,
 }
 
 impl Stage {
@@ -119,6 +130,9 @@ impl Stage {
             Self::ArtworkRead => "ARTWORK_READ",
             Self::ArtworkLookup => "ARTWORK_LOOKUP",
             Self::ArtworkStore => "ARTWORK_STORE",
+            Self::LyricsRead => "LYRICS_READ",
+            Self::LyricsLookup => "LYRICS_LOOKUP",
+            Self::LyricsStore => "LYRICS_STORE",
         }
     }
 }

@@ -2055,7 +2055,8 @@ Music).
    after a pause was thrown.
 
 **Not done:** cover art (a core capability — by D-033 a CLI subcommand first;
-done in §3.10), lyrics and related tracks (no data in the core), seeking and
+done in §3.10), lyrics (the same — done in §3.12) and related tracks (no data
+in the core), seeking and
 volume (§3.8).
 
 **Testing:** `motion_js.rs` +2 — the spring's linearity (the sheet, its scrim
@@ -2181,6 +2182,72 @@ played with next and previous; `headshell prefetch --json` has a snapshot.
 
 **Verification:** `examples/latency_probe.rs` in a Debian 13 container with a
 PulseAudio null sink, before and after, and the live plugin tests.
+
+### 3.12 Lyrics — DONE (D-078)
+
+**The problem:** the sheet had one list beside the record, the queue; the
+reference's lyrics tab was missing because the core had no lyrics (§3.9). The
+user's ask: synced lyrics, fetched as LRC, **for exactly the recording that
+plays**.
+
+**Done:**
+
+1. **The chain is in the core** (`lyrics/`). The file's own first — a `.lrc`
+   beside it with its name, then its tags (ID3 `SYLT`/`USLT`, Vorbis
+   `LYRICS`, MP4 `©lyr`); they win even unsynced. Then the server's or the
+   plugin's own (`Provider::lyrics`: OpenSubsonic `getLyricsBySongId`,
+   Jellyfin `/Audio/{id}/Lyrics`, a plugin's `lyrics(id)`), synced ones
+   winning. Then **LRCLIB**, chosen by the recording's length.
+2. **"Exactly the recording" is a rule, not a hope.** LRCLIB holds ten to
+   twenty timed versions of a well-known song; the one taken is synced, its
+   artist and title match, and its length is within ±2 s of the recording's
+   (the decoder's length where known) — the nearest first, the album's
+   versions only when the album has a synced one (a festival take ran the
+   album version's length to the second). Without one, the nearest synced
+   version is shown **marked**, with how far it is, and the user shifts it by
+   ±0.5 s; the shift is kept per track. Without any, unsynced words.
+3. **When LRCLIB is asked is the user's rule:** a local file's and a server's
+   track only while a lyrics view is on screen — opening it is the asking; a
+   plugin's track the moment it starts, since it plays from the internet
+   anyway. The file's and the server's own lyrics are always read. "Not
+   asked", "none" and "failed" are three answers (K9); LRCLIB busy is said,
+   after two retries.
+4. **The cache** is `<data>/lyrics/`: LRCLIB's answers (a version of the
+   length for good, anything less for 30 days) and the user's shifts.
+5. **`headshell lyrics "<query>" [--all] | --file <audio> [--print]
+   [--shift MS]`**, with `--json` and a snapshot. The desktop mirrors it as
+   `lyrics`; `lyrics_now`, `lyrics_view` and `lyrics_shift` are the playing
+   track's side, and the tick says when its answer changed.
+6. **The interface:** *up next | lyrics* tabs beside the record, and a
+   button that grows the lyrics to the whole sheet (`L`, `Esc`). The line
+   being sung is estimated every frame from the anchor (`lyrics.js`, bound to
+   the core's `line_at` by `fixtures/lyrics/line_at_cases.json`); following it
+   is one interruptible spring on the list's transform, and the user's own
+   scroll takes over at once.
+7. **Plugins, api 4:** the manifest must say `"lyrics": true|false`; a plugin
+   with `true` exports `lyrics(id)` and returns LRC text, parsed by the core's
+   own parser. The catalog's `ytmusic` 0.6.0 gives YouTube Music's own timed
+   lyrics; `soundcloud` 0.4.0 says it has none.
+
+**Not done:** word-by-word (karaoke) timing — LRCLIB's word timing comes as
+YAML, a new parser; seeking to a line with a click — the core has no seek
+(§3.8); translations; an in-app way to ask LRCLIB again for a track whose
+answer is kept (the CLI's cache lives 30 days).
+
+**Testing:** the LRC and `SYLT` readers; the version choice on real LRCLIB
+data (the festival trap fails when the album guard is taken out); LRCLIB's
+client on canned answers (the search, the exact query, a busy server); the
+chain's weighing and its network rule; the cache; the worker; the providers
+on a fake server; the echo plugin's lyrics through the engine; the fixtures'
+`.lrc`, LRC tag, `USLT` and `SYLT`; `headshell lyrics --json`; the parity set
+on both sides; every page script parsed. Live: LRCLIB, and the catalog
+plugin's lyrics (they skip without a network, D-043).
+
+**Verification:** the §3.9 container with the host's WebKitGTK and a
+PulseAudio null sink: a made-up song with a `.lrc` followed line by line, words
+without timing, a track with none, a real recording LRCLIB has at its length,
+and one it has only seconds off — marked, shifted, kept; the whole-sheet view,
+`L`, `Esc` and a hand scroll.
 
 ---
 

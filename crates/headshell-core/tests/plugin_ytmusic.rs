@@ -323,6 +323,61 @@ async fn a_song_gives_its_album_art_as_a_real_image() {
     );
 }
 
+/// A song's own lyrics come timed, line by line, with the service's credit
+/// (api 4, D-078). Measured when it was written: asked as the mobile app,
+/// YouTube Music's lyrics page carried timed lines for every song tried, from
+/// LyricFind or Musixmatch; the plugin hands them over as LRC.
+#[tokio::test]
+async fn a_song_gives_its_lyrics_timed_line_by_line() {
+    if !prerequisites_met("lyrics") {
+        return;
+    }
+    let config = temp_config("lyrics");
+    let Some(provider) = install(&config, "lyrics").await else {
+        return;
+    };
+    assert!(provider.info().capabilities.contains(Capabilities::LYRICS));
+
+    let hits = provider.search("radiohead creep", 3).await.unwrap();
+    assert!(!hits.is_empty(), "the live search came back empty");
+    let found = match provider.lyrics(&hits[0].id).await {
+        Ok(Some(found)) => found,
+        Ok(None) => panic!(
+            "no lyrics for {} ({} - {}) — the lyrics page may have moved",
+            hits[0].id, hits[0].track.artist, hits[0].track.title
+        ),
+        Err(err) => panic!("the lyrics failed:\n{}", err.chain_text()),
+    };
+    assert!(
+        found.lyrics.synced,
+        "the words came without their timing — the mobile answer may have changed"
+    );
+    assert!(
+        found.lyrics.lines.len() > 10,
+        "{} lines",
+        found.lyrics.lines.len()
+    );
+    let starts: Vec<u64> = found
+        .lyrics
+        .lines
+        .iter()
+        .filter_map(|line| line.start_ms)
+        .collect();
+    assert!(
+        starts.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the lines are not in time order"
+    );
+    assert!(
+        found
+            .lyrics
+            .attribution
+            .as_deref()
+            .is_some_and(|credit| credit.starts_with("Source:")),
+        "{:?}",
+        found.lyrics.attribution
+    );
+}
+
 /// The resolved source must carry the `Range` header that **lifts the
 /// throttling**.
 ///

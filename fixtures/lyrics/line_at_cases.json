@@ -1,0 +1,110 @@
+{
+  "description": [
+    "The accuracy set for the line being sung (D-078).",
+    "",
+    "Why it exists: the interface highlights the line being sung every frame,",
+    "from the position it estimates from the anchor — it cannot ask the core",
+    "sixty times a second. So a second copy of the rule lives in JS, and two",
+    "copies drift where nobody looks: a line lit a frame early on one side only.",
+    "",
+    "This file is the single source of truth both sides read. The Rust side:",
+    "crates/headshell-core/tests/lyrics_parity.rs (Lyrics::line_at). The JS side:",
+    "crates/headshell/tests/lyrics_parity_js.rs (crates/headshell/ui/lyrics.js in",
+    "embedded QuickJS).",
+    "",
+    "The rule: the last line whose start, minus the shift, is at or before the",
+    "position. A positive shift brings the lines sooner (the LRC convention).",
+    "expected is the line's index, or null before the first line and for",
+    "unsynced lyrics."
+  ],
+  "cases": [
+    {
+      "name": "before the first line",
+      "synced": true,
+      "starts": [1000, 5000, 9000],
+      "position_ms": 999,
+      "offset_ms": 0,
+      "expected": null
+    },
+    {
+      "name": "a line starts on its stamp",
+      "synced": true,
+      "starts": [1000, 5000, 9000],
+      "position_ms": 1000,
+      "offset_ms": 0,
+      "expected": 0
+    },
+    {
+      "name": "between two lines the earlier one is sung",
+      "synced": true,
+      "starts": [1000, 5000, 9000],
+      "position_ms": 8999,
+      "offset_ms": 0,
+      "expected": 1
+    },
+    {
+      "name": "long after the last line it stays lit",
+      "synced": true,
+      "starts": [1000, 5000, 9000],
+      "position_ms": 600000,
+      "offset_ms": 0,
+      "expected": 2
+    },
+    {
+      "name": "a positive shift brings the next line sooner",
+      "synced": true,
+      "starts": [1000, 5000],
+      "position_ms": 4500,
+      "offset_ms": 500,
+      "expected": 1
+    },
+    {
+      "name": "a negative shift holds the line back",
+      "synced": true,
+      "starts": [1000, 5000],
+      "position_ms": 5400,
+      "offset_ms": -500,
+      "expected": 0
+    },
+    {
+      "name": "a line shifted before the track's start is sung from the start",
+      "synced": true,
+      "starts": [1000, 5000],
+      "position_ms": 0,
+      "offset_ms": 2000,
+      "expected": 0
+    },
+    {
+      "name": "two lines on one stamp: the later one in order",
+      "synced": true,
+      "starts": [1000, 3000, 3000, 7000],
+      "position_ms": 3000,
+      "offset_ms": 0,
+      "expected": 2
+    },
+    {
+      "name": "the first line at zero is sung at once",
+      "synced": true,
+      "starts": [0, 21450],
+      "position_ms": 0,
+      "offset_ms": 0,
+      "expected": 0
+    },
+    {
+      "name": "no lines, no line",
+      "synced": true,
+      "starts": [],
+      "position_ms": 5000,
+      "offset_ms": 0,
+      "expected": null
+    },
+    {
+      "name": "unsynced lyrics have no line being sung",
+      "synced": false,
+      "starts": [],
+      "position_ms": 5000,
+      "offset_ms": 0,
+      "expected": null
+    }
+  ]
+}

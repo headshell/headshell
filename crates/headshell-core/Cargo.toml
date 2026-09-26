@@ -73,6 +73,12 @@ required-features = ["plugin-engine", "http-client"]
 name = "artwork_online"
 required-features = ["http-client", "audio"]
 
+# D-078: the lyrics chain against the real LRCLIB; the fixture's tags are read
+# with symphonia.
+[[test]]
+name = "lyrics_online"
+required-features = ["http-client", "audio"]
+
 # A playback probe run by hand; needs an audio device, does not run in CI.
 [[example]]
 name = "playback_probe"

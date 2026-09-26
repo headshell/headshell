@@ -18,6 +18,7 @@ use crate::artwork::{
 };
 use crate::ids::ProviderTrackId;
 use crate::library::WriteSummary;
+use crate::lyrics::{LyricsItem, LyricsKey, LyricsWorker};
 use crate::model::Listen;
 use crate::playback::{PlayState, PlaybackAnchor, Player};
 use crate::session::{LookupMode, Session};
@@ -60,6 +61,11 @@ pub struct TickReport {
     /// it shows. Empty when no cover worker runs (the TUI).
     #[serde(default)]
     pub artwork_ready: Vec<ArtworkKey>,
+    /// The playing track's lyrics changed this round (D-078): found, not
+    /// found, a new track, a shift — the interface asks `lyrics_now`. `false`
+    /// when no lyrics worker runs (the TUI).
+    #[serde(default)]
+    pub lyrics_ready: bool,
 }
 
 /// The playing session.
@@ -80,6 +86,14 @@ pub struct LiveSession {
     artwork_seen: Option<(Vec<ProviderTrackId>, usize)>,
     /// The queue whose listening history the player last got (D-077).
     history_seen: Option<Vec<ProviderTrackId>>,
+    /// The lyrics worker, if the shell started one (D-078).
+    lyrics: Option<LyricsWorker>,
+    /// The playing track last handed to it — its id and queue position —
+    /// or `Some(None)`: nothing played.
+    lyrics_seen: Option<Option<(ProviderTrackId, usize)>>,
+    /// Is the user's lyrics view open? While it is, every track's lyrics may
+    /// be looked up at LRCLIB (D-078).
+    lyrics_wanted: bool,
     /// Reads the queue ahead (D-077). The session's, not a player's: a new
     /// search replaces the player, and an address resolved for the last queue
     /// is not resolved again for this one.
@@ -105,6 +119,9 @@ impl LiveSession {
             artwork: None,
             artwork_seen: None,
             history_seen: None,
+            lyrics: None,
+            lyrics_seen: None,
+            lyrics_wanted: false,
             #[cfg(feature = "audio")]
             prefetch,
         }
@@ -201,6 +218,95 @@ impl LiveSession {
         self.worker()?.images(keys, variant)
     }
 
+    /// Starts the lyrics worker (D-078). From then on the playing track is
+    /// handed to it — at the next `tick` or call — and a change of its
+    /// answer is announced in [`TickReport::lyrics_ready`].
+    ///
+    /// Where the track lives is asked at once: its file, its server, its
+    /// plugin. LRCLIB — for a plugin's track at once, for the others only
+    /// once the lyrics view is open ([`Self::set_lyrics_wanted`]). There is
+    /// no `--online` here: the user's request is the consent (D-078).
+    ///
+    /// # Errors
+    /// If the cache directory cannot be opened or the thread cannot start.
+    pub fn start_lyrics(&mut self) -> Result<()> {
+        let links = crate::lyrics::Links::from_build(self.player.providers().clone());
+        self.lyrics = Some(LyricsWorker::spawn(
+            &self.session.config().lyrics_dir(),
+            links,
+        )?);
+        self.lyrics_seen = None;
+        Ok(())
+    }
+
+    /// Hands the playing track to the lyrics worker if it changed since the
+    /// last time.
+    fn sync_lyrics(&mut self) {
+        let Some(worker) = &self.lyrics else {
+            return;
+        };
+        let position = self.player.queue().position();
+        let playing = self.player.current_item();
+        let stamp = playing.map(|item| (item.id.clone(), position));
+        if self.lyrics_seen.as_ref() == Some(&stamp) {
+            return;
+        }
+        worker.play(
+            playing.map(|item| (item, position)),
+            self.player.anchor().duration_ms,
+            self.lyrics_wanted,
+            self.player.providers().clone(),
+        );
+        self.lyrics_seen = Some(stamp);
+    }
+
+    /// The playing track's lyrics as they stand; `None` when nothing plays.
+    ///
+    /// # Errors
+    /// If no lyrics worker runs — "not started" is not "no lyrics" (K9) — or
+    /// its lock is poisoned.
+    pub fn lyrics_now(&mut self) -> Result<Option<LyricsItem>> {
+        self.sync_lyrics();
+        self.lyrics_worker()?.current()
+    }
+
+    /// The lyrics view opened (`true`) or closed. While it is open, the
+    /// playing track's lyrics — and every next track's — may be looked up at
+    /// LRCLIB: opening it is the user asking (D-078).
+    ///
+    /// # Errors
+    /// As [`Self::lyrics_now`].
+    pub fn set_lyrics_wanted(&mut self, wanted: bool) -> Result<Option<LyricsItem>> {
+        self.lyrics_wanted = wanted;
+        self.sync_lyrics();
+        let worker = self.lyrics_worker()?;
+        if wanted {
+            worker.request();
+        }
+        worker.current()
+    }
+
+    /// Keeps the user's shift of a track's lyrics, in ms; positive, the
+    /// lines come sooner. Returns the playing track's lyrics.
+    ///
+    /// # Errors
+    /// If no lyrics worker runs, or the shift cannot be written.
+    pub fn shift_lyrics(&mut self, key: &LyricsKey, offset_ms: i64) -> Result<Option<LyricsItem>> {
+        self.sync_lyrics();
+        self.lyrics_worker()?.shift(key, offset_ms)
+    }
+
+    fn lyrics_worker(&self) -> Result<&LyricsWorker> {
+        self.lyrics.as_ref().ok_or_else(|| {
+            Error::new(
+                crate::diag::Stage::LyricsStore,
+                crate::ErrorKind::Lyrics {
+                    detail: "no lyrics worker runs in this session".to_owned(),
+                },
+            )
+        })
+    }
+
     fn worker(&self) -> Result<&ArtworkWorker> {
         self.artwork.as_ref().ok_or_else(|| {
             Error::new(
@@ -257,6 +363,7 @@ impl LiveSession {
         // The new player may carry a newer registry (a server was added):
         // the same queue is handed to the cover worker again with it.
         self.artwork_seen = None;
+        self.lyrics_seen = None;
     }
 
     /// One round: advance the player, write the accumulated listens
@@ -309,6 +416,8 @@ impl LiveSession {
             Some(worker) => worker.drain_ready(),
             None => Vec::new(),
         };
+        self.sync_lyrics();
+        let lyrics_ready = self.lyrics.as_ref().is_some_and(LyricsWorker::drain_ready);
 
         Ok(TickReport {
             anchor,
@@ -318,6 +427,7 @@ impl LiveSession {
             store_error,
             finished,
             artwork_ready,
+            lyrics_ready,
         })
     }
 
@@ -532,6 +642,27 @@ mod tests {
             1,
             "the old buffer must not be thrown away"
         );
+    }
+
+    /// D-078: "no worker was started" is not "no lyrics" (K9), and with
+    /// nothing playing the answer is `None`, whether the view is open or not.
+    #[tokio::test]
+    async fn lyrics_say_when_no_worker_runs_and_nothing_plays_is_none() {
+        let dir = temp_dir("lyrics");
+        let mut live = live_at(&dir);
+        let err = live.lyrics_now().unwrap_err();
+        assert!(
+            err.chain_text().contains("no lyrics worker"),
+            "{}",
+            err.chain_text()
+        );
+
+        live.start_lyrics().unwrap();
+        assert_eq!(live.lyrics_now().unwrap(), None);
+        assert_eq!(live.set_lyrics_wanted(true).unwrap(), None);
+        let report = live.tick().await.unwrap();
+        assert!(report.finished);
+        assert_eq!(live.set_lyrics_wanted(false).unwrap(), None);
     }
 
     #[test]

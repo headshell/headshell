@@ -257,6 +257,17 @@ export function presentation(el, prop) {
   return bodyOf(el).values[prop];
 }
 
+/// Moves the on-screen value by `delta`, and nothing else: a running spring
+/// keeps its target and its velocity. For when the ground under an element
+/// moves — the lyrics' scroll position jumps and a transform takes the jump
+/// back (D-078) — and a motion under way must carry on from where it is seen,
+/// not restart from rest.
+export function rebase(el, prop, delta) {
+  const body = bodyOf(el);
+  body.values[prop] += delta;
+  write(body);
+}
+
 /// Takes properties to their target on a spring.
 ///
 /// Options: `from` (the start — the on-screen value if not given), `velocity`

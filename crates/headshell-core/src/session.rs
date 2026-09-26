@@ -16,7 +16,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::identity::{
     FingerprintLookup, MetadataLookup, OfflineLookup, Resolution, ResolveSummary, Resolver,
 };
-use crate::ids::ProviderId;
+use crate::ids::{ProviderId, ProviderTrackId};
 use crate::import::{self, ImportSummary};
 use crate::library::{
     CatalogStore, CatalogTrack, CatalogWriteSummary, ListenStore, SearchHit, SqliteLibrary,
@@ -389,6 +389,23 @@ pub struct ArtworkRequest {
     pub file: Option<std::path::PathBuf>,
     /// A directory to write the covers to (`--out`): one image per album.
     pub out: Option<std::path::PathBuf>,
+}
+
+/// What `headshell lyrics` looks at (D-078).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LyricsRequest {
+    /// A play query: the lyrics of the tracks it finds, in play order.
+    pub query: Option<String>,
+    /// Every match instead of the first (`--all`).
+    pub all: bool,
+    /// A file on disk instead of a query (`--file`): its `.lrc` and its tags,
+    /// then LRCLIB.
+    pub file: Option<std::path::PathBuf>,
+    /// Put the lyrics themselves into the report (`--print`).
+    pub print: bool,
+    /// Keep this shift for every track the report names (`--shift`), in ms;
+    /// positive, the lines come sooner. `0` takes a shift back.
+    pub shift_ms: Option<i64>,
 }
 
 /// The result of a play command.
@@ -1504,6 +1521,148 @@ impl Session {
                 written,
                 diag: Some(diag),
             }
+        })
+    }
+
+    /// The lyrics of the tracks a query finds — or of a file — walked
+    /// through the chain in play order, waiting for each (D-078). The
+    /// command is the user asking: LRCLIB is asked for every track whose
+    /// own lyrics do not settle it, as the lyrics view asks for the playing
+    /// one.
+    ///
+    /// # Errors
+    /// If neither a query nor a file is given, nothing matches the query, the
+    /// file's tags cannot be read for its metadata, or the cache cannot be
+    /// opened or the shift written. Lyrics not found, or a link that fails,
+    /// is not an error: it is in the report, with the reason (K9).
+    pub async fn lyrics(
+        &mut self,
+        registry: &ProviderRegistry,
+        request: LyricsRequest,
+    ) -> Result<crate::lyrics::LyricsReport> {
+        use crate::lyrics::{
+            Ask, Chain, Gathered, Links, LyricsItem, LyricsReport, LyricsSummary, cache, decide,
+        };
+
+        let subject = match (&request.file, &request.query) {
+            (Some(path), _) => path.display().to_string(),
+            (None, Some(query)) => query.clone(),
+            (None, None) => {
+                return Err(Error::new(
+                    Stage::LyricsRead,
+                    ErrorKind::InvalidInput {
+                        detail: "a query or --file must be given".to_owned(),
+                    },
+                ));
+            }
+        };
+        let mut rec = Recorder::start(
+            format!("lyrics {subject:?}"),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+
+        let result = async {
+            let store = Arc::new(std::sync::Mutex::new(cache::LyricsCache::open(
+                &self.config.lyrics_dir(),
+            )?));
+            let chain = Chain::new(Links::from_build(registry.clone()), Arc::clone(&store));
+
+            let tracks: Vec<(ProviderTrackId, TrackRef)> = match (&request.file, &request.query) {
+                (Some(path), _) => {
+                    let (track, _) = crate::provider::local::read_track(path)?;
+                    // Absolute, as the local provider names its files: a
+                    // shift kept here holds when the file plays from the
+                    // library.
+                    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+                    vec![(
+                        ProviderTrackId::new(ProviderId::new("local"), absolute.to_string_lossy()),
+                        track,
+                    )]
+                }
+                (None, Some(query)) => self
+                    .queue_from_search(
+                        registry,
+                        query,
+                        request.all,
+                        PlayOptions::new(String::new()).limit,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|item| (item.id, item.track))
+                    .collect(),
+                (None, None) => Vec::new(),
+            };
+
+            let mut items = Vec::with_capacity(tracks.len());
+            for (index, (id, track)) in tracks.iter().enumerate() {
+                let ask = Ask {
+                    id,
+                    track,
+                    duration_ms: track.duration_ms,
+                    file: request.file.as_deref(),
+                    requested: true,
+                };
+                let mut gathered = Gathered::default();
+                chain.gather(&ask, &mut gathered);
+                let outcome = decide(&gathered);
+                let mut item = LyricsItem::pending(index, id, track, track.duration_ms);
+                if let Some(shift) = request.shift_ms {
+                    store
+                        .lock()
+                        .map_err(|_| {
+                            Error::new(
+                                Stage::LyricsStore,
+                                ErrorKind::Lyrics {
+                                    detail: "the lyrics cache lock is poisoned".to_owned(),
+                                },
+                            )
+                        })?
+                        .set_offset(&item.key, shift)?;
+                }
+                item.offset_ms = chain.offset(&item.key);
+                item.status = outcome.status;
+                item.lyrics = outcome.lyrics.filter(|_| request.print);
+                item.notes = outcome.notes;
+                items.push(item);
+            }
+            Ok(items)
+        }
+        .await;
+
+        if let Ok(items) = &result {
+            let summary = LyricsSummary::of(items);
+            let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+            rec.set("lyrics.tracks", count(summary.tracks));
+            rec.set("lyrics.found", count(summary.found()));
+            rec.set("lyrics.synced", count(summary.synced));
+            rec.set("lyrics.closest", count(summary.closest));
+            rec.set("lyrics.instrumental", count(summary.instrumental));
+            rec.set("lyrics.not_found", count(summary.not_found));
+            rec.set("lyrics.failed", count(summary.failed));
+            for item in items {
+                if let crate::lyrics::LyricsStatus::Failed { chain } = &item.status {
+                    rec.note(format!(
+                        "{} — {}: {}",
+                        item.artist,
+                        item.title,
+                        chain.replace('\n', " ")
+                    ));
+                }
+                if !item.notes.is_empty() {
+                    rec.note(format!(
+                        "{} — {}: {}",
+                        item.artist,
+                        item.title,
+                        item.notes.join("; ")
+                    ));
+                }
+            }
+        }
+        self.finish(rec, result, move |items, diag| LyricsReport {
+            subject,
+            summary: LyricsSummary::of(&items),
+            items,
+            diag: Some(diag),
         })
     }
 

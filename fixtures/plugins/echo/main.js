@@ -1,5 +1,5 @@
 // The test plugin: the smallest example that implements the plugin contract
-// (api 3) **in full**. It never goes online and answers from a fixed catalog.
+// (api 4) **in full**. It never goes online and answers from a fixed catalog.
 //
 // There is no misbehaving-plugin act here — the timeout, throwing, unpermitted
 // network and missing export tests write their own small scripts. This file
@@ -69,4 +69,19 @@ export function artwork(id, size) {
     return null;
   }
   return { mime: "image/png", data: COVER };
+}
+
+// api 4: the manifest says `"lyrics": true`, so this export is required. The
+// service's own lyrics for the track: `synced` as LRC text (the core parses
+// it), `plain` for words without timing, `attribution` when the service
+// credits someone. `null` means "none" — the core then asks LRCLIB. The
+// words are made up.
+export function lyrics(id) {
+  if (id !== "track-1") {
+    return null;
+  }
+  return {
+    synced: "[00:01.00]a made-up first line\n[00:04.50]and a second one",
+    attribution: "Source: the echo test plugin",
+  };
 }

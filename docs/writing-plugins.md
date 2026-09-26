@@ -1,4 +1,4 @@
-# Writing plugins (contract api 3)
+# Writing plugins (contract api 4)
 
 `headshell` plugins are written in **JavaScript** and run in the **QuickJS**
 engine embedded in `headshell` (D-069). No Python, Node or other runtime is
@@ -21,11 +21,18 @@ Three working examples:
   write.
 - [`ytmusic/main.js`](https://github.com/headshell/plugins/blob/main/ytmusic/main.js)
   — a plugin that takes its metadata from a service and its audio from **a
-  tool the engine installs** (yt-dlp).
+  tool the engine installs** (yt-dlp), and gives timed lyrics.
 - [`fixtures/plugins/echo/main.js`](../fixtures/plugins/echo/main.js) — a test
-  plugin with a fixed catalog and a cover (~70 lines). For seeing the contract
-  bare.
+  plugin with a fixed catalog, a cover and lyrics (~90 lines). For seeing the
+  contract bare.
 
+> **If you're coming from api 3:** api 4 (D-078) adds lyrics. The manifest
+> **must** say whether the plugin gives them — `"lyrics": true` or
+> `"lyrics": false`; an api 3 manifest doesn't, so it no longer loads. With
+> `false`, raising `"api"` to `4` and adding that one line is the whole port —
+> the app then asks LRCLIB for your tracks' lyrics itself. With `true`, export
+> `lyrics(id)` (§3).
+>
 > **If you're coming from api 2:** api 3 (D-076) adds covers. The manifest
 > **must** say whether the plugin gives them — `"artwork": true` or
 > `"artwork": false`; an api 2 manifest doesn't, so it no longer loads. With
@@ -74,9 +81,10 @@ same as the directory name; if they don't match, the plugin is rejected.
 {
   "name": "soundcloud",
   "display_name": "SoundCloud",
-  "version": "0.3.0",
-  "api": 3,
+  "version": "0.4.0",
+  "api": 4,
   "artwork": true,
+  "lyrics": false,
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {
@@ -92,8 +100,9 @@ same as the directory name; if they don't match, the plugin is rejected.
 | `name` | yes | The same as the directory name. The provider ID. |
 | `display_name` | yes | The name shown to the user. |
 | `version` | yes in the catalog | The plugin's own version. Every plugin in the catalog is versioned: that is what catches an update, and the file addresses are pinned to it (§9). |
-| `api` | yes | The contract version it speaks: `3` today. |
+| `api` | yes | The contract version it speaks: `4` today. |
 | `artwork` | yes | Does the plugin give covers: `true` — it exports `artwork(id, size)` (§3) — or `false`. There is no default: a missing field is rejected, so "it gives none" is always a statement, never a guess. |
+| `lyrics` | yes | Does the plugin give lyrics: `true` — it exports `lyrics(id)` (§3) — or `false`. No default either, for the same reason. |
 | `main` | yes | The script's path relative to the plugin directory. It must be `.js` and can't leave the directory (`..` and absolute paths are rejected). |
 | `capabilities` | no | `search`, `stream`. The engine checks that the function of every declared capability is exported. |
 | `permissions.net` | no | The hosts to connect to. See §2. |
@@ -163,6 +172,7 @@ export function resolve_source(id) {
 | `search(query, limit)` | if it has the `search` capability | an array of tracks |
 | `resolve_source(id)` | if it has the `stream` capability | a source, or `null` |
 | `artwork(id, size)` | if the manifest says `"artwork": true` | a cover, or `null` |
+| `lyrics(id)` | if the manifest says `"lyrics": true` | lyrics, or `null` |
 
 The names are deliberately the same as api 1's method names and the core's
 `Provider` trait (`resolve_source`, not `resolveSource`). You can write an
@@ -230,6 +240,33 @@ video frame: return `null` rather than something that isn't a cover. Either
 way, `null` or an error, the app goes on to its own chain: a local file's tags
 and folder, and — when the user runs it online — MusicBrainz and the Cover Art
 Archive. An error is shown with its reason, as it is for the other calls.
+
+### `lyrics(id)`
+
+The service's own lyrics for one of your tracks, for the "now playing" lyrics
+view (D-078). They are the recording's own — the same item the audio comes
+from — so the app takes them over any other source, and does not measure them
+against the recording's length as it does a third party's.
+
+```js
+{ synced: "[00:12.340]first line\n[00:15.000]second line", attribution: "Source: LyricFind" }
+{ plain: "first line\nsecond line" }       // the words alone, when the timing is unknown
+{ instrumental: true }                     // the track has no words
+```
+
+- **`synced`** is LRC text: `[mm:ss.xx]` before each line, two or three
+  fraction digits. The core reads it with the same parser as a `.lrc` file, so
+  you don't write one; an empty line is a pause. `synced` without a single
+  stamp is refused with the reason — words without timing go in `plain`.
+- **`plain`** is the words, a line each. With both, `synced` is taken.
+- **`attribution`** is shown under the lyrics, when the service credits
+  someone.
+
+`null` means "this track has none". Either way, `null`, unsynced words or an
+error, the app can still ask LRCLIB for a synced version of the recording's
+length — for a plugin's track at once, since it plays from the internet
+anyway. Keep the call short: it is asked the moment a track starts, beside
+playback, and gives way to the user's own calls (§6).
 
 ### Raising an error
 
@@ -373,8 +410,9 @@ after installation isn't run.
 - After three starts it gives up; endless restarts would hide a crash loop. On
   a contract violation (a missing export) it isn't retried at all.
 - **A call made ahead of time can give way (D-077).** The core reads the
-  queue ahead and looks covers up in the background; meanwhile a call the
-  user makes goes first. A tool your `resolve_source` or `artwork` is running
+  queue ahead and looks covers and lyrics up in the background; meanwhile a
+  call the user makes goes first. A tool your `resolve_source`, `artwork` or
+  `lyrics` is running
   for a call made ahead of time is then stopped: `host.tools.run` throws, and
   so does a `host.http` request started after that. Let the error through —
   the core counts it as "gave way", not as a failure, and asks again later.
@@ -398,7 +436,7 @@ to `PLATFORMS` doesn't raise `api`. The move from api 1 → 2 was of the second
 kind: where the plugin runs changed. So was api 2 → 3 (D-076): the manifest
 gained a **required** field (`artwork`), and an api 2 manifest doesn't have
 it — an optional field would have left "gives no covers" and "was written
-before covers" looking the same.
+before covers" looking the same. api 3 → 4 (D-078) did the same for `lyrics`.
 
 ---
 

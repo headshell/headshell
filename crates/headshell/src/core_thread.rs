@@ -16,8 +16,9 @@
 //! position from the anchor** (D-015), so a "still playing" message carries
 //! zero information. Only what the estimate cannot know is sent — the track
 //! changed, a listen was written, the store gave an error, the queue ended,
-//! a cover arrived (D-076), **or the part of the anchor that feeds the
-//! estimate changed** (state, rate, duration, track identity).
+//! a cover arrived (D-076), the playing track's lyrics changed (D-078), **or
+//! the part of the anchor that feeds the estimate changed** (state, rate,
+//! duration, track identity).
 //!
 //! The last item was not on D-033's first list, and it silently froze the
 //! interface: audio starts as `Buffering` and moves to `Playing`, and since
@@ -158,6 +159,7 @@ fn worth_sending(last: &Notable, report: &TickReport) -> bool {
         || report.store_error.is_some()
         || report.finished
         || !report.artwork_ready.is_empty()
+        || report.lyrics_ready
         || Notable::of(&report.anchor) != *last
 }
 
@@ -208,6 +210,7 @@ mod tests {
             store_error: None,
             finished: false,
             artwork_ready: Vec::new(),
+            lyrics_ready: false,
         }
     }
 
@@ -273,6 +276,17 @@ mod tests {
         assert!(!worth_sending(&last, &next));
         next.artwork_ready =
             vec![headshell_core::artwork::ArtworkKey::parse("album:0123456789abcdef").unwrap()];
+        assert!(worth_sending(&last, &next));
+    }
+
+    /// The playing track's lyrics arriving is news the estimate cannot know
+    /// (D-078): without the event the lyrics view keeps saying "looking".
+    #[test]
+    fn arrived_lyrics_are_worth_sending() {
+        let last = Notable::of(&anchor(PlayState::Playing, 0, Some(240_000)));
+        let mut next = report(anchor(PlayState::Playing, 1_000, Some(240_000)));
+        assert!(!worth_sending(&last, &next));
+        next.lyrics_ready = true;
         assert!(worth_sending(&last, &next));
     }
 }

@@ -185,6 +185,10 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::artwork,
             commands::artwork_queue,
             commands::artwork_images,
+            commands::lyrics,
+            commands::lyrics_now,
+            commands::lyrics_view,
+            commands::lyrics_shift,
             // Reading ahead (D-077)
             commands::prefetch,
             commands::prefetch_queue,

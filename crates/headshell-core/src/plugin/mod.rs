@@ -62,14 +62,16 @@ use crate::ids::{ProviderId, ProviderTrackId};
 use crate::net::HttpClient;
 use crate::provider::{
     ArtworkImage, AudioSource, Capabilities, Provider, ProviderFuture, ProviderHealth,
-    ProviderInfo, ProviderTrack,
+    ProviderInfo, ProviderLyrics, ProviderTrack,
 };
 use crate::secrets::{Secrets, plugin_namespace};
 
 use artifact::ArtifactStore;
 use consent::{ConsentStatus, ConsentStore};
 use manifest::{MANIFEST_FILE, Permissions, PluginManifest, Requirement};
-use protocol::{HealthResult, PLUGIN_API, SourceResult, WireArtwork, WireTrack, export};
+use protocol::{
+    HealthResult, PLUGIN_API, SourceResult, WireArtwork, WireLyrics, WireTrack, export,
+};
 
 #[cfg(feature = "plugin-engine")]
 use script::ScriptWorker;
@@ -120,6 +122,10 @@ pub struct PluginEntry {
     /// when the manifest could not be read.
     #[serde(default)]
     pub artwork: Option<bool>,
+    /// Does it give lyrics (api 4, D-078) — what its manifest declares.
+    /// `None` when the manifest could not be read.
+    #[serde(default)]
+    pub lyrics: Option<bool>,
     /// Why it cannot load, if it cannot — one line, copyable.
     pub problem: Option<String>,
 }
@@ -331,6 +337,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
                 consent: None,
                 requires: Vec::new(),
                 artwork: None,
+                lyrics: None,
                 problem: Some(problem),
             };
         }
@@ -354,6 +361,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
         permissions: manifest.permissions,
         requires,
         artwork: Some(manifest.artwork),
+        lyrics: Some(manifest.lyrics),
         problem,
     }
 }
@@ -584,10 +592,15 @@ impl PluginProvider {
                 "`browse`/`control` do not map to a function in api 3; the declaration only shows in the list"
             );
         }
-        // Covers are not a capability name but a required yes-or-no (api 3,
-        // D-076).
+        // Covers and lyrics are not capability names but required
+        // yes-or-noes (api 3, D-076; api 4, D-078).
         let capabilities = if manifest.artwork {
             capabilities | Capabilities::ARTWORK
+        } else {
+            capabilities
+        };
+        let capabilities = if manifest.lyrics {
+            capabilities | Capabilities::LYRICS
         } else {
             capabilities
         };
@@ -903,6 +916,64 @@ impl PluginProvider {
             source: crate::artwork::ArtworkSource::Provider,
         }))
     }
+
+    /// The plugin's lyrics (api 4, D-078): the service's own for the track.
+    /// `synced` is LRC text, read with the same parser as a `.lrc` file.
+    fn lyrics_now(&self, id: &ProviderTrackId) -> Result<Option<ProviderLyrics>> {
+        if !self.capabilities.contains(Capabilities::LYRICS) {
+            return Err(self.unsupported("lyrics"));
+        }
+        if id.provider != self.id {
+            return Err(Error::new(
+                Stage::LyricsRead,
+                ErrorKind::InvalidInput {
+                    detail: format!(
+                        "a {} id cannot be asked of the {} plugin",
+                        id.provider, self.id
+                    ),
+                },
+            ));
+        }
+        let value = self.call(export::LYRICS, vec![serde_json::json!(id.id)])?;
+        let wire: Option<WireLyrics> = serde_json::from_value(value).map_err(|err| {
+            self.contract(
+                export::LYRICS,
+                format!(
+                    "expected `{{ synced?, plain?, instrumental?, attribution? }}` or `null`: {err}"
+                ),
+            )
+        })?;
+        let Some(wire) = wire else {
+            return Ok(None);
+        };
+        fn text(field: &Option<String>) -> Option<&str> {
+            field.as_deref().filter(|t| !t.trim().is_empty())
+        }
+        let mut lyrics = match (text(&wire.synced), text(&wire.plain)) {
+            (Some(synced), _) => {
+                let lyrics = crate::lyrics::lrc::parse(synced);
+                if !lyrics.synced {
+                    return Err(self.contract(
+                        export::LYRICS,
+                        "`synced` has no `[mm:ss.xx]` stamp — unsynced words go in `plain`"
+                            .to_owned(),
+                    ));
+                }
+                lyrics
+            }
+            (None, Some(plain)) => {
+                crate::lyrics::Lyrics::unsynced(plain.lines().map(str::to_owned))
+            }
+            (None, None) if wire.instrumental => crate::lyrics::Lyrics::default(),
+            (None, None) => return Ok(None),
+        };
+        lyrics.attribution = wire.attribution.filter(|a| !a.trim().is_empty());
+        Ok(Some(ProviderLyrics {
+            lyrics,
+            instrumental: wire.instrumental,
+            source: crate::lyrics::LyricsSource::Provider,
+        }))
+    }
 }
 
 impl Provider for PluginProvider {
@@ -954,6 +1025,16 @@ impl Provider for PluginProvider {
         size: u32,
     ) -> ProviderFuture<'a, Option<ArtworkImage>> {
         Box::pin(std::future::ready(self.artwork_now(id, size)))
+    }
+
+    fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
+        Box::pin(std::future::ready(self.lyrics_now(id)))
+    }
+
+    /// A plugin's tracks come from the internet anyway: their lyrics are
+    /// looked up at LRCLIB the moment they start (D-078).
+    fn is_plugin(&self) -> bool {
+        true
     }
 }
 

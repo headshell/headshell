@@ -20,7 +20,7 @@ use crate::model::TrackRef;
 use crate::net::{self, HttpClient, HttpRequest};
 use crate::provider::{
     ArtworkImage, AudioSource, Capabilities, Provider, ProviderFuture, ProviderHealth,
-    ProviderInfo, ProviderTrack,
+    ProviderInfo, ProviderLyrics, ProviderTrack,
 };
 
 use super::{RemoteServer, StoredAuth};
@@ -36,6 +36,10 @@ const CLIENT_NAME: &str = "headshell";
 pub struct SubsonicProvider {
     server: RemoteServer,
     http: Arc<dyn HttpClient>,
+    /// Does the server speak OpenSubsonic's `songLyrics` (D-078)? Learned
+    /// once, from `getOpenSubsonicExtensions` — only an answer is kept, not a
+    /// failure: a server that was down is asked again.
+    song_lyrics: std::sync::OnceLock<bool>,
 }
 
 impl std::fmt::Debug for SubsonicProvider {
@@ -50,7 +54,37 @@ impl std::fmt::Debug for SubsonicProvider {
 impl SubsonicProvider {
     #[must_use]
     pub fn new(server: RemoteServer, http: Arc<dyn HttpClient>) -> Self {
-        Self { server, http }
+        Self {
+            server,
+            http,
+            song_lyrics: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Does the server offer `getLyricsBySongId`? A plain Subsonic server
+    /// has no `getOpenSubsonicExtensions` at all: its refusal is a "no", not
+    /// a failure.
+    async fn speaks_song_lyrics(&self) -> Result<bool> {
+        if let Some(known) = self.song_lyrics.get() {
+            return Ok(*known);
+        }
+        let known = match self.call("getOpenSubsonicExtensions", &[]).await {
+            Ok(body) => body
+                .open_subsonic_extensions
+                .iter()
+                .any(|extension| extension.name == "songLyrics"),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::RemoteApi { .. } | ErrorKind::HttpStatus { status: 404, .. }
+                ) =>
+            {
+                false
+            }
+            Err(err) => return Err(err),
+        };
+        let _ = self.song_lyrics.set(known);
+        Ok(known)
     }
 
     /// Builds an endpoint URL together with the credential parameters.
@@ -137,10 +171,13 @@ impl Provider for SubsonicProvider {
             display_name: self.server.display_name(),
             // No CONTROL: Subsonic does not control a remote player,
             // it gives us the audio bytes. ARTWORK: `getCoverArt` (D-076).
+            // LYRICS: OpenSubsonic's `getLyricsBySongId` (D-078) — a plain
+            // Subsonic server says it has none.
             capabilities: Capabilities::SEARCH
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
-                | Capabilities::ARTWORK,
+                | Capabilities::ARTWORK
+                | Capabilities::LYRICS,
         }
     }
 
@@ -330,6 +367,56 @@ impl Provider for SubsonicProvider {
         })
     }
 
+    /// OpenSubsonic's `getLyricsBySongId` (D-078): the lyrics the server
+    /// has for the file — its `.lrc`, its tags. Its main lyrics, synced ones
+    /// first; `offset` applied (positive: the lines come sooner — the spec's
+    /// words).
+    ///
+    /// A server without the `songLyrics` extension gives `Unsupported`: it
+    /// cannot, which is not "none" (K9). Error `70` and an empty list are
+    /// "none".
+    fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
+        Box::pin(async move {
+            if id.provider != self.server.id {
+                return Err(Error::new(
+                    Stage::LyricsRead,
+                    ErrorKind::InvalidInput {
+                        detail: format!(
+                            "{id} does not belong to this provider ({})",
+                            self.server.id
+                        ),
+                    },
+                ));
+            }
+            if !self.speaks_song_lyrics().await? {
+                return Err(Error::new(
+                    Stage::LyricsRead,
+                    ErrorKind::Unsupported {
+                        provider: self.server.id.to_string(),
+                        what: "lyrics (the server has no OpenSubsonic `songLyrics`)".to_owned(),
+                        capabilities: self.info().capabilities.describe(),
+                    },
+                ));
+            }
+            let body = match self.call("getLyricsBySongId", &[("id", &id.id)]).await {
+                Ok(body) => body,
+                Err(err) if matches!(err.kind(), ErrorKind::RemoteApi { code: 70, .. }) => {
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            };
+            let entries = body
+                .lyrics_list
+                .map(|list| list.structured_lyrics)
+                .unwrap_or_default();
+            Ok(choose_structured(entries).map(|lyrics| ProviderLyrics {
+                lyrics,
+                instrumental: false,
+                source: crate::lyrics::LyricsSource::Provider,
+            }))
+        })
+    }
+
     // `scan_catalog` is not implemented (the default `None`): Subsonic has no
     // endpoint that dumps the whole catalog cheaply — it would take hundreds of
     // requests, artist → album → track. Remote search goes straight to the
@@ -355,6 +442,85 @@ struct SubsonicBody {
     error: Option<ApiError>,
     search_result3: Option<SearchResult3>,
     scan_status: Option<ScanStatus>,
+    /// `getOpenSubsonicExtensions` (D-078).
+    #[serde(default)]
+    open_subsonic_extensions: Vec<Extension>,
+    /// `getLyricsBySongId` (D-078).
+    lyrics_list: Option<LyricsList>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Extension {
+    name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsList {
+    #[serde(default)]
+    structured_lyrics: Vec<StructuredLyrics>,
+}
+
+/// One `structuredLyrics` entry (OpenSubsonic, read from its specification
+/// and Navidrome's source, D-078).
+#[derive(Debug, Deserialize)]
+struct StructuredLyrics {
+    #[serde(default)]
+    synced: bool,
+    /// Milliseconds; positive, the lines appear sooner.
+    #[serde(default)]
+    offset: Option<i64>,
+    /// `main`, `translation`, `pronunciation`; absent means `main`.
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    line: Vec<LyricsLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LyricsLine {
+    /// Milliseconds from the track's start; absent in unsynced lyrics.
+    #[serde(default)]
+    start: Option<i64>,
+    #[serde(default)]
+    value: String,
+}
+
+/// The main lyrics — not a translation or a pronunciation — synced ones
+/// first, as core lyrics.
+fn choose_structured(entries: Vec<StructuredLyrics>) -> Option<crate::lyrics::Lyrics> {
+    use crate::lyrics::{LyricLine, Lyrics};
+    let mut main: Vec<StructuredLyrics> = entries
+        .into_iter()
+        .filter(|entry| entry.kind.as_deref().is_none_or(|kind| kind == "main"))
+        .filter(|entry| entry.line.iter().any(|line| !line.value.trim().is_empty()))
+        .collect();
+    // Stable: the server's order among equals.
+    main.sort_by_key(|entry| !(entry.synced && entry.line.iter().all(|l| l.start.is_some())));
+    let entry = main.into_iter().next()?;
+    let synced = entry.synced && entry.line.iter().all(|line| line.start.is_some());
+    let offset = entry.offset.unwrap_or(0);
+    let mut lines: Vec<LyricLine> = entry
+        .line
+        .into_iter()
+        .map(|line| LyricLine {
+            start_ms: if synced {
+                line.start
+                    .map(|start| u64::try_from(start.saturating_sub(offset).max(0)).unwrap_or(0))
+            } else {
+                None
+            },
+            text: line.value.trim().to_owned(),
+        })
+        .collect();
+    if synced {
+        lines.sort_by_key(|line| line.start_ms);
+    }
+    Some(Lyrics {
+        synced,
+        lines,
+        attribution: None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -644,5 +810,96 @@ mod tests {
             provider.resolve_source(&foreign).await.is_err(),
             "another provider's id must not be accepted silently"
         );
+    }
+
+    const EXTENSIONS_JSON: &str = r#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+        "openSubsonic":true,"openSubsonicExtensions":[{"name":"transcodeOffset","versions":[1]},
+        {"name":"songLyrics","versions":[1]}]}}"#;
+
+    /// A translation, unsynced words and the synced main lyrics — out of order,
+    /// with an offset — as Navidrome can answer.
+    const LYRICS_JSON: &str = r#"{"subsonic-response":{"status":"ok","version":"1.16.1",
+        "lyricsList":{"structuredLyrics":[
+        {"lang":"eng","synced":true,"kind":"translation","line":[{"start":0,"value":"not these"}]},
+        {"lang":"und","synced":false,"line":[{"value":"unsynced words"}]},
+        {"lang":"und","synced":true,"offset":500,
+         "line":[{"start":4000,"value":"second"},{"start":1000,"value":"first"}]}]}}}"#;
+
+    fn lines(lyrics: &crate::lyrics::Lyrics) -> Vec<(Option<u64>, &str)> {
+        lyrics
+            .lines
+            .iter()
+            .map(|line| (line.start_ms, line.text.as_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_songs_lyrics_come_from_get_lyrics_by_song_id_main_and_synced_first() {
+        let http = Arc::new(
+            FakeHttp::new()
+                .route("/rest/getOpenSubsonicExtensions", EXTENSIONS_JSON)
+                .route("/rest/getLyricsBySongId", LYRICS_JSON),
+        );
+        let provider = SubsonicProvider::new(server(), http.clone());
+        assert!(provider.info().capabilities.contains(Capabilities::LYRICS));
+        let id = ProviderTrackId::new(ProviderId::new("ev"), "a1");
+        let found = provider.lyrics(&id).await.unwrap().unwrap();
+        assert_eq!(found.source, crate::lyrics::LyricsSource::Provider);
+        assert!(found.lyrics.synced);
+        assert_eq!(
+            lines(&found.lyrics),
+            [(Some(500), "first"), (Some(3_500), "second")],
+            "in time order, and a positive offset brings them sooner"
+        );
+        assert!(http.last_url().contains("id=a1"), "{}", http.last_url());
+
+        // The extension is learned once.
+        provider.lyrics(&id).await.unwrap();
+        let asked = http
+            .requests()
+            .iter()
+            .filter(|r| r.url.contains("getOpenSubsonicExtensions"))
+            .count();
+        assert_eq!(asked, 1);
+    }
+
+    #[tokio::test]
+    async fn a_server_without_song_lyrics_says_it_cannot_and_none_is_an_answer() {
+        let id = ProviderTrackId::new(ProviderId::new("ev"), "a1");
+        // A plain Subsonic server has no `getOpenSubsonicExtensions`.
+        let plain = Arc::new(FakeHttp::new().route_status(
+            "/rest/getOpenSubsonicExtensions",
+            404,
+            "Not Found",
+        ));
+        let err = SubsonicProvider::new(server(), plain)
+            .lyrics(&id)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Unsupported { .. }),
+            "{}",
+            err.chain_text()
+        );
+
+        // Error 70, and an empty list: "none".
+        let failed = r#"{"subsonic-response":{"status":"failed","version":"1.16.1",
+            "error":{"code":70,"message":"lyrics not found"}}}"#;
+        let empty = r#"{"subsonic-response":{"status":"ok","version":"1.16.1","lyricsList":{}}}"#;
+        for answer in [failed, empty] {
+            let http = Arc::new(
+                FakeHttp::new()
+                    .route("/rest/getOpenSubsonicExtensions", EXTENSIONS_JSON)
+                    .route("/rest/getLyricsBySongId", answer),
+            );
+            assert_eq!(
+                SubsonicProvider::new(server(), http)
+                    .lyrics(&id)
+                    .await
+                    .unwrap(),
+                None,
+                "{answer}"
+            );
+        }
     }
 }

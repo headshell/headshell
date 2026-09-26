@@ -13,7 +13,7 @@
 //! layer but an address: it says where the work is done.
 //!
 //! **Long commands** (`import`, `resolve`, `provider_scan`, `provider_test`,
-//! `server_add`, `play`, `artwork`) hold the queue, and the playback controls wait
+//! `server_add`, `play`, `artwork`, `lyrics`) hold the queue, and the playback controls wait
 //! meanwhile. So this does not stay invisible, they send [`BUSY_EVENT`]: the
 //! interface writes which job is running (K9).
 
@@ -25,15 +25,16 @@ use tauri::{AppHandle, Emitter, State};
 use headshell_core::artwork::{ArtworkKey, ArtworkPicture, ArtworkReport, ArtworkVariant};
 use headshell_core::diag::Stage;
 use headshell_core::ids::ProviderId;
+use headshell_core::lyrics::{LyricsItem, LyricsKey, LyricsReport};
 use headshell_core::model::PlayRule;
 use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueView, RepeatMode};
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::session::{
-    self, ArtworkRequest, ImportReport, LookupMode, PlayOptions, PluginCatalogReport,
-    PluginConsentReport, PluginInstallReport, PluginListReport, PluginRemoveReport,
-    PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport, ScanReport,
-    SearchReport, SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport,
-    ServerRemoveReport, SleeveResponse, StatsResponse,
+    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, PlayOptions,
+    PluginCatalogReport, PluginConsentReport, PluginInstallReport, PluginListReport,
+    PluginRemoveReport, PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport,
+    ScanReport, SearchReport, SecretListReport, SecretWriteReport, ServerAddReport,
+    ServerListReport, ServerRemoveReport, SleeveResponse, StatsResponse,
 };
 use headshell_core::sleeve::CardPreset;
 use headshell_core::stats::StatsQuery;
@@ -533,6 +534,77 @@ pub async fn artwork_images(
         .collect::<CommandResult<Vec<_>>>()?;
     state
         .run_on_core(move |core| Box::pin(async move { core.live.artwork_images(&keys, variant) }))
+        .await
+}
+
+// ————————————————————————————————————— Lyrics (D-078)
+//
+// `lyrics` is `headshell lyrics`, waiting for every track. The other three
+// are the playing track's side: the core's lyrics worker looks it up in the
+// background, the tick says when its answer changed, and the interface asks
+// here. Opening the lyrics view is the user asking: `lyrics_view(true)` lets
+// LRCLIB be asked for the playing track and every next one while it is open.
+
+#[tauri::command]
+pub async fn lyrics(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: Option<String>,
+    all: bool,
+    file: Option<String>,
+    print: bool,
+    shift: Option<i64>,
+) -> CommandResult<LyricsReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let request = LyricsRequest {
+                    query,
+                    all,
+                    file: file.map(std::path::PathBuf::from),
+                    print,
+                    shift_ms: shift,
+                };
+                let task = core.live.session_mut().lyrics(&core.registry, request);
+                busy(&app, "looking up lyrics", task).await
+            })
+        })
+        .await
+}
+
+/// The playing track's lyrics as they stand — with the lines, the shift and
+/// why there are none. `null` when nothing plays.
+#[tauri::command]
+pub async fn lyrics_now(state: State<'_, AppState>) -> CommandResult<Option<LyricsItem>> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.lyrics_now() }))
+        .await
+}
+
+/// The lyrics view opened or closed.
+#[tauri::command]
+pub async fn lyrics_view(
+    state: State<'_, AppState>,
+    open: bool,
+) -> CommandResult<Option<LyricsItem>> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.set_lyrics_wanted(open) }))
+        .await
+}
+
+/// Keeps the user's shift of a track's lyrics, in ms (positive: sooner). A
+/// key the core never gave is the interface's mistake, and it is said (K9).
+#[tauri::command]
+pub async fn lyrics_shift(
+    state: State<'_, AppState>,
+    key: String,
+    offset_ms: i64,
+) -> CommandResult<Option<LyricsItem>> {
+    let key = LyricsKey::parse(&key).ok_or_else(|| {
+        CommandError::new(Stage::LyricsStore, &format!("not a lyrics key: `{key}`"))
+    })?;
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.shift_lyrics(&key, offset_ms) }))
         .await
 }
 

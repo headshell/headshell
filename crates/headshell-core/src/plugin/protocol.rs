@@ -1,11 +1,11 @@
-//! The **data format** of the plugin contract (api 3; D-069, D-076).
+//! The **data format** of the plugin contract (api 4; D-069, D-076, D-078).
 //!
 //! api 1 was a wire protocol: line-based JSON-RPC, a subprocess, a handshake.
 //! In api 2 there is no wire — the plugin runs in QuickJS inside the core and
 //! the contract is **the exported functions**. Values cross between JS and
 //! Rust as JSON; this file is the Rust-side shape of that JSON.
 //!
-//! ## The functions of api 3
+//! ## The functions of api 4
 //!
 //! | Function | Required | Returns | Counterpart |
 //! |---|---|---|---|
@@ -13,6 +13,7 @@
 //! | `search(query, limit)` | if it has the `search` capability | an array of [`WireTrack`] | [`crate::provider::Provider::search`] |
 //! | `resolve_source(id)` | if it has the `stream` capability | [`AudioSource`] or `null` | [`crate::provider::Provider::resolve_source`] |
 //! | `artwork(id, size)` | if the manifest says `"artwork": true` | [`WireArtwork`] or `null` | [`crate::provider::Provider::artwork`] |
+//! | `lyrics(id)` | if the manifest says `"lyrics": true` | [`WireLyrics`] or `null` | [`crate::provider::Provider::lyrics`] |
 //!
 //! The function names are deliberately the same as api 1's method names
 //! (`resolve_source`, not `resolveSource`): when the document, the provider
@@ -36,6 +37,13 @@
 //! (MusicBrainz → the Cover Art Archive). The plugin fetches its image
 //! itself, through `host.http` in binary mode — the core fetches no address
 //! a plugin names (K5).
+//!
+//! api 3 → 4 (D-078) is the same kind of step, the user's decision too:
+//! every manifest **must** declare `lyrics` — `true` or `false`. `true`
+//! makes the engine expect a `lyrics` export: the service's own lyrics for
+//! the track, synced as LRC text when it knows the timing. They are the
+//! recording's own — the same item the audio comes from — so they are not
+//! measured against its length as LRCLIB's are.
 
 use crate::ids::{Isrc, ProviderId, ProviderTrackId};
 use crate::model::TrackRef;
@@ -44,7 +52,7 @@ use crate::provider::{AudioSource, Capabilities};
 use serde::{Deserialize, Serialize};
 
 /// The version of the plugin contract the core speaks.
-pub const PLUGIN_API: u32 = 3;
+pub const PLUGIN_API: u32 = 4;
 
 /// The names of the functions a plugin exports. Identifiers are in English
 /// (D-036).
@@ -54,6 +62,8 @@ pub mod export {
     pub const RESOLVE_SOURCE: &str = "resolve_source";
     /// api 3 (D-076).
     pub const ARTWORK: &str = "artwork";
+    /// api 4 (D-078).
+    pub const LYRICS: &str = "lyrics";
 }
 
 /// Turns capability names into a bit mask.
@@ -141,6 +151,27 @@ pub struct WireArtwork {
     pub mime: Option<String>,
     /// The image, base64 (either alphabet, padding optional).
     pub data: String,
+}
+
+/// The return value of `lyrics(id)` (api 4, D-078): the service's own
+/// lyrics for the track, or `null` when it has none.
+///
+/// `synced` is LRC text (`[mm:ss.xx]line`): the core reads it with the same
+/// parser as a `.lrc` file, so a plugin does not write its own. `plain` is
+/// the words without timing, for a service that has only those. With both,
+/// `synced` is taken. `instrumental: true` says the track has no words.
+/// `attribution` is shown under the lyrics when the service credits someone
+/// ("Source: LyricFind").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireLyrics {
+    #[serde(default)]
+    pub synced: Option<String>,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub instrumental: bool,
+    #[serde(default)]
+    pub attribution: Option<String>,
 }
 
 /// The return value of `resolve_source(id)`: a source or `null`.

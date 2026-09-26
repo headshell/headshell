@@ -5,6 +5,7 @@
 
 use headshell_core::artwork::{ArtworkReport, ArtworkSource, ArtworkStatus};
 use headshell_core::library::SearchHit;
+use headshell_core::lyrics::{LyricsFit, LyricsReport, LyricsSource, LyricsStatus};
 use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
 use headshell_core::plugin::catalog::UpdateOutcome;
 use headshell_core::session::{
@@ -290,6 +291,137 @@ pub fn artwork(report: &ArtworkReport) -> String {
         let _ = writeln!(out, "written: {}", path.display());
     }
     out
+}
+
+/// The lyrics of a query's tracks, or of a file (D-078).
+pub fn lyrics(report: &LyricsReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "lyrics · {}", report.subject);
+    for item in &report.items {
+        let from = |source: &LyricsSource| match source {
+            LyricsSource::Sidecar => "the .lrc beside the file".to_owned(),
+            LyricsSource::Embedded => "the file's tags".to_owned(),
+            LyricsSource::Provider => item.provider.to_string(),
+            LyricsSource::Lrclib => "LRCLIB".to_owned(),
+        };
+        let (mark, label, detail) = match &item.status {
+            LyricsStatus::Found {
+                source,
+                synced,
+                fit,
+                delta_ms,
+            } => {
+                let how = match (fit, delta_ms) {
+                    (LyricsFit::Own, _) => format!("from {}", from(source)),
+                    (LyricsFit::Length, Some(delta)) => {
+                        format!("from LRCLIB, its version {}", length_difference(*delta))
+                    }
+                    (LyricsFit::Closest, Some(delta)) => format!(
+                        "from LRCLIB's nearest version, {} — the timing may be off; --shift moves it",
+                        length_difference(*delta)
+                    ),
+                    _ => format!("from {}, the recording's length unknown", from(source)),
+                };
+                let (mark, label) = match (synced, fit) {
+                    (true, LyricsFit::Closest) => ("≈", "nearest"),
+                    (true, _) => ("✓", "synced"),
+                    (false, _) => ("✓", "unsynced"),
+                };
+                (mark, label, Some(how))
+            }
+            LyricsStatus::Instrumental { source } => (
+                "♪",
+                "no words",
+                Some(format!("instrumental, says {}", from(source))),
+            ),
+            LyricsStatus::NotFound { detail } => ("–", "not found", Some(detail.clone())),
+            LyricsStatus::NotRequested => ("·", "not asked", None),
+            LyricsStatus::Failed { chain } => ("✗", "failed", Some(chain.clone())),
+            LyricsStatus::Pending => ("…", "pending", None),
+        };
+        let album = item
+            .album
+            .as_deref()
+            .map(|album| format!("  [{}]", truncate(album, 30)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "  {mark} {label:<9} {:>2}. {} — {}{album}",
+            item.index + 1,
+            truncate(&item.artist, 28),
+            truncate(&item.title, 40),
+        );
+        if let Some(detail) = detail {
+            for line in detail.lines() {
+                let _ = writeln!(out, "                  {line}");
+            }
+        }
+        if item.offset_ms != 0 {
+            let _ = writeln!(
+                out,
+                "                  shifted {}",
+                shift_text(item.offset_ms)
+            );
+        }
+        for note in &item.notes {
+            let _ = writeln!(out, "                  note: {note}");
+        }
+        if let Some(lyrics) = &item.lyrics {
+            for line in &lyrics.lines {
+                let stamp = line
+                    .start_ms
+                    .map(|ms| {
+                        format!(
+                            "[{:02}:{:02}.{:02}] ",
+                            ms / 60_000,
+                            ms / 1_000 % 60,
+                            ms % 1_000 / 10
+                        )
+                    })
+                    .unwrap_or_default();
+                let _ = writeln!(out, "      {stamp}{}", line.text);
+            }
+            if let Some(attribution) = &lyrics.attribution {
+                let _ = writeln!(out, "      — {attribution}");
+            }
+        }
+    }
+    let summary = &report.summary;
+    let _ = writeln!(
+        out,
+        "{} · {} found ({} synced, {} of them only the nearest version) · {} instrumental · {} not found · {} failed",
+        count(summary.tracks, "track"),
+        summary.found(),
+        summary.synced,
+        summary.closest,
+        summary.instrumental,
+        summary.not_found,
+        summary.failed,
+    );
+    out
+}
+
+/// A version's length against the recording's: `1.2 s longer`.
+fn length_difference(delta_ms: i64) -> String {
+    let magnitude = delta_ms.unsigned_abs();
+    let seconds = format!("{}.{} s", magnitude / 1_000, magnitude % 1_000 / 100);
+    match delta_ms.signum() {
+        1 => format!("{seconds} longer"),
+        -1 => format!("{seconds} shorter"),
+        _ => "of the same length".to_owned(),
+    }
+}
+
+/// A shift as the user reads it: `0.5 s sooner`.
+fn shift_text(offset_ms: i64) -> String {
+    let magnitude = offset_ms.unsigned_abs();
+    let seconds = format!("{}.{} s", magnitude / 1_000, magnitude % 1_000 / 100);
+    if offset_ms > 0 {
+        format!("{seconds} sooner")
+    } else {
+        format!("{seconds} later")
+    }
 }
 
 /// Search results.
@@ -1099,6 +1231,15 @@ mod tests {
         assert_eq!(duration(90_000), "1m");
         assert_eq!(duration(3_600_000), "1h 0m");
         assert_eq!(duration(5_400_000), "1h 30m");
+    }
+
+    #[test]
+    fn a_length_difference_and_a_shift_read_as_words() {
+        assert_eq!(length_difference(1_234), "1.2 s longer");
+        assert_eq!(length_difference(-7_000), "7.0 s shorter");
+        assert_eq!(length_difference(0), "of the same length");
+        assert_eq!(shift_text(500), "0.5 s sooner");
+        assert_eq!(shift_text(-1_500), "1.5 s later");
     }
 
     #[test]

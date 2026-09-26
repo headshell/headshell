@@ -364,6 +364,88 @@ fn artwork_reads_embedded_covers_and_says_what_it_did_not_look_up() {
     );
 }
 
+/// D-078: the lyrics of the tracks a query finds. The fixtures carry every
+/// kind a file can carry itself — a `.lrc` beside it, LRC in a tag, `USLT`,
+/// `SYLT` — so the chain ends at the file and nothing goes online.
+#[test]
+fn lyrics_reads_what_the_files_carry_prints_them_and_keeps_a_shift() {
+    let dir = temp_dir("lyrics");
+    let music = fixtures().join("lyrics");
+    let (_, stderr, ok) = run_with_music(&dir, Some(&music), &["provider", "scan"]);
+    assert!(ok, "scan failed: {stderr}");
+
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&music),
+        &["--json", "lyrics", "lyric artist", "--all"],
+    );
+    assert!(ok, "lyrics failed: {stderr}");
+    // A track's key names its file by its absolute path, which depends on
+    // the checkout: pinned here, checked for its shape instead.
+    let mut report = json(&stdout);
+    for item in report["items"].as_array_mut().unwrap() {
+        assert!(
+            item["key"].as_str().unwrap().starts_with("lyrics:"),
+            "{item}"
+        );
+        item["key"] = "<variable>".into();
+    }
+    assert_snapshot("lyrics", &report.to_string());
+    // `source` is pinned by the snapshot's normaliser; checked here.
+    let by_title = |title: &str| {
+        report["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["title"] == title)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {title} in {report}"))
+    };
+    for (title, source, synced) in [
+        ("Sidecar", "sidecar", true),
+        ("Flac Lrc", "embedded", true),
+        ("Mp3 Sylt", "embedded", true),
+        ("Mp3 Uslt", "embedded", false),
+    ] {
+        let item = by_title(title);
+        assert_eq!(item["status"], "found", "{item}");
+        assert_eq!(item["source"], source, "{item}");
+        assert_eq!(item["synced"], synced, "{item}");
+        assert_eq!(item["fit"], "own", "{item}");
+        assert!(item.get("lyrics").is_none(), "without --print: {item}");
+    }
+
+    // `--print`: the lines, with their times.
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&music),
+        &["--json", "lyrics", "flac lrc", "--print"],
+    );
+    assert!(ok, "{stderr}");
+    let lines = json(&stdout)["items"][0]["lyrics"]["lines"].clone();
+    assert_eq!(lines[0]["start_ms"], 500, "{lines}");
+    assert_eq!(lines[1]["text"], "a second one with çğıİöşü", "{lines}");
+    let (stdout, _, ok) = run_with_music(&dir, Some(&music), &["lyrics", "flac lrc", "--print"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("[00:00.50] A made-up first line"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("from the file's tags"), "{stdout}");
+
+    // `--shift`: kept per track, and taken back with 0.
+    for (shift, expected) in [("500", 500), ("-1500", -1500), ("0", 0)] {
+        let (_, stderr, ok) = run_with_music(
+            &dir,
+            Some(&music),
+            &["lyrics", "mp3 sylt", "--shift", shift],
+        );
+        assert!(ok, "{stderr}");
+        let (stdout, _, _) = run_with_music(&dir, Some(&music), &["--json", "lyrics", "mp3 sylt"]);
+        assert_eq!(json(&stdout)["items"][0]["offset_ms"], expected, "{stdout}");
+    }
+}
+
 #[test]
 fn sleeve_writes_a_real_png_and_svg() {
     let dir = temp_dir("sleeve");

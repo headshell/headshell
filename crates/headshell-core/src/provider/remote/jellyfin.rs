@@ -25,7 +25,7 @@ use crate::model::TrackRef;
 use crate::net::{self, HttpClient, HttpHeader, HttpRequest};
 use crate::provider::{
     ArtworkImage, AudioSource, Capabilities, Provider, ProviderFuture, ProviderHealth,
-    ProviderInfo, ProviderTrack,
+    ProviderInfo, ProviderLyrics, ProviderTrack,
 };
 
 use super::{RemoteServer, ServerKind, StoredAuth};
@@ -141,10 +141,12 @@ impl Provider for JellyfinProvider {
             id: self.server.id.clone(),
             display_name: self.server.display_name(),
             // ARTWORK: the item's `Primary` image, or its album's (D-076).
+            // LYRICS: `/Audio/{id}/Lyrics`, Jellyfin 10.9 and later (D-078).
             capabilities: Capabilities::SEARCH
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
-                | Capabilities::ARTWORK,
+                | Capabilities::ARTWORK
+                | Capabilities::LYRICS,
         }
     }
 
@@ -336,6 +338,43 @@ impl Provider for JellyfinProvider {
             Ok(None)
         })
     }
+
+    /// `/Audio/{id}/Lyrics` (Jellyfin 10.9+, D-078): the lyrics the server
+    /// has for the item — its `.lrc`, or what a lyrics plugin on the server
+    /// fetched. A line's `Start` is in ticks (100 ns). `404`: none — an older
+    /// Jellyfin without the route answers the same, and it has none to give.
+    fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
+        Box::pin(async move {
+            if id.provider != self.server.id {
+                return Err(Error::new(
+                    Stage::LyricsRead,
+                    ErrorKind::InvalidInput {
+                        detail: format!(
+                            "{id} does not belong to this provider ({})",
+                            self.server.id
+                        ),
+                    },
+                ));
+            }
+            let url = format!(
+                "{}/Audio/{}/Lyrics",
+                self.server.url,
+                net::encode_query(&id.id)
+            );
+            let request = HttpRequest::get(&url).with_headers(self.auth_headers()?);
+            let response = self.http.send(&request).await?;
+            if response.status == 404 {
+                return Ok(None);
+            }
+            response.error_for_status(&url)?;
+            let dto: LyricDto = net::parse_json(&response, "jellyfin lyrics")?;
+            Ok(dto.into_lyrics().map(|lyrics| ProviderLyrics {
+                lyrics,
+                instrumental: false,
+                source: crate::lyrics::LyricsSource::Provider,
+            }))
+        })
+    }
 }
 
 /// The `Authorization: MediaBrowser ...` header.
@@ -434,6 +473,74 @@ pub async fn fetch_user_id(server: &RemoteServer, http: &dyn HttpClient) -> Resu
             },
         )
     })
+}
+
+/// Jellyfin's `LyricDto` (read in its source, D-078).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LyricDto {
+    #[serde(default)]
+    metadata: Option<LyricMetadata>,
+    #[serde(default)]
+    lyrics: Vec<LyricLineDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LyricMetadata {
+    /// Ticks; the LRC `[offset:]` convention — positive, sooner. Jellyfin's
+    /// own parser does not fill it today; it is applied when present.
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LyricLineDto {
+    #[serde(default)]
+    text: String,
+    /// Ticks from the track's start; absent in unsynced lyrics.
+    #[serde(default)]
+    start: Option<i64>,
+}
+
+impl LyricDto {
+    fn into_lyrics(self) -> Option<crate::lyrics::Lyrics> {
+        use crate::lyrics::{LyricLine, Lyrics};
+        if self.lyrics.iter().all(|line| line.text.trim().is_empty()) {
+            return None;
+        }
+        let synced = self.lyrics.iter().all(|line| line.start.is_some());
+        // Signed here: an offset may be negative.
+        let per_ms = TICKS_PER_MS as i64;
+        let offset = self
+            .metadata
+            .and_then(|metadata| metadata.offset)
+            .unwrap_or(0)
+            / per_ms;
+        let mut lines: Vec<LyricLine> = self
+            .lyrics
+            .into_iter()
+            .map(|line| LyricLine {
+                start_ms: if synced {
+                    line.start.map(|ticks| {
+                        u64::try_from((ticks / per_ms).saturating_sub(offset).max(0)).unwrap_or(0)
+                    })
+                } else {
+                    None
+                },
+                text: line.text.trim().to_owned(),
+            })
+            .collect();
+        if synced {
+            lines.sort_by_key(|line| line.start_ms);
+        }
+        Some(Lyrics {
+            synced,
+            lines,
+            attribution: None,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,5 +791,56 @@ mod tests {
         // record.
         let stored_json = serde_json::to_string(&stored).unwrap();
         assert!(!stored_json.contains("sesame"), "{stored_json}");
+    }
+
+    #[tokio::test]
+    async fn a_songs_lyrics_come_in_ticks_and_their_absence_is_none() {
+        let id = ProviderTrackId::new(ProviderId::new("jf"), "i1");
+        let synced = r#"{"Metadata":{"IsSynced":true},"Lyrics":[
+            {"Text":"second","Start":45000000},{"Text":"first","Start":12340000}]}"#;
+        let http = Arc::new(FakeHttp::new().route("/Audio/i1/Lyrics", synced));
+        let provider = JellyfinProvider::new(server(), Arc::clone(&http) as Arc<dyn HttpClient>);
+        assert!(provider.info().capabilities.contains(Capabilities::LYRICS));
+        let found = provider.lyrics(&id).await.unwrap().unwrap();
+        assert!(found.lyrics.synced);
+        let lines: Vec<(Option<u64>, &str)> = found
+            .lyrics
+            .lines
+            .iter()
+            .map(|line| (line.start_ms, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [(Some(1_234), "first"), (Some(4_500), "second")],
+            "ticks are 100 ns; the lines in time order"
+        );
+        assert!(
+            http.requests()
+                .iter()
+                .all(|r| !r.url.contains("secret-key")),
+            "the key goes in a header"
+        );
+
+        let unsynced = r#"{"Metadata":{},"Lyrics":[{"Text":"a"},{"Text":"b"}]}"#;
+        let provider = JellyfinProvider::new(
+            server(),
+            Arc::new(FakeHttp::new().route("/Audio/i1/Lyrics", unsynced)) as Arc<dyn HttpClient>,
+        );
+        let found = provider.lyrics(&id).await.unwrap().unwrap();
+        assert!(!found.lyrics.synced);
+        assert!(
+            found
+                .lyrics
+                .lines
+                .iter()
+                .all(|line| line.start_ms.is_none())
+        );
+
+        let provider = JellyfinProvider::new(
+            server(),
+            Arc::new(FakeHttp::new().route_status("/Audio/i1/Lyrics", 404, ""))
+                as Arc<dyn HttpClient>,
+        );
+        assert_eq!(provider.lyrics(&id).await.unwrap(), None);
     }
 }

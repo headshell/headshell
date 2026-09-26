@@ -52,8 +52,8 @@ pub struct Core {
 }
 
 impl Core {
-    /// Opens the library, sets up the providers, starts the cover worker and
-    /// starts with an **empty** player.
+    /// Opens the library, sets up the providers, starts the cover and lyrics
+    /// workers and starts with an **empty** player.
     ///
     /// The empty player is not a placeholder: a `LiveSession` should always
     /// exist so commands do not have to ask "is a session open". With nothing
@@ -61,14 +61,15 @@ impl Core {
     ///
     /// # Errors
     /// If the data directory cannot be opened, the database cannot be set up,
-    /// the registered server file is corrupt or the cover cache cannot be
-    /// opened.
+    /// the registered server file is corrupt or the cover or lyrics cache
+    /// cannot be opened.
     pub fn open(config: Config, lookup: LookupMode) -> headshell_core::Result<Self> {
         let session = Session::open(config)?;
         let registry = headshell_core::provider::default_registry(session.config())?;
         let player = Player::new(registry.clone());
         let mut live = LiveSession::new(session, player);
         live.start_artwork(lookup)?;
+        live.start_lyrics()?;
         Ok(Self {
             live,
             registry,

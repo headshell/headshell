@@ -23,7 +23,7 @@ use crate::model::TrackRef;
 
 use super::{
     ArtworkImage, AudioSource, Capabilities, Provider, ProviderFuture, ProviderHealth,
-    ProviderInfo, ProviderTrack,
+    ProviderInfo, ProviderLyrics, ProviderTrack,
 };
 
 /// The recognised audio file extensions.
@@ -592,10 +592,13 @@ impl Provider for LocalProvider {
             display_name: "Local files".to_owned(),
             // No CONTROL: the local disk is not remote-controlled. ARTWORK: the
             // picture in a file's tags, or an image in its folder (D-076).
+            // LYRICS: a `.lrc` beside the file, or the lyrics in its tags
+            // (D-078).
             capabilities: Capabilities::SEARCH
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
-                | Capabilities::ARTWORK,
+                | Capabilities::ARTWORK
+                | Capabilities::LYRICS,
         }
     }
 
@@ -734,6 +737,22 @@ impl Provider for LocalProvider {
                 return Ok(None);
             }
             crate::artwork::file_cover(&path)
+        })
+    }
+
+    /// A `.lrc` beside the file with its name, then the lyrics in its tags
+    /// (D-078). The same guard as `resolve_source`: only a file under the
+    /// scanned roots.
+    fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
+        Box::pin(async move {
+            if id.provider != self.id {
+                return Ok(None);
+            }
+            let path = PathBuf::from(&id.id);
+            if !self.is_within_roots(&path) {
+                return Ok(None);
+            }
+            crate::lyrics::file_lyrics(&path)
         })
     }
 }

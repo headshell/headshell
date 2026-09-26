@@ -49,7 +49,7 @@ fn discovery_reports_each_plugins_reason_without_stopping() {
     write_plugin(
         &config,
         "good",
-        r#"{"name":"good","display_name":"Good","api":3,"artwork":false,"main":"main.js",
+        r#"{"name":"good","display_name":"Good","api":4,"artwork":false,"lyrics":false,"main":"main.js",
             "permissions":{"net":["a.example"]}}"#,
     );
     write_plugin(
@@ -97,7 +97,7 @@ fn an_approved_plugin_becomes_loadable_and_load_starts_no_engine() {
     write_plugin(
         &config,
         "good",
-        r#"{"name":"good","display_name":"Good","api":3,"artwork":false,"main":"main.js",
+        r#"{"name":"good","display_name":"Good","api":4,"artwork":false,"lyrics":false,"main":"main.js",
             "capabilities":["search"],"permissions":{"net":["a.example"]}}"#,
     );
     approve(&config, "good", &["a.example"]);
@@ -125,7 +125,7 @@ fn a_plugin_that_grew_its_permissions_is_not_loaded_until_reapproved() {
     write_plugin(
         &config,
         "good",
-        r#"{"name":"good","display_name":"Good","api":3,"artwork":false,"main":"main.js",
+        r#"{"name":"good","display_name":"Good","api":4,"artwork":false,"lyrics":false,"main":"main.js",
             "permissions":{"net":["a.example","new.example"]}}"#,
     );
     approve(&config, "good", &["a.example"]);
@@ -156,7 +156,7 @@ fn a_tool_without_an_asset_for_this_platform_blocks_loading_without_a_false_hint
         &config,
         "tool",
         &format!(
-            r#"{{"name":"tool","display_name":"Tool","api":3,"artwork":false,"main":"main.js",
+            r#"{{"name":"tool","display_name":"Tool","api":4,"artwork":false,"lyrics":false,"main":"main.js",
                 "requires":[{{"name":"yt-dlp","version":"1","assets":{{"{other}":
                 {{"url":"https://example.invalid/x","sha256":"{}"}}}}}}]}}"#,
             "a".repeat(64)
@@ -178,7 +178,7 @@ fn a_plugin_only_sees_its_own_secrets() {
     let dir = write_plugin(
         &config,
         "good",
-        r#"{"name":"good","display_name":"Good","api":3,"artwork":false,"main":"main.js","capabilities":["search"]}"#,
+        r#"{"name":"good","display_name":"Good","api":4,"artwork":false,"lyrics":false,"main":"main.js","capabilities":["search"]}"#,
     );
     let mut secrets = Secrets::default();
     secrets.set("plugin:good", "client_id", "mine");
@@ -198,7 +198,7 @@ fn offline_provider(config: &Config, name: &str, capabilities: &str) -> PluginPr
         config,
         name,
         &format!(
-            r#"{{"name":"{name}","display_name":"X","api":3,"artwork":false,"main":"main.js",
+            r#"{{"name":"{name}","display_name":"X","api":4,"artwork":false,"lyrics":false,"main":"main.js",
                 "capabilities":{capabilities}}}"#
         ),
     );
@@ -362,7 +362,7 @@ mod engine {
         fn simple(name: &str, script: &str) -> Self {
             Self::new(
                 name,
-                r#"{"name":"demo","display_name":"Demo","api":3,"artwork":false,"main":"main.js",
+                r#"{"name":"demo","display_name":"Demo","api":4,"artwork":false,"lyrics":false,"main":"main.js",
                     "capabilities":["search","stream"],
                     "permissions":{"net":["allowed.example","*.cdn.example"]}}"#,
                 script,
@@ -449,7 +449,7 @@ mod engine {
     async fn a_plugins_cover_crosses_host_http_in_binary_mode_intact() {
         let rig = Rig::new(
             "plugin-artwork",
-            r#"{"name":"demo","display_name":"Demo","api":3,"artwork":true,"main":"main.js",
+            r#"{"name":"demo","display_name":"Demo","api":4,"artwork":true,"lyrics":false,"main":"main.js",
                 "capabilities":["search"],
                 "permissions":{"net":["*.cdn.example"]}}"#,
             r#"
@@ -497,7 +497,7 @@ mod engine {
     async fn declaring_covers_without_the_export_does_not_start() {
         let rig = Rig::new(
             "plugin-artwork-missing",
-            r#"{"name":"demo","display_name":"Demo","api":3,"artwork":true,"main":"main.js"}"#,
+            r#"{"name":"demo","display_name":"Demo","api":4,"artwork":true,"lyrics":false,"main":"main.js"}"#,
             "export function health() { return { reachable: true }; }",
         );
         let err = rig
@@ -520,6 +520,80 @@ mod engine {
         let provider = rig.provider();
         assert!(!provider.info().capabilities.contains(Capabilities::ARTWORK));
         let err = provider.artwork(&track_id("42"), 500).await.unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Unsupported { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// api 4 (D-078): `synced` is LRC text and is read with the core's own
+    /// parser; `plain` is the words alone; `synced` without a single stamp is
+    /// a contract error with the reason, not words shown as "synced".
+    #[tokio::test]
+    async fn a_plugins_lyrics_are_read_as_lrc_and_a_stampless_synced_is_refused() {
+        let rig = Rig::new(
+            "plugin-lyrics",
+            r#"{"name":"demo","display_name":"Demo","api":4,"artwork":false,"lyrics":true,"main":"main.js"}"#,
+            r#"
+            export function health() { return { reachable: true }; }
+            export function lyrics(id) {
+                if (id === "timed") {
+                    return { synced: "[00:01.50]one\n[00:03.250]two", attribution: "Source: test" };
+                }
+                if (id === "words") return { plain: "one\ntwo" };
+                if (id === "quiet") return { instrumental: true };
+                if (id === "broken") return { synced: "one\ntwo" };
+                return null;
+            }
+            "#,
+        );
+        let provider = rig.provider();
+        assert!(provider.info().capabilities.contains(Capabilities::LYRICS));
+        assert!(provider.is_plugin());
+
+        let timed = provider.lyrics(&track_id("timed")).await.unwrap().unwrap();
+        assert!(timed.lyrics.synced);
+        assert_eq!(timed.lyrics.lines[1].start_ms, Some(3_250));
+        assert_eq!(timed.lyrics.attribution.as_deref(), Some("Source: test"));
+        assert_eq!(timed.source, crate::lyrics::LyricsSource::Provider);
+
+        let words = provider.lyrics(&track_id("words")).await.unwrap().unwrap();
+        assert!(!words.lyrics.synced);
+        assert_eq!(words.lyrics.lines.len(), 2);
+
+        let quiet = provider.lyrics(&track_id("quiet")).await.unwrap().unwrap();
+        assert!(quiet.instrumental);
+
+        assert_eq!(provider.lyrics(&track_id("none")).await.unwrap(), None);
+
+        let err = provider.lyrics(&track_id("broken")).await.unwrap_err();
+        assert!(
+            err.chain_text().contains("no `[mm:ss.xx]` stamp"),
+            "{}",
+            err.chain_text()
+        );
+    }
+
+    /// `"lyrics": true` without the export does not start; with `false` the
+    /// plugin says it cannot, and LRCLIB is asked instead.
+    #[tokio::test]
+    async fn declaring_lyrics_without_the_export_does_not_start() {
+        let rig = Rig::new(
+            "plugin-lyrics-missing",
+            r#"{"name":"demo","display_name":"Demo","api":4,"artwork":false,"lyrics":true,"main":"main.js"}"#,
+            "export function health() { return { reachable: true }; }",
+        );
+        let err = rig.provider().lyrics(&track_id("1")).await.unwrap_err();
+        assert!(
+            err.chain_text().contains("`lyrics`"),
+            "{}",
+            err.chain_text()
+        );
+
+        let rig = Rig::simple("plugin-no-lyrics", BASIC);
+        let provider = rig.provider();
+        assert!(!provider.info().capabilities.contains(Capabilities::LYRICS));
+        let err = provider.lyrics(&track_id("42")).await.unwrap_err();
         assert!(
             matches!(err.kind(), ErrorKind::Unsupported { .. }),
             "{err:?}"
@@ -1068,7 +1142,7 @@ mod engine {
         fn manifest(tool_sha: &str, slow_sha: &str) -> String {
             let platform = artifact::current_platform();
             format!(
-                r#"{{"name":"demo","display_name":"Demo","api":3,"artwork":false,"main":"main.js",
+                r#"{{"name":"demo","display_name":"Demo","api":4,"artwork":false,"lyrics":false,"main":"main.js",
                     "capabilities":["search"],
                     "requires":[
                       {{"name":"tool","version":"1","assets":{{"{platform}":
@@ -1238,7 +1312,7 @@ mod engine {
             let rig = Rig::new(
                 name,
                 &format!(
-                    r#"{{"name":"demo","display_name":"Demo","api":3,"artwork":false,"main":"main.js",
+                    r#"{{"name":"demo","display_name":"Demo","api":4,"artwork":false,"lyrics":false,"main":"main.js",
                         "capabilities":["search"],
                         "requires":[
                           {{"name":"tool","version":"1","assets":{{"{platform}":

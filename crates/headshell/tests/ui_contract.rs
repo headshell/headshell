@@ -25,12 +25,18 @@
 //! without saying anything, and a description from the catalog (D-071,
 //! remote data) written as markup could smuggle a script into a page with
 //! IPC access.
+//!
+//! D-078 added the plainest one: a script that does not parse. The webview
+//! drops the whole module — and every module that imports it — and the
+//! window stays empty; every other test here reads the scripts as text and
+//! would stay green. They are parsed with the embedded QuickJS.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 const APP_JS: &str = include_str!("../ui/app.js");
 const MOTION_JS: &str = include_str!("../ui/motion.js");
 const ANCHOR_JS: &str = include_str!("../ui/anchor.js");
+const LYRICS_JS: &str = include_str!("../ui/lyrics.js");
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 const STYLE_CSS: &str = include_str!("../ui/style.css");
 const STARTUP_ERROR_HTML: &str = include_str!("../ui/startup-error.html");
@@ -354,6 +360,7 @@ fn no_script_writes_markup_or_inline_style() {
         ("app.js", APP_JS),
         ("motion.js", MOTION_JS),
         ("anchor.js", ANCHOR_JS),
+        ("lyrics.js", LYRICS_JS),
         ("startup-error.js", STARTUP_ERROR_JS),
     ] {
         for line in code_lines(source) {
@@ -383,4 +390,30 @@ fn the_pages_carry_no_inline_style_attribute() {
             "{name} carries an inline `style` attribute; CSP ignores it"
         );
     }
+}
+
+/// Every module the page loads parses (D-078), so a syntax error is caught
+/// here, where the webview would only leave the window empty. Declaring
+/// compiles a module and finds what it imports among the modules already
+/// declared — so they go first, in the order the page's imports need them;
+/// nothing is evaluated.
+#[test]
+fn every_script_the_page_loads_parses() {
+    let runtime = rquickjs::Runtime::new().unwrap();
+    let context = rquickjs::Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        for (name, source) in [
+            ("anchor.js", ANCHOR_JS),
+            ("lyrics.js", LYRICS_JS),
+            ("motion.js", MOTION_JS),
+            ("app.js", APP_JS),
+        ] {
+            if let Err(err) = rquickjs::Module::declare(ctx.clone(), name, source) {
+                panic!(
+                    "{name} does not parse: {}",
+                    rquickjs::CaughtError::from_error(&ctx, err)
+                );
+            }
+        }
+    });
 }

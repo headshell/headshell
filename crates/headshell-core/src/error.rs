@@ -105,6 +105,13 @@ pub enum ErrorKind {
     #[error("unusable cover image: {detail}")]
     Artwork { detail: String },
 
+    /// Lyrics that cannot be used, or a lyrics service that answered with
+    /// something it should not have: a `.lrc` that is not UTF-8, a `SYLT`
+    /// frame that counts MPEG frames, LRCLIB busy (D-078). Its `detail` says
+    /// which.
+    #[error("lyrics: {detail}")]
+    Lyrics { detail: String },
+
     /// The provider does not have this capability.
     ///
     /// "I can't" and "no results" are different things; the latter is an empty

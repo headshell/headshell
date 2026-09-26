@@ -5073,3 +5073,178 @@ waits 4.3 s and the gate test fails.
 each, and `--breakdown` for one start's parts; the live plugin tests. One run of the live
 SoundCloud tests failed at the plugin's client_id discovery and passed when run again:
 the service, not this change.
+
+## D-078 — Lyrics: the exact recording's words, the file's first, LRCLIB by length; plugin api 4
+
+**Date:** 2026-09-26 · **Status:** APPLIED (2026-09-26)
+
+**Question:** The user: *"Let's add a lyrics section to now playing. Fetch it as LRC
+from a source, matching exactly the music that plays. Give me the options, and I'll
+tell you which to do."* The facts were verified first (§0.1: an API shape is not
+assumed), four questions were asked with them (§0.2), and a fifth when an answer left
+the servers open. The answers are the decisions below; the user also asked for the
+interface to be done with /apple-design, as for D-075.
+
+**Decision:**
+
+1. **Sources: LRCLIB and a plugin gate** — the user's choice over LRCLIB alone. LRCLIB
+   is free, keyless and open (MIT, a Rust server), and gives synced lyrics as LRC. A
+   plugin may give its service's own lyrics (api 4). Musixmatch (a key and a commercial
+   agreement for timing; its free route is an unofficial endpoint), NetEase and QQ
+   (unofficial APIs) can only come as plugins; Spotify never (K4); Genius has no timing.
+2. **The file's own lyrics win, and need no network.** The user: *"If there is a file
+   in the added folder, or one built into the local music file, use it; otherwise don't
+   fetch from the internet until the lyrics button is pressed. For plugin tracks, fetch
+   the moment the song starts — with plugins it's online anyway."* So: a `.lrc` beside
+   the file with its name, then its tags — synced or not, they are taken as they are.
+3. **A server's own lyrics at once** (the fifth question; the user: *"yes, automatic
+   when it plays"*): OpenSubsonic's `getLyricsBySongId`, Jellyfin's
+   `/Audio/{id}/Lyrics` — the same file on the server. LRCLIB for a server's track only
+   when asked, as for a local file's.
+4. **"Asked" is the lyrics view on screen**, not `--online`: opening the lyrics tab or
+   the whole-sheet view is the user asking, for the playing track and the ones after
+   it while it stays open; closing it stops. `headshell lyrics` is the same request.
+   The desktop's `HEADSHELL_ONLINE` does not change it — the user's rule is explicit.
+5. **No version of the recording's length: the nearest, marked, and a shift** — the
+   user's choice over "the words without timing" and "nothing". The nearest synced
+   version is shown with how far it is ("15.0 s longer") and buttons that move the
+   lines by 0.5 s; the shift is kept per track, and the next play has it. Only when no
+   version is synced are the words alone shown.
+6. **The view: both** — *up next | lyrics* tabs beside the record, and a button that
+   grows the lyrics to the whole sheet.
+7. **Phase 3, §3.12.** No new crate: the LRC and `SYLT` readers are written here, LRCLIB
+   goes through the existing HTTP client, and the cache through the covers' store —
+   whose atomic write and temporary-name check moved to `store.rs`, shared, instead of
+   being copied.
+
+**How "exactly the recording" is held.** Synced lines are timed against one release of
+a song; another release's are seconds off. LRCLIB's versions are therefore taken **by
+the length of the recording that plays** — the decoder's where it is known, the tags'
+otherwise:
+
+- the artist and the title must match, normalised as the identity chain does —
+  `(Remastered)` is the same song, `(Live)` is not;
+- a synced version within **±2 s** (LRCLIB's own window, read in its source), the
+  nearest first; the version on the track's album breaks ties;
+- **the album guard:** when the track's album has a synced version at LRCLIB, only the
+  album's versions are weighed (see *found while verifying*);
+- a version marked instrumental within the window is the answer "no words";
+- then the nearest synced version anywhere (`LyricsFit::Closest`), then unsynced words.
+
+The chain, in order: the file's own; the provider's own, synced ones winning; LRCLIB's
+synced version; the provider's unsynced words; LRCLIB's. A plugin's lyrics are the
+recording's own too — the same item the audio comes from — and are not measured.
+
+**The shape.** `Provider::lyrics(id)` with `Capabilities::LYRICS` (its default says
+"cannot", stage `LYRICS_READ`), and `Provider::is_plugin()` — a plugin's tracks go
+online at once. The stages `LYRICS_READ`, `LYRICS_LOOKUP` and `LYRICS_STORE`. The report
+names the source (`sidecar`, `embedded`, `provider`, `lrclib`), whether it is synced,
+how it fits (`own`, `length`, `closest`, `unmeasured`) and by how much; "not requested",
+"not found" and "failed" are three statuses (K9). `Lyrics::line_at` is the line being
+sung; the interface keeps a second copy in `ui/lyrics.js`, bound to the first by
+`fixtures/lyrics/line_at_cases.json`, as the anchor's cases bind the position (D-033).
+
+**The cache** is `<data>/lyrics/`: LRCLIB's answer per track — a synced version of the
+length for good; the nearest one, unsynced words, "instrumental" and "none" for 30 days,
+then asked again (LRCLIB grows and gets corrected) — and the user's shifts, which
+outlive a new answer. The file's and the provider's lyrics are not kept: an edited
+`.lrc` shows at once.
+
+**The flow.** One background thread per session (`headshell-lyrics`) takes **the playing
+track only** — "the moment it starts" was the user's rule, and LRCLIB's patience is not
+spent on a queue nobody reaches. What the links answered is kept for the playing track,
+so opening the view later asks only LRCLIB, not the plugin again; a failed link is asked
+again by "try again". LRCLIB is asked one request a second, and a busy answer (`503`)
+twice more before it is said.
+
+**The CLI and the IPC (D-033).** `headshell lyrics "<query>" [--all] | --file <audio>
+[--print] [--shift MS]`, with `--json` and a snapshot. The desktop mirrors it as
+`lyrics`; `lyrics_now`, `lyrics_view` and `lyrics_shift` are the playing track's side,
+and `TickReport::lyrics_ready` says when its answer changed.
+
+**Plugin api 4.** Like api 3 (D-076), a required declaration: the manifest **must** say
+`"lyrics": true` or `false`. With `true` the plugin exports `lyrics(id)` and returns `{
+synced?, plain?, instrumental?, attribution? }` or `null`; `synced` is LRC text, read by
+the core's own parser. api 3 manifests no longer load. The catalog's `ytmusic` 0.6.0
+gives YouTube Music's own lyrics, timed; `soundcloud` 0.4.0 says it has none.
+
+**The interface (with /apple-design).** The line being sung is at full strength and the
+others dimmed with `opacity` — never held at a scale, since a transform left on text
+blurs it in WebKit; a line lifts slightly as it lights and settles at rest. Following it
+is one spring: the scroll position jumps to where the line reads (a third of the way
+down), the list is put back where it was seen and springs to rest — a glide that
+animates no scroll offset (D-028). A line arriving mid-glide carries the glide on from
+where it is seen (`motion.js`'s new `rebase`). The user's wheel or drag takes over at
+once — the glide's remainder is folded into the scroll position — every line comes up to
+be read, and following resumes four seconds after the last scroll. The whole-sheet view
+grows out of the lyrics column and goes back into it, the record fading behind; caught
+halfway, it turns around; reduced motion is a fade. `L` opens the lyrics and goes back to
+up next; `Esc` closes the whole-sheet view first.
+
+**Checked before writing, as asked:**
+- **LRCLIB, in its source:** `/api/get` matches the lower-cased artist and title exactly,
+  the album exactly when given, the length within ±2 s when given — and without a
+  length not at all; among several it returns the lowest id, not the synced one.
+  `/api/search` gives up to twenty versions. Neither takes an ISRC or an MBID. Two of
+  four quick requests got `503 ServerOverloaded`.
+- **Coverage, measured:** eight well-known Turkish songs all had synced versions — ten
+  to twenty each, of lengths from 198 s to 315 s for one of them.
+- **symphonia 0.6:** ID3 `USLT`, Vorbis `LYRICS`/`UNSYNCEDLYRICS`, APE `lyrics` and MP4
+  `©lyr` arrive as the standard `Lyrics` tag; ID3 `SYLT` as a raw binary tag.
+- **OpenSubsonic's specification and Navidrome's source:** `line.start` and `offset` in
+  milliseconds, a positive offset brings the lines sooner, `kind` separates the main
+  lyrics from translations.
+- **Jellyfin's source:** `LyricDto`, a line's `Start` in ticks, `404` for none; its LRC
+  parser never fills the metadata's offset.
+- **YouTube Music:** the `next` endpoint names the song's lyrics page; `browse` asked as
+  the mobile app gives timed lines (from LyricFind or Musixmatch), as the web client the
+  words alone. Five songs of five had timed lines; an instrumental had none.
+
+**Found while verifying:**
+- **A festival take lent its timing.** Portishead's "Sour Times" (*Dummy*, 251 s): at
+  LRCLIB the versions within two seconds were a 2013 festival's (251 s) and a 2011
+  one's (253 s), their titles without "(Live)"; the album's own was 254 s. The length
+  rule alone took the festival's lines. The album guard (the covers' lesson, D-076)
+  keeps them out; a test on that real data fails when the guard is taken out. Online,
+  the exact query then found the album's 249 s version the search's twenty had not
+  listed — within the window, and taken.
+- **`/api/get` would have handed back words without timing** while a synced version of
+  the same length existed: the choice is made here, over the search's versions.
+- **YouTube Music's mobile answer is not the same on every call** — once a line came
+  without its start. The plugin checks the lines and falls back to the words alone.
+- **`headshell lyrics --file` keyed a shift by the path as typed:** a relative path did
+  not meet the library's absolute one. The key uses the absolute path.
+- **No test parsed the page's scripts:** a syntax error in `app.js` leaves the window
+  empty, and every other test reads the scripts as text. Now they are declared in
+  QuickJS; a broken `app.js` was measured to fail it.
+- **In the container:** WebKit's overlay scroll bar stayed lit — following scrolls all
+  the time — so the lyrics hide it; the source line was cut off in the narrow column and
+  now wraps; "local has none" became "the file has no .lrc beside it and no lyrics in
+  its tags".
+- **The hanging-plugin test** replaced the echo plugin's script without its new export,
+  and failed on the contract instead of the timeout: it exports `lyrics` now.
+
+**Not done, and why:**
+- **Word-by-word timing:** LRCLIB gives it as YAML (`lyricsfile`), OpenSubsonic as
+  `cueLine`, Jellyfin as `Cues`; a YAML parser is a new crate, not asked.
+- **Seeking to a line with a click:** the core has no seek (§3.8).
+- **Translations** (OpenSubsonic's `translation` kind): not asked.
+- **Asking LRCLIB again for a track whose answer is kept,** before its 30 days: no way
+  in the app; deleting `<data>/lyrics/` does it.
+
+**The release order** is D-076's: this change, then the catalog (`soundcloud` 0.4.0,
+`ytmusic` 0.6.0, api 4), then a release. Until the catalog publishes them this
+repository's live plugin tests are red — they install from the published catalog, and
+this core refuses api 3. The catalog cannot go first: its CI builds headshell from this
+repository's `master`. The live plugin tests passed against a local mirror of the catalog
+carrying the api 4 plugins, run one at a time; run in parallel, two SoundCloud tests
+failed at the service (a timeout, the client_id discovery) and passed on their own.
+
+**Verification:** the §3.9 container (Debian 13, the host's WebKitGTK, Xvfb, a
+PulseAudio null sink): a made-up song whose `.lrc` was followed line by line through
+its end — the pause shown as ♪, a two-line line, Turkish letters; words without timing;
+a made-up track LRCLIB has nothing for ("not found", saying what was looked at); "Sour
+Times", its album's version by length; "Sil Baştan" at 290 s, which LRCLIB has only 15 s
+off — marked, shifted by 1.5 s, the shift kept in the index; the whole-sheet view
+growing and going back, `Esc`, `L`, and a hand scroll that brightened every line and
+gave the following back four seconds later.

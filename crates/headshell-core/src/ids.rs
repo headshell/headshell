@@ -183,6 +183,51 @@ impl fmt::Display for ArtworkKey {
     }
 }
 
+/// The key a track's lyrics — and the user's shift of them — are kept under
+/// (D-078): the track as its provider knows it.
+///
+/// Not the album's, as a cover's is: lyrics belong to one recording, and
+/// their timing to one release of it — a remaster with a longer silence at
+/// its start is another timing. The shells treat it as opaque: `lyrics:` and
+/// sixteen hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LyricsKey(String);
+
+impl LyricsKey {
+    /// The key of a track: its provider and the provider's id for it.
+    #[must_use]
+    pub fn of(id: &ProviderTrackId) -> Self {
+        Self(format!(
+            "lyrics:{}",
+            fnv1a64_hex(&format!("{}\u{1}{}", id.provider, id.id))
+        ))
+    }
+
+    /// Reads a key a shell sends back. Only the shape is checked, as for
+    /// [`ArtworkKey::parse`].
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let hash = raw.strip_prefix("lyrics:")?;
+        let shaped = hash.len() == 16
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        shaped.then(|| Self(raw.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for LyricsKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// ISRC — 12 characters: 2 country + 3 registrant + 2 year + 5 designation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -314,6 +359,25 @@ mod tests {
             "upper-case hex is not ours"
         );
         assert_eq!(ArtworkKey::parse("cover:0123456789abcdef"), None);
+    }
+
+    #[test]
+    fn a_lyrics_key_is_one_per_provider_track_and_only_its_shape_is_read_back() {
+        let local = ProviderTrackId::new(ProviderId::new("local"), "/music/a.flac");
+        let key = LyricsKey::of(&local);
+        assert_eq!(key, LyricsKey::of(&local.clone()));
+        assert_ne!(
+            key,
+            LyricsKey::of(&ProviderTrackId::new(
+                ProviderId::new("navidrome"),
+                "/music/a.flac"
+            )),
+            "the same id at another provider is another track"
+        );
+        assert!(key.as_str().starts_with("lyrics:"));
+        assert_eq!(LyricsKey::parse(key.as_str()), Some(key.clone()));
+        assert_eq!(LyricsKey::parse("lyrics:../../etc/passwd"), None);
+        assert_eq!(LyricsKey::parse("album:0123456789abcdef"), None);
     }
 
     #[test]

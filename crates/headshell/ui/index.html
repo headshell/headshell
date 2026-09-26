@@ -104,6 +104,12 @@
       <symbol id="i-refresh" viewBox="0 0 24 24">
         <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15" />
       </symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24">
+        <path d="M14 4h6v6M20 4l-6.5 6.5M10 20H4v-6M4 20l6.5-6.5" />
+      </symbol>
+      <symbol id="i-collapse" viewBox="0 0 24 24">
+        <path d="M19.5 9.5h-5v-5M14.5 9.5 20.5 3.5M4.5 14.5h5v5M9.5 14.5 3.5 20.5" />
+      </symbol>
       <symbol id="i-archive" viewBox="0 0 24 24">
         <rect x="3.5" y="4.5" width="17" height="4" rx="1" />
         <path d="M5 8.5v9.5A1.5 1.5 0 0 0 6.5 19.5h11A1.5 1.5 0 0 0 19 18V8.5M10 12.5h4" />
@@ -688,12 +694,68 @@
           </div>
 
           <div class="now-side">
-            <h2 class="section-title">up next <span id="queueCount" class="count"></span></h2>
-            <!-- What the covers could not do, and why (K9): "not looked up"
-                 and "not found" are different answers. -->
-            <p id="coverNote" class="cover-note" hidden></p>
-            <ol id="queue" class="queue"></ol>
+            <!-- Up next, or the lyrics (D-078) — the reference's tabs. The
+                 lyrics view being on screen is the user asking for lyrics:
+                 only then are a local file's and a server's looked up
+                 online. The button beside the tabs grows them to the whole
+                 sheet. -->
+            <div class="now-tabs">
+              <div id="nowTabs" class="segmented tabs" role="tablist" aria-label="beside the record">
+                <span class="segmented-thumb" aria-hidden="true"></span>
+                <button id="tabQueue" type="button" role="tab" class="segment" aria-selected="true" aria-controls="queuePanel">up next<span id="queueCount" class="count"></span></button>
+                <button id="tabLyrics" type="button" role="tab" class="segment" aria-selected="false" aria-controls="lyricsHome">lyrics</button>
+              </div>
+              <button id="btnLyricsExpand" class="icon-button subtle" type="button" title="lyrics on the whole sheet" aria-label="lyrics on the whole sheet" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-expand" /></svg>
+              </button>
+            </div>
+            <div id="queuePanel" class="now-panel" role="tabpanel" aria-labelledby="tabQueue">
+              <!-- What the covers could not do, and why (K9): "not looked up"
+                   and "not found" are different answers. -->
+              <p id="coverNote" class="cover-note" hidden></p>
+              <ol id="queue" class="queue"></ol>
+            </div>
+            <div id="lyricsHome" class="now-panel" role="tabpanel" aria-labelledby="tabLyrics" hidden>
+              <!-- One lyrics panel: here beside the record, or moved into the
+                   whole-sheet view below. Its lines are the core's; the line
+                   being sung is estimated from the anchor, as the progress
+                   bar is (`lyrics.js`). -->
+              <section id="lyricsPanel" class="lyrics-panel" aria-label="lyrics">
+                <p id="lyricsNote" class="lyrics-note" hidden></p>
+                <div id="lyricsScroll" class="lyrics-scroll" tabindex="0">
+                  <ol id="lyricsLines" class="lyrics"></ol>
+                </div>
+                <div class="lyrics-foot">
+                  <p id="lyricsSource" class="lyrics-source"></p>
+                  <div id="lyricsShift" class="lyrics-shift" role="group" aria-label="shift the lyrics" hidden>
+                    <button id="btnShiftSooner" type="button" title="the lines 0.5 s sooner">sooner</button>
+                    <button id="btnShiftReset" type="button" class="shift-value" title="back to the lyrics' own timing">on time</button>
+                    <button id="btnShiftLater" type="button" title="the lines 0.5 s later">later</button>
+                  </div>
+                </div>
+              </section>
+            </div>
           </div>
+        </div>
+
+        <!-- The lyrics on the whole sheet (D-078). It grows out of the lyrics
+             column and goes back into it; the record and the queue fade
+             behind it. The lyrics panel itself moves in here — one panel,
+             one scroll position, one set of lines. -->
+        <div id="lyricsFull" class="lyrics-full" hidden>
+          <header class="lyrics-full-head">
+            <span id="lyricsFullRecord" class="mini-record" aria-hidden="true">
+              <img id="lyricsFullCover" alt="" hidden />
+            </span>
+            <span class="lyrics-full-track">
+              <strong id="lyricsFullTitle"></strong>
+              <span id="lyricsFullArtist"></span>
+            </span>
+            <button id="btnLyricsCollapse" class="icon-button subtle" type="button" title="back beside the record (Esc)" aria-label="back beside the record">
+              <svg class="icon" aria-hidden="true"><use href="#i-collapse" /></svg>
+            </button>
+          </header>
+          <div id="lyricsFullBody" class="lyrics-full-body"></div>
         </div>
 
         <!-- An empty queue is not an error but a beginning. Saying what the user
@@ -793,10 +855,11 @@
           <li><span><kbd>space</kbd></span> pause / resume</li>
           <li><span><kbd>←</kbd> <kbd>→</kbd></span> previous / next track</li>
           <li><span><kbd>/</kbd></span> go to the play box</li>
+          <li><span><kbd>L</kbd></span> the lyrics — and again, back to up next</li>
           <li><span><kbd>Enter</kbd></span> play the first match</li>
           <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> queue every matching track</li>
           <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></span> sections, in the sidebar's order</li>
-          <li><span><kbd>Esc</kbd></span> close the topmost: this list, the notices, now playing</li>
+          <li><span><kbd>Esc</kbd></span> close the topmost: this list, the notices, the whole-sheet lyrics, now playing</li>
           <li><span><kbd>?</kbd></span> this list</li>
         </ul>
         <p class="hint">

@@ -23,13 +23,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::ArtworkSource;
 use super::image::{Format, Normalized, Variant};
 use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result, io_err};
 use crate::ids::ArtworkKey;
+use crate::store::{content_name, is_content_name, is_our_temporary, write_atomic};
 
 const INDEX_FILE: &str = "index.json";
 const INDEX_VERSION: u32 = 1;
@@ -216,19 +216,18 @@ impl ArtworkCache {
         };
         let text = serde_json::to_string_pretty(&index)
             .map_err(|err| store_error(format!("could not write the index: {err}")))?;
-        write_atomic(&self.index_path(), text.as_bytes())?;
+        write_atomic(&self.index_path(), text.as_bytes(), Stage::ArtworkStore)?;
         self.entries = index.entries;
         Ok(())
     }
 
     fn write_image(&self, variant: &Variant) -> Result<StoredImage> {
-        let hash = Sha256::digest(&variant.bytes);
-        let name: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        let name = content_name(&variant.bytes);
         let file = format!("{name}.{}", variant.format.extension());
         let path = self.dir.join(&file);
         // Named by content: if it is there, it is this image.
         if !path.is_file() {
-            write_atomic(&path, &variant.bytes)?;
+            write_atomic(&path, &variant.bytes, Stage::ArtworkStore)?;
         }
         Ok(StoredImage {
             file,
@@ -287,55 +286,15 @@ impl ArtworkCache {
     }
 }
 
-/// A write this cache began and never finished (`index.tmp-<pid>-<n>`,
-/// `<64 hex>.tmp-<pid>-<n>`): a crash in the middle leaves one behind.
-fn is_our_temporary(name: &str) -> bool {
-    let Some((stem, suffix)) = name.split_once(".tmp-") else {
-        return false;
-    };
-    let hex = stem.len() == 64
-        && stem
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    let numbered = suffix.split_once('-').is_some_and(|(pid, n)| {
-        !pid.is_empty()
-            && !n.is_empty()
-            && (pid.bytes().chain(n.bytes())).all(|b| b.is_ascii_digit())
-    });
-    (stem == "index" || hex) && numbered
-}
-
 /// The format of a name this cache writes (`<64 hex>.<extension>`), or
 /// `None` for anything else — the cache never touches a file it did not
 /// name.
 fn cache_file_format(name: &str) -> Option<Format> {
     let (stem, extension) = name.split_once('.')?;
-    let hex = stem.len() == 64
-        && stem
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if !hex {
+    if !is_content_name(stem) {
         return None;
     }
     Format::from_extension(extension)
-}
-
-/// Writes next to the target and renames: the target is the old file or the
-/// new one, never a torn one.
-///
-/// The temporary name is this write's own: in the desktop the background
-/// worker and an `artwork` command write the same index from two threads of
-/// one process, so the process id alone would give both the same file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    std::fs::write(&temporary, bytes)
-        .map_err(|source| io_err(Stage::ArtworkStore, &temporary, source))?;
-    std::fs::rename(&temporary, path).map_err(|source| {
-        let _ = std::fs::remove_file(&temporary);
-        io_err(Stage::ArtworkStore, path, source)
-    })
 }
 
 #[cfg(test)]
@@ -437,14 +396,5 @@ mod tests {
         assert_eq!(cache_file_format(&format!("{hash}.exe")), None);
         assert_eq!(cache_file_format("index.json"), None);
         assert_eq!(cache_file_format(&format!("{}.png", "A".repeat(64))), None);
-
-        assert!(is_our_temporary("index.tmp-4242-7"));
-        assert!(is_our_temporary(&format!("{hash}.tmp-4242-0")));
-        assert!(
-            !is_our_temporary("index.tmp-4242"),
-            "not a name this cache writes"
-        );
-        assert!(!is_our_temporary("notes.tmp-1-2"));
-        assert!(!is_our_temporary(&format!("{hash}.tmp-x-1")));
     }
 }

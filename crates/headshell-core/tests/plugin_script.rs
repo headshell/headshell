@@ -126,6 +126,28 @@ async fn a_script_plugin_answers_health_search_and_resolve() {
         provider.artwork(&other, 500).await.unwrap().is_none(),
         "no cover is an answer: the chain goes on"
     );
+
+    // api 4 (D-078): the manifest says `"lyrics": true`; `synced` crosses as
+    // LRC text and is read with the same parser as a `.lrc` file, the
+    // service's credit with it.
+    assert!(provider.info().capabilities.contains(Capabilities::LYRICS));
+    assert!(provider.is_plugin());
+    let lyrics = provider.lyrics(&id).await.unwrap().unwrap();
+    assert!(lyrics.lyrics.synced);
+    assert_eq!(lyrics.lyrics.lines[1].start_ms, Some(4_500));
+    assert_eq!(lyrics.lyrics.lines[1].text, "and a second one");
+    assert_eq!(
+        lyrics.lyrics.attribution.as_deref(),
+        Some("Source: the echo test plugin")
+    );
+    assert_eq!(
+        lyrics.source,
+        headshell_core::lyrics::LyricsSource::Provider
+    );
+    assert!(
+        provider.lyrics(&other).await.unwrap().is_none(),
+        "no lyrics is an answer: the chain goes on"
+    );
 }
 
 /// api 1's Python plugin is refused **without crashing** and the user is told
@@ -241,7 +263,8 @@ async fn a_hanging_plugin_times_out_instead_of_freezing_the_core() {
         "export function health() { for (;;) {} }\n\
          export function search() { return []; }\n\
          export function resolve_source() { return null; }\n\
-         export function artwork() { return null; }\n",
+         export function artwork() { return null; }\n\
+         export function lyrics() { return null; }\n",
     )
     .unwrap();
 

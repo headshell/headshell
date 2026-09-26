@@ -22,6 +22,7 @@
 // Identifiers and user-facing text are both in English (D-036, D-073).
 
 import { positionAt, clock } from "./anchor.js";
+import { lineAt, readingTop } from "./lyrics.js";
 import {
   animate,
   currentMotion,
@@ -31,6 +32,7 @@ import {
   place,
   presentation,
   project,
+  rebase,
   rubberband,
   verticalDrag,
   watchMotionPreference,
@@ -421,6 +423,7 @@ window.addEventListener("resize", () => {
   movePill(true);
   sleeveFormat.placeThumb(true);
   pluginTabs.placeThumb(true);
+  nowTabs.placeThumb(true);
 });
 
 // ————————————————————————————————————— segmented control
@@ -500,7 +503,10 @@ function renderQueue(view) {
   // empty list does not tell the user what to do.
   $("nowView").hidden = empty;
   $("nowEmpty").hidden = !empty;
-  $("queueCount").textContent = empty ? "" : `· ${countOf(view.items.length, "track")}`;
+  $("queueCount").textContent = empty ? "" : String(view.items.length);
+  $("tabQueue").title = empty ? "" : countOf(view.items.length, "track");
+  // Nothing to show lyrics for: the whole-sheet view goes back.
+  if (empty) setLyricsFull(false);
 
   const shuffle = $("btnShuffle");
   shuffle.classList.toggle("on", view.shuffle);
@@ -569,6 +575,7 @@ function renderNow() {
   $("queue").dataset.state = state;
   moveArm();
   paintLabel();
+  renderLyricsHead();
 
   const card = $("nowCard");
   card.hidden = !current;
@@ -621,6 +628,7 @@ function draw() {
     timeLabel.textContent = label;
     drawnLabel = label;
   }
+  lightLyricLine(position);
 }
 
 function drawFrame() {
@@ -841,6 +849,7 @@ function paintLabel() {
   if (!uri) return;
   nowCoverImage.setAttribute("href", uri);
   animate(nowCover, { opacity: 1 }, { from: { opacity: 0 } });
+  renderLyricsHead();
 }
 
 /// What the covers could not do, under the queue's title — only when there
@@ -878,6 +887,388 @@ function coverSummaryText(s) {
     .map(([n, label]) => `${fmt(n)} ${label}`);
   return `covers of ${countOf(s.tracks, "track")}: ${parts.join(" · ") || "none"}`;
 }
+
+// ————————————————————————————————————— lyrics (D-078)
+//
+// The core looks the playing track's lyrics up in the background: where the
+// track lives at once; LRCLIB, for a local file's or a server's track, only
+// while a lyrics view is on screen — the user's rule, and this file keeps its
+// half of it: the view being shown is the request (`lyrics_view`). A plugin's
+// track is looked up at once; it plays from the internet anyway. The status,
+// the source, how the timing fits and the shift are the core's; this only
+// draws them.
+//
+// The line being sung is estimated every frame from the anchor, as the
+// progress bar is (`lyrics.js`, bound to the core's copy by a shared set of
+// cases).
+//
+// Following it is one spring on the list's transform. The scroll position
+// jumps to where the line reads, the list is put back where it was seen and
+// springs to rest: a glide that animates no scroll offset (D-028). A line that
+// comes mid-glide carries the glide on from where the list is seen
+// (`rebase`). The user's own scroll takes over at once — the glide's
+// remainder is folded into the scroll position — and every line comes up to
+// be read; following resumes a few seconds after the last scroll.
+
+const LYRIC_DIM = 0.34;
+const LYRIC_BROWSING = 0.8;
+const FOLLOW_PAUSE_MS = 4000;
+const SHIFT_STEP_MS = 500;
+
+const lyricsScroll = $("lyricsScroll");
+const lyricsList = $("lyricsLines");
+const lyricsFullView = $("lyricsFull");
+const nowView = $("nowView");
+
+let lyricsItem = null;
+let lyricsShown = false;
+let lyricsFull = false;
+let lyricsDrawn = "";
+let litLine = null;
+let litElement = null;
+let lightStale = true;
+let followInstant = true;
+let browsing = false;
+let browseTimer = 0;
+
+const LYRICS_FROM = {
+  sidecar: "from the .lrc beside the file",
+  embedded: "from the file's tags",
+  lrclib: "from LRCLIB",
+};
+
+const nowTabs = segmented($("nowTabs"), (tab) => {
+  const lyrics = tab.id === "tabLyrics";
+  $("queuePanel").hidden = lyrics;
+  $("lyricsHome").hidden = !lyrics;
+  $("btnLyricsExpand").hidden = !lyrics;
+  followInstant = true;
+  lightStale = true;
+  updateLyricsView();
+  if (lyrics) draw();
+  else revealCurrentRow();
+});
+
+function lyricsTabSelected() {
+  return nowTabs.selected().id === "tabLyrics";
+}
+
+/// Is a lyrics view on screen? That is the user asking for lyrics.
+function lyricsOnScreen() {
+  return nowOpen && (lyricsFull || lyricsTabSelected());
+}
+
+/// Tells the core when a lyrics view comes on screen or goes: only while one
+/// is there are a local file's and a server's lyrics looked up online.
+async function updateLyricsView() {
+  const shown = lyricsOnScreen();
+  if (shown === lyricsShown) return;
+  lyricsShown = shown;
+  if (shown) {
+    followInstant = true;
+    lightStale = true;
+  }
+  const item = await call("lyrics_view", { open: shown });
+  if (item !== undefined) showLyrics(item);
+}
+
+async function refreshLyrics() {
+  const item = await call("lyrics_now");
+  if (item !== undefined) showLyrics(item);
+}
+
+/// The core's answer for the playing track — `null` when nothing plays.
+function showLyrics(item) {
+  lyricsItem = item;
+  const lyrics = item?.lyrics ?? null;
+  const drawn = item ? `${item.key}\u0001${item.status}\u0001${JSON.stringify(lyrics)}` : "";
+  if (drawn !== lyricsDrawn) {
+    lyricsDrawn = drawn;
+    drawLyricLines(lyrics);
+  }
+  paintLyricsNote(item);
+  paintLyricsSource(item);
+  paintLyricsShift(item);
+  // The line lit now, at once: a new track, a new shift.
+  lightStale = true;
+  draw();
+}
+
+function drawLyricLines(lyrics) {
+  litLine = null;
+  litElement = null;
+  followInstant = true;
+  place(lyricsList, { y: 0 });
+  const synced = Boolean(lyrics?.synced);
+  lyricsList.classList.toggle("unsynced", Boolean(lyrics) && !synced);
+  lyricsList.replaceChildren(
+    ...(lyrics?.lines ?? []).map((line) => {
+      const gap = line.text.trim() === "";
+      // A pause in synced lyrics shows as a note; a blank line in unsynced
+      // words parts the verses.
+      const el = h("li", { class: gap ? "lyric gap" : "lyric" }, gap && synced ? "♪" : line.text);
+      if (synced) place(el, { opacity: browsing ? LYRIC_BROWSING : LYRIC_DIM });
+      return el;
+    }),
+  );
+  lyricsScroll.scrollTop = 0;
+}
+
+/// Lights the line sung at `position` and follows it — every frame, from
+/// `draw`; it writes to the DOM only when the line changes.
+function lightLyricLine(position) {
+  const lyrics = lyricsItem?.lyrics;
+  if (!lyricsShown || !lyrics?.synced) return;
+  const index = lineAt(lyrics, position, lyricsItem.offset_ms ?? 0);
+  if (index === litLine && !lightStale) return;
+  lightStale = false;
+  litLine = index;
+  const current = index === null ? null : lyricsList.children[index] ?? null;
+  if (litElement && litElement !== current) {
+    animate(litElement, { opacity: browsing ? LYRIC_BROWSING : LYRIC_DIM });
+  }
+  if (current && current !== litElement) {
+    animate(current, { opacity: 1 });
+    // A small lift as it lights, settling at rest: a transform left on text
+    // would blur it.
+    animate(current, { scale: 1 }, { from: { scale: 0.985 } });
+  }
+  litElement = current;
+  followLine();
+}
+
+/// Brings the lit line — or the first, before it — to the reading position.
+function followLine() {
+  const instant = followInstant;
+  followInstant = false;
+  if (!lyricsShown || browsing || !lyricsItem?.lyrics?.synced) return;
+  const target = litElement ?? lyricsList.firstElementChild;
+  if (!target || !lyricsScroll.clientHeight) return;
+  const before = lyricsScroll.scrollTop;
+  lyricsScroll.scrollTop = readingTop(
+    target.offsetTop,
+    target.offsetHeight,
+    lyricsScroll.clientHeight,
+    lyricsScroll.scrollHeight,
+  );
+  const jump = lyricsScroll.scrollTop - before;
+  if (Math.abs(jump) < 0.5) return;
+  if (instant || !currentMotion().spatial) {
+    place(lyricsList, { y: 0 });
+    return;
+  }
+  // Put back where it was seen, and let it glide to rest.
+  rebase(lyricsList, "y", jump);
+  animate(lyricsList, { y: 0 }, { responseScale: 1.5 });
+}
+
+/// The user scrolls the lyrics: their hand wins at once.
+function startBrowsing() {
+  const shift = presentation(lyricsList, "y");
+  if (shift !== 0) {
+    // What the user grabs is where the lines are seen.
+    lyricsScroll.scrollTop -= shift;
+    place(lyricsList, { y: 0 });
+  }
+  if (!browsing && lyricsItem?.lyrics?.synced) {
+    for (const line of lyricsList.children) {
+      if (line !== litElement) animate(line, { opacity: LYRIC_BROWSING });
+    }
+  }
+  browsing = true;
+  clearTimeout(browseTimer);
+  browseTimer = setTimeout(stopBrowsing, FOLLOW_PAUSE_MS);
+}
+
+function stopBrowsing() {
+  browsing = false;
+  if (lyricsItem?.lyrics?.synced) {
+    for (const line of lyricsList.children) {
+      if (line !== litElement) animate(line, { opacity: LYRIC_DIM });
+    }
+  }
+  followLine();
+}
+
+for (const type of ["wheel", "touchstart", "pointerdown"]) {
+  lyricsScroll.addEventListener(type, startBrowsing, { passive: true });
+}
+lyricsScroll.addEventListener("keydown", (event) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) startBrowsing();
+});
+
+/// `1.2 s` — to a tenth.
+function seconds(ms) {
+  const magnitude = Math.abs(ms);
+  return `${Math.floor(magnitude / 1000)}.${Math.floor((magnitude % 1000) / 100)} s`;
+}
+
+function lengthDifference(deltaMs) {
+  if (!deltaMs) return "of this recording's length";
+  return `${seconds(deltaMs)} ${deltaMs > 0 ? "longer" : "shorter"}`;
+}
+
+/// Why there are no lyrics, or what to know about these. "Not looked up",
+/// "not found" and "failed" are different answers (K9); an unknown status is
+/// shown raw, not guessed.
+function paintLyricsNote(item) {
+  const note = $("lyricsNote");
+  let text = null;
+  let warn = false;
+  let retry = false;
+  if (!item) {
+    text = "Nothing is playing.";
+  } else {
+    switch (item.status) {
+      case "pending":
+        text = "Looking for the lyrics…";
+        break;
+      case "not_requested":
+        text = "The lyrics are looked up while this view is open.";
+        break;
+      case "not_found":
+        text = `No lyrics for this recording — ${item.detail}.`;
+        break;
+      case "instrumental":
+        text = "Instrumental — no words.";
+        break;
+      case "failed":
+        text = `The lyrics could not be looked up — ${firstLine(item.chain)}`;
+        retry = true;
+        break;
+      case "found":
+        if (item.synced && item.fit === "closest") {
+          warn = true;
+          text =
+            "The timing may be off: LRCLIB has no version of this recording's length, and its nearest " +
+            `is ${lengthDifference(item.delta_ms)}. Shift the lines until they meet the singing.`;
+        } else if (!item.synced) {
+          text = "Words without their timing — nothing to follow.";
+        } else if (item.fit === "unmeasured") {
+          text = "The recording's length is not known, so the timing could not be checked.";
+        }
+        break;
+      default:
+        text = `lyrics: ${item.status}`;
+    }
+  }
+  note.hidden = !text;
+  note.classList.toggle("warn", warn);
+  note.replaceChildren(...(text ? [h("span", { text })] : []));
+  if (retry) {
+    note.append(h("br"), h("button", { type: "button", onclick: retryLyrics }, "try again"));
+  }
+}
+
+async function retryLyrics() {
+  const item = await call("lyrics_view", { open: true });
+  if (item !== undefined) showLyrics(item);
+}
+
+/// Where they came from — the source, how the version fits, and the
+/// service's credit when it gives one.
+function paintLyricsSource(item) {
+  const el = $("lyricsSource");
+  if (!item || !["found", "instrumental"].includes(item.status)) {
+    el.textContent = "";
+    el.title = "";
+    return;
+  }
+  let from = item.source === "provider" ? `from ${item.provider}` : (LYRICS_FROM[item.source] ?? `from ${item.source}`);
+  if (item.source === "lrclib" && item.fit === "length") {
+    from += ` · its version ${lengthDifference(item.delta_ms)}`;
+  }
+  const credit = item.lyrics?.attribution;
+  el.textContent = credit ? `${from} · ${credit}` : from;
+  el.title = el.textContent;
+}
+
+function paintLyricsShift(item) {
+  const box = $("lyricsShift");
+  const synced = item?.status === "found" && item.synced;
+  box.hidden = !synced;
+  if (!synced) return;
+  // The nearest version only: the shift is what the user needs now.
+  box.classList.toggle("urge", item.fit === "closest");
+  const offset = item.offset_ms ?? 0;
+  const value = $("btnShiftReset");
+  value.textContent = offset === 0 ? "on time" : `${seconds(offset)} ${offset > 0 ? "sooner" : "later"}`;
+  value.classList.toggle("shifted", offset !== 0);
+  value.disabled = offset === 0;
+}
+
+/// The shift is kept by the core, per track (`lyrics_shift`): the next time
+/// the track plays it is already right.
+async function shiftLyrics(stepMs) {
+  if (!lyricsItem) return;
+  const offsetMs = stepMs === null ? 0 : (lyricsItem.offset_ms ?? 0) + stepMs;
+  const item = await call("lyrics_shift", { key: lyricsItem.key, offsetMs });
+  if (item !== undefined) showLyrics(item);
+}
+
+$("btnShiftSooner").addEventListener("click", () => shiftLyrics(SHIFT_STEP_MS));
+$("btnShiftLater").addEventListener("click", () => shiftLyrics(-SHIFT_STEP_MS));
+$("btnShiftReset").addEventListener("click", () => shiftLyrics(null));
+
+// The whole-sheet view: it grows out of the lyrics column and goes back into
+// it (spatial continuity), the record and the queue fading behind it. Caught
+// halfway, it turns around from where it is. Reduced motion: a fade.
+
+function renderLyricsHead() {
+  const track = queue.items[queue.position]?.track;
+  $("lyricsFullTitle").textContent = track?.title ?? "";
+  $("lyricsFullArtist").textContent = track ? [track.artist, track.album].filter(Boolean).join(" · ") : "";
+  lyricsFullView.classList.toggle("playing", anchor?.state === "playing");
+  const uri = labelKey ? coverLabels.get(labelKey) : undefined;
+  const cover = $("lyricsFullCover");
+  cover.hidden = !uri;
+  if (uri && cover.getAttribute("src") !== uri) cover.src = uri;
+}
+
+function setLyricsFull(full) {
+  if (full === lyricsFull) return;
+  lyricsFull = full;
+  if (full) {
+    if (lyricsFullView.hidden) {
+      // The origin is the lyrics column's centre, where the view grows from.
+      const from = $("lyricsHome").getBoundingClientRect();
+      lyricsFullView.hidden = false;
+      const box = lyricsFullView.getBoundingClientRect();
+      lyricsFullView.style.transformOrigin = `${from.left + from.width / 2 - box.left}px ${from.top + from.height / 2 - box.top}px`;
+      place(lyricsFullView, { opacity: 0, scale: 0.94 });
+    }
+    $("lyricsFullBody").append($("lyricsPanel"));
+    nowView.inert = true;
+    animate(lyricsFullView, { opacity: 1, scale: 1 });
+    animate(nowView, { opacity: 0 });
+    renderLyricsHead();
+    $("btnLyricsCollapse").focus();
+  } else {
+    nowView.inert = false;
+    animate(nowView, { opacity: 1 });
+    animate(
+      lyricsFullView,
+      { opacity: 0, scale: 0.94 },
+      {
+        onRest: () => {
+          lyricsFullView.hidden = true;
+          $("lyricsHome").append($("lyricsPanel"));
+          followInstant = true;
+          lightStale = true;
+          draw();
+        },
+      },
+    );
+    if (lyricsFullView.contains(document.activeElement)) $("btnLyricsExpand").focus();
+  }
+  followInstant = true;
+  lightStale = true;
+  updateLyricsView();
+  draw();
+}
+
+$("btnLyricsExpand").addEventListener("click", () => setLyricsFull(true));
+$("btnLyricsCollapse").addEventListener("click", () => setLyricsFull(false));
 
 // ————————————————————————————————————— now playing sheet (D-075)
 //
@@ -981,7 +1372,11 @@ function setNowOpen(open, { instant = false, velocity } = {}) {
   } else {
     springSheet(target, velocity, done);
   }
-  if (open) revealCurrentRow();
+  if (open) {
+    nowTabs.placeThumb(true);
+    revealCurrentRow();
+  }
+  updateLyricsView();
 }
 
 /// Keeps the playing row in sight in the queue. Not `scrollIntoView`: it would
@@ -1016,7 +1411,7 @@ function dragSheetTo(y) {
 verticalDrag(nowSheet, {
   // The handle, the turntable and the empty space pull the sheet; the text,
   // the queue and the other buttons keep their own gestures.
-  ignore: "button:not(.grabber), a, input, select, summary, .now-meta, .now-side, .onboarding",
+  ignore: "button:not(.grabber), a, input, select, summary, .now-meta, .now-side, .lyrics-panel, .onboarding",
   onStart: () => presentation(nowSheet, "y"),
   onMove: dragSheetTo,
   onEnd: releaseSheet,
@@ -1112,8 +1507,10 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    // The topmost goes first: the notices lie over the sheet.
+    // The topmost goes first: the notices lie over the sheet, the
+    // whole-sheet lyrics over the record.
     if (toastTimers.size > 0) dismissAllToasts();
+    else if (nowOpen && lyricsFull) setLyricsFull(false);
     else if (nowOpen) setNowOpen(false);
     return;
   }
@@ -1141,6 +1538,17 @@ document.addEventListener("keydown", (event) => {
   } else if (event.key === "/") {
     event.preventDefault();
     $("playQuery").focus();
+  } else if (event.key === "l" || event.key === "L") {
+    // The lyrics; pressed again, back to up next.
+    event.preventDefault();
+    if (!nowOpen) {
+      nowTabs.select($("tabLyrics"));
+      setNowOpen(true);
+    } else if (lyricsFull) {
+      setLyricsFull(false);
+    } else {
+      nowTabs.select(lyricsTabSelected() ? $("tabQueue") : $("tabLyrics"));
+    }
   } else if (event.key === "?") {
     event.preventDefault();
     openHelp();
@@ -2335,6 +2743,10 @@ listen("headshell://tick", async (event) => {
     // A cover's answer arrived: the rows and the label are painted again.
     refreshCovers();
   }
+  if (report.lyrics_ready) {
+    // The playing track's lyrics changed: a new track, an answer, a shift.
+    refreshLyrics();
+  }
   if (report.listens_recorded > 0) {
     // The history grew: the statistics and the card are recomputed the next time
     // they open. The numbers on screen must not go stale and ignore the new
@@ -2384,6 +2796,7 @@ listen("headshell://busy", (event) => {
   }
   renderQueue(await call("queue"));
   renderAnchor(await call("anchor"));
+  refreshLyrics();
 
   // The plugin badge in the sidebar: read from disk, nothing goes online.
   const plugins = await call("plugins");

@@ -267,6 +267,13 @@ impl Player {
         self.now_playing.as_ref().map(|np| &np.item.track)
     }
 
+    /// The playing track with its provider id — what its lyrics are looked
+    /// up by (D-078).
+    #[must_use]
+    pub fn current_item(&self) -> Option<&QueueItem> {
+        self.now_playing.as_ref().map(|np| &np.item)
+    }
+
     /// Replaces the queue and starts playing from the start.
     ///
     /// # Errors

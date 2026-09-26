@@ -15,6 +15,7 @@ pub mod identity;
 pub mod ids;
 pub mod import;
 pub mod library;
+pub mod lyrics;
 pub mod model;
 pub mod net;
 pub mod playback;
@@ -24,6 +25,7 @@ pub mod secrets;
 pub mod session;
 pub mod sleeve;
 pub mod stats;
+mod store;
 #[cfg(test)]
 mod test_support;
 

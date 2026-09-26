@@ -96,6 +96,7 @@ headshell/
 │   │   │   ├── stats/          # listening statistics
 │   │   │   ├── sleeve/         # shareable card (svg + png)
 │   │   │   ├── library/        # SQLite + FTS
+│   │   │   ├── lyrics/         # lyrics: the file's .lrc and tags, the provider, LRCLIB; the cache
 │   │   │   ├── provider/       # provider traits + local + remote/{subsonic,jellyfin}
 │   │   │   ├── plugin/         # QuickJS engine (script) + host gates + artifacts + catalog
 │   │   │   ├── playback/       # symphonia + cpal, reading the queue ahead
@@ -177,6 +178,7 @@ headshell import <zip|dir>                       # import an export
 headshell stats [--year N] [--top N] [--min-ms MS]
 headshell resolve "<artist> - <title>" | --file <audio>
 headshell artwork "<query>" [--all] | --file <audio> [--out <dir>]
+headshell lyrics "<query>" [--all] | --file <audio> [--print] [--shift MS]
 headshell prefetch "<query>" [--all]
 headshell library search <query> [--limit N] [--min-ms MS]
 headshell sleeve [--year N] [--out <file>] [--format square|story]
@@ -205,7 +207,10 @@ its local links, and covers come only from where the tracks live (their tags,
 their folder, their provider). The desktop has no flags: its `--online` is
 `HEADSHELL_ONLINE=1` (D-076). Where downloading **is the command itself** (`plugin
 catalog`, `install`, `update`), the flag is not required; the catalog address
-changes with `HEADSHELL_PLUGIN_INDEX` (D-071).
+changes with `HEADSHELL_PLUGIN_INDEX` (D-071). Lyrics follow the user's own rule
+instead of the flag (D-078): LRCLIB is asked when the user asks for lyrics —
+`headshell lyrics`, or the lyrics view being on screen — and for a plugin's track
+the moment it starts; a file's and a server's own lyrics are always read.
 
 ---
 

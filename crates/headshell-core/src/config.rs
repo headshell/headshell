@@ -118,6 +118,14 @@ impl Config {
         self.data_dir.join("artwork")
     }
 
+    /// Where lyrics looked up at LRCLIB and the user's shifts of lyrics are
+    /// kept (D-078). A cache, except the shifts: deleting it costs asking
+    /// again, and shifting again.
+    #[must_use]
+    pub fn lyrics_dir(&self) -> PathBuf {
+        self.data_dir.join("lyrics")
+    }
+
     /// The directory plugins live in: `<data_dir>/plugins/<name>/plugin.json`.
     #[must_use]
     pub fn plugins_dir(&self) -> PathBuf {

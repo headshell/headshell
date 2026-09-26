@@ -27,7 +27,7 @@
   "platform": "<variable>",
   "plugins": [
     {
-      "api": 3,
+      "api": 4,
       "capabilities": [
         "search",
         "stream"
@@ -37,12 +37,12 @@
       "files": [
         {
           "path": "<variable>",
-          "sha256": "24a5bf8f17f9960aad609489e16dfcf8d28c33d6df934010d48829fbc0eb6bd9",
+          "sha256": "2b2e262ea2b52bac9382435d694c085a9a28fb6a85c298bc81adefee6836889a",
           "url": "http://127.0.0.1:<port>/echo/plugin.json?version=0.2.0"
         },
         {
           "path": "<variable>",
-          "sha256": "671242997f24f0dacb743fe3f190abb73f7a92a078afd9f2407460e7dd109789",
+          "sha256": "799cb055eabcd835f0bad435a39d0d005dcea33203a38a18489db1cc190c60ce",
           "url": "http://127.0.0.1:<port>/echo/main.js?version=0.2.0"
         }
       ],
