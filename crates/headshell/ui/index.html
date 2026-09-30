@@ -859,11 +859,13 @@
           <li><span><kbd>Enter</kbd></span> play the first match</li>
           <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> queue every matching track</li>
           <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></span> sections, in the sidebar's order</li>
+          <li><span><kbd>Shift</kbd>+<kbd>F10</kbd></span> what the focused item offers — the right click's menu</li>
           <li><span><kbd>Esc</kbd></span> close the topmost: this list, the notices, the whole-sheet lyrics, now playing</li>
           <li><span><kbd>?</kbd></span> this list</li>
         </ul>
         <p class="hint">
-          In a text box, keys go to the box, not to the shortcuts. Notices also close when
+          In a text box, keys go to the box, not to the shortcuts. A right click on a track, a
+          plugin or a section in the sidebar lists what can be done with it. Notices also close when
           dragged to the right. Now playing opens from the player bar — a click or a drag
           upwards — and closes the same way, or when dragged down.
         </p>
@@ -872,6 +874,11 @@
     </div>
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <!-- The context menu (D-079): one element, filled with what the element
+         under the pointer offers (`menu.js`). It lies over everything,
+         the shortcut list and the notices too. -->
+    <div id="contextMenu" class="menu" role="menu" tabindex="-1" hidden></div>
 
     <script type="module" src="app.js"></script>
   </body>

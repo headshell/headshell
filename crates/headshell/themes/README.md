@@ -108,6 +108,15 @@ none, and `.cover-note` under the queue's title says what could not be looked
 up. They are new classes, not in `CONTRACT_CLASSES`: styling them is
 extending.
 
+D-079 added context menus: a single `.menu` over everything, filled with
+`.menu-title`, `.menu-item` rows (`.active` when lit, `.danger`, `.armed`
+while it asks "really …?", `aria-disabled="true"`) holding `.menu-check`,
+`.menu-label` and `.menu-key`, and `.menu-separator`; `.menu-target` rings
+the element a menu is about while it is open. The menu is placed and grown out
+of the pointer by the springs: its `left`, `top`, `transform-origin`,
+`transform` and `opacity` are written inline, so a theme that gives `.menu` a
+`transform` breaks the growing. New classes too, not in `CONTRACT_CLASSES`.
+
 ## Animation: `transform` and `opacity` only
 
 This isn't a matter of style; it's a measurement. In WebKitGTK (the default

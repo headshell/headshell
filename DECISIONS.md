@@ -5248,3 +5248,135 @@ Times", its album's version by length; "Sil Baştan" at 290 s, which LRCLIB has 
 off — marked, shifted by 1.5 s, the shift kept in the index; the whole-sheet view
 growing and going back, `Esc`, `L`, and a hand scroll that brightened every line and
 gave the following back four seconds later.
+
+## D-079 — Context menus: every element offers its own actions; the engine's menu never opens
+
+**Date:** 2026-09-30 · **Status:** APPLIED (2026-09-30)
+
+**Question:** The user: *"For everything in the interface I want a screen that opens
+properly on a right click: right-clicking a thing shows the controls that belong to it,
+and 'Inspect Element' goes away — a custom right-click menu. You can ask questions."*
+The code was read first (what each element does today, what the core can do), a
+proposal was shown with its map — which element offers what — and four questions were
+asked (§0.2). The interface was done with /apple-design, as for D-075 and D-078.
+
+**Decision:**
+
+1. **Only what the interface already does** — the user's choice over adding queue
+   editing now. A menu is a second way to an existing command, never a capability of
+   its own (K1, D-033): no new IPC command, no new CLI subcommand. "Play next", "add to
+   the queue" and "remove from the queue" need the core — the queue has no insert or
+   remove, and D-077's read-ahead would have to follow them — so they are their own
+   step, with their own decision.
+2. **Text boxes get the app's menu too** — the user's choice over leaving the engine's
+   there: cut, copy, paste, select all, and what the box's form does (play the first
+   match, queue every match; search) once something is typed. A password is never
+   copied out of its box.
+3. **No way back to the engine's menu, in a debug build either** — the user's choice
+   over Shift+right click in debug builds and an "inspect" row.
+4. **An empty spot opens nothing** — the user's choice over the section's own actions
+   and a general playback menu. An element with nothing to offer (the theme in use, a
+   heading) opens nothing either.
+
+**Why the engine's menu had to go** — it was more than "Inspect Element", which only
+debug builds show (their inspector is on). WebKitGTK's own menu offered "Back" and
+"Reload" on an empty spot — a reload rebuilds the interface and loses the open section,
+the search and the scroll — and "Open Image in New Window" on a cover.
+
+**What the elements offer:**
+
+| Element | Its menu |
+|---|---|
+| The player bar, the record's card, the whole-sheet lyrics' head | pause/play · next · previous · stop · shuffle ✓ · repeat off/all/one · lyrics (or up next) · now playing · the track's rows |
+| A queue row | play this track (pause on the playing one) · the track's rows |
+| A library result | play · play every track by the artist · the track's rows |
+| The statistics' artists, tracks, albums | play (every track, shuffled) · find in the library · copy |
+| A year's bar | narrow down to the year / back to all time · the year's sleeve card |
+| A sidebar row | open (`Ctrl`+number) · the section's own work: scan, fetch the catalog, update every plugin, copy the last run's report… |
+| A plugin's card, a catalog entry | the card's own buttons, from one list — they cannot drift apart · copy its name |
+| A provider, a server, a secret, a theme, a music directory | test · copy the address · delete (asks first) · apply · copy the path |
+| A notice | copy the text or the error chain · close · close every notice |
+| The lyrics | copy the line · copy the lyrics · 0.5 s sooner/later · back to their own timing · the whole sheet |
+| The sleeve preview | save as… · refresh the preview · square/story |
+| A report or a JSON block, selected text | copy |
+
+"The track's rows" are: find the artist in the library, copy artist and title, resolve
+its identity (the diagnostics' form, filled in).
+
+**How it behaves** (`ui/menu.js`, the platform's menus as the model):
+
+- It opens where the button went down, grows out of the pointer (a critically damped
+  spring from 0.96, `motion.js`), stays 8 px inside the window — turning to the
+  pointer's left or above it — and fades where it is when it closes. Reduced motion:
+  only the fade; the theme's duration `0`: none.
+- **Press, move onto a row, let go** picks it in one gesture; a plain click leaves the
+  menu open. A release that has not moved 5 px never picks: a menu that opens with a
+  row under a still pointer must not run it.
+- A press outside closes the menu **and does nothing else** — the pointer and the click
+  are swallowed; a right press opens the next menu there. The wheel, a resize and the
+  window losing focus close it; so does the element it is about leaving the page (its
+  list was drawn again, and the rows could point at another track).
+- **The keyboard:** the Menu key or Shift+F10 opens the focused element's menu under it
+  (above it without room — never over it), with the first row lit and the focus in the
+  menu; the arrows, Home/End, Enter, Esc and a letter (type-ahead) work, and every key
+  is the menu's while it is open — the space must not pause the music behind it.
+- What the menu is about is ringed while it is open. A row that cannot be undone
+  (remove, delete) is red and asks first — "really remove?" — like the card's button;
+  leaving the row takes the question back, so a single row is ever lit.
+- Every row's shortcut is written beside it (`space`, `→`, `L`, `Ctrl+2`).
+
+**The clipboard switch.** WebKitGTK refused the page's clipboard read:
+`navigator.clipboard.readText()` threw `NotAllowedError`, and `execCommand("paste")`
+did nothing — the menu's paste could only report that (it did, with its stage). Tauri's
+`enable_clipboard_access()` turns it on (WebKitGTK's `javascript-can-access-clipboard`,
+WebView2's clipboard permission; macOS always allows it). The config has no switch for
+it, so the main window is built in `setup` from its config (`create: false`) — no new
+crate. Only the app's own code runs in the page (CSP `script-src 'self'`; nothing from
+the catalog or a plugin is written as markup, `ui_contract.rs`), and it reads the
+clipboard only when "paste" is picked. Cut, copy and paste go through the engine's own
+commands first, as the box's keys do.
+
+**Found while verifying:**
+
+- **The paste refusal** above — the first paste in the container was the error notice.
+- **A notice went while its menu was open:** a notice re-arms its timer when the
+  pointer leaves it, and going to its menu is leaving it; the menu went with it. A
+  notice whose menu is open is held, and has four seconds once the menu closes.
+- **A focus ring stayed behind:** a right press focused the button under it, and the
+  `Esc` that closed the menu lit that button's focus ring — the same ring as the menu's
+  mark, which then looked stuck. A right press no longer moves the focus, except into a
+  text box, whose edits the menu is for.
+- **Two rows were lit at once:** an armed "really remove?" stayed red while the pointer
+  lit another row. Leaving the row now disarms it.
+- **`Ctrl+Z` undoes nothing in the page** — plain typing either, before this change.
+  Not this change's; noted here so it is not taken for the menu's paste.
+
+**Not done, and why:**
+
+- **Queue editing** — decision 1; its own step.
+- **An album in its order:** the core keeps no track numbers, so "play every track on
+  it" queues the album's tracks in the search's order. The row does not say "play the
+  album".
+- **macOS's `⌘`:** the rows say `Ctrl`, as the interface does everywhere today (the
+  shortcut list, the tooltips).
+- **Saving a cover from its menu:** not asked.
+
+**Testing:** `tests/menu_js.rs` evaluates `menu.js` in QuickJS (after `motion.js`, which
+it imports): the placement — to the pointer's right and below it, to its left or above
+it without room, from the keyboard above the element and not onto it, a menu taller
+than the window kept at its top, and no opening point on a grid over the window putting
+a menu outside it; the release rule; the type-ahead; the separators. `ui_contract.rs`
+reads `menu.js` too — its ids, no markup, and that it parses.
+
+**Verification:** the §3.9 container (Debian 13, the host's WebKitGTK 2.52.6, Xvfb, a
+PulseAudio null sink), at 1180×780 and 900×600, driven with `xdotool`: a sidebar row's
+menu (the ring, the lit row, "search the library" landing in the search box); a queue
+row's "play this track"; the player bar's menu turned above the pointer; press–drag–
+release onto "next track"; `Esc` closing the menu and not the sheet; a plain right click
+leaving the menu open and a click outside closing it without jumping to the row under
+it; the play box's cut, copy, paste and select all, read back with `xclip`; Shift+F10,
+the arrows and Enter in the box; the statistics' rows, a year's sleeve card; a library
+row's ring on a table row; a notice held past its lifetime while its menu was open; an
+empty spot opening nothing; selected text copied; the echo plugin's card — its menu, the
+armed row taken back, and removed on the second pick; the icons-only sidebar at 900 px;
+a lyric line copied from the lyrics LRCLIB gave.

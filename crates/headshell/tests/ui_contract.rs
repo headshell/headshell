@@ -37,6 +37,7 @@ const APP_JS: &str = include_str!("../ui/app.js");
 const MOTION_JS: &str = include_str!("../ui/motion.js");
 const ANCHOR_JS: &str = include_str!("../ui/anchor.js");
 const LYRICS_JS: &str = include_str!("../ui/lyrics.js");
+const MENU_JS: &str = include_str!("../ui/menu.js");
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 const STYLE_CSS: &str = include_str!("../ui/style.css");
 const STARTUP_ERROR_HTML: &str = include_str!("../ui/startup-error.html");
@@ -117,7 +118,7 @@ fn collect_between(haystack: &str, open: &str, close: char) -> Vec<String> {
 
 #[test]
 fn every_id_the_script_looks_up_exists_in_the_page() {
-    let wanted: Vec<String> = [APP_JS, MOTION_JS]
+    let wanted: Vec<String> = [APP_JS, MOTION_JS, MENU_JS]
         .iter()
         .flat_map(|script| collect_between(script, "$(\"", '"'))
         .collect();
@@ -361,6 +362,7 @@ fn no_script_writes_markup_or_inline_style() {
         ("motion.js", MOTION_JS),
         ("anchor.js", ANCHOR_JS),
         ("lyrics.js", LYRICS_JS),
+        ("menu.js", MENU_JS),
         ("startup-error.js", STARTUP_ERROR_JS),
     ] {
         for line in code_lines(source) {
@@ -406,6 +408,7 @@ fn every_script_the_page_loads_parses() {
             ("anchor.js", ANCHOR_JS),
             ("lyrics.js", LYRICS_JS),
             ("motion.js", MOTION_JS),
+            ("menu.js", MENU_JS),
             ("app.js", APP_JS),
         ] {
             if let Err(err) = rquickjs::Module::declare(ctx.clone(), name, source) {

@@ -9,6 +9,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "create": false,
         "title": "headshell",
         "width": 1180,
         "height": 780,

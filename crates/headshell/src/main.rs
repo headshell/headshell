@@ -151,6 +151,22 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(jobs_tx, themes))
         .setup(move |app| {
+            // The main window is built here rather than from the config alone
+            // (`create: false`): the config has no switch for the clipboard. The
+            // context menus' "paste" reads it (D-079); without the switch
+            // WebKitGTK refuses the read, and the menu could only report that.
+            // Only the app's own code runs in the page (CSP `script-src 'self'`,
+            // nothing is written as markup — `ui_contract.rs`), and it reads the
+            // clipboard only when "paste" is picked.
+            let main = app
+                .config()
+                .app
+                .windows
+                .first()
+                .ok_or("STEP: CONFIG_LOAD\n  tauri.conf.json declares no window")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), main)?
+                .enable_clipboard_access()
+                .build()?;
             // The core is moved onto its own thread here: the `AppHandle` only
             // exists during setup, and events go out from there.
             core_thread::spawn(core, jobs_rx, app.handle().clone())?;

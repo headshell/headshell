@@ -23,6 +23,7 @@
 
 import { positionAt, clock } from "./anchor.js";
 import { lineAt, readingTop } from "./lyrics.js";
+import { contextMenus } from "./menu.js";
 import {
   animate,
   currentMotion,
@@ -45,6 +46,12 @@ const $ = (id) => document.getElementById(id);
 
 // ————————————————————————————————————— building elements
 
+/// What each element offers on a right click (D-079): a function that
+/// builds the menu when it is asked for, so it reads the state of that
+/// moment. Written where the element is drawn — `h(…, { menu })` — or, for
+/// the page's fixed elements, under "context menus" below.
+const menus = new WeakMap();
+
 /// A small element builder. `text` always goes to `textContent`.
 function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -53,6 +60,7 @@ function h(tag, props = {}, ...children) {
     if (key === "class") el.className = value;
     else if (key === "text") el.textContent = value;
     else if (key === "dataset") Object.assign(el.dataset, value);
+    else if (key === "menu") menus.set(el, value);
     else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
     else el.setAttribute(key, value === true ? "" : String(value));
   }
@@ -130,33 +138,50 @@ function firstLine(chain) {
 
 const TOAST_LIFETIME = { info: 6000, error: 20000 };
 const toastTimers = new Map();
+// Notices whose menu is open: they stay until it closes, or the menu would
+// go with them.
+const toastsHeld = new Set();
 
 function toast(err, info = false) {
-  const box = h("div", { class: info ? "toast info" : "toast", role: info ? "status" : "alert" });
+  const stage = err?.stage ?? "UNKNOWN";
+  const chain = err?.chain ?? String(err);
+  // An error is copied whole: its stage and its full chain.
+  const whole = chain.startsWith("STEP:") ? chain : `STEP: ${stage}\n  ${chain}`;
+  const copyOut = info
+    ? () => copyText(String(err), "the notice copied to the clipboard")
+    : () => copyText(whole, "error chain copied to the clipboard");
+  const box = h("div", {
+    class: info ? "toast info" : "toast",
+    role: info ? "status" : "alert",
+    menu: () => {
+      clearTimeout(toastTimers.get(box));
+      toastsHeld.add(box);
+      return {
+        mark: false,
+        onClose: () => {
+          toastsHeld.delete(box);
+          // A notice already gone keeps no timer: a stale one would make `Esc`
+          // think a notice is still up.
+          if (box.isConnected) armToast(box, 4000);
+        },
+        items: [
+          { label: info ? "copy the text" : "copy the error chain", run: copyOut },
+          "-",
+          { label: "close", run: () => dismissToast(box) },
+          $("toasts").childElementCount > 1 && { label: "close every notice", key: "Esc", run: dismissAllToasts },
+        ],
+      };
+    },
+  });
 
   if (info) {
     box.append(h("div", { text: err }));
   } else {
-    const stage = err?.stage ?? "UNKNOWN";
-    const chain = err?.chain ?? String(err);
     box.append(
       h("span", { class: "stage", text: `STEP: ${stage}` }),
       h("div", { text: firstLine(err?.chain) }),
       h("details", {}, h("summary", { text: "full chain" }), h("pre", { text: chain })),
-      h(
-        "div",
-        { class: "toast-actions" },
-        h(
-          "button",
-          {
-            type: "button",
-            onclick: () =>
-              copyText(chain.startsWith("STEP:") ? chain : `STEP: ${stage}\n  ${chain}`, "error chain copied to the clipboard"),
-          },
-          icon("copy"),
-          "copy",
-        ),
-      ),
+      h("div", { class: "toast-actions" }, h("button", { type: "button", onclick: copyOut }, icon("copy"), "copy")),
     );
   }
 
@@ -183,7 +208,9 @@ function toast(err, info = false) {
   // It must not go while being read: the timer stops while the pointer is on
   // it.
   box.addEventListener("pointerenter", () => clearTimeout(toastTimers.get(box)));
-  box.addEventListener("pointerleave", () => armToast(box, Math.min(lifetime, 4000)));
+  box.addEventListener("pointerleave", () => {
+    if (!toastsHeld.has(box)) armToast(box, Math.min(lifetime, 4000));
+  });
 
   horizontalDrag(box, {
     ignore: "button, summary, pre",
@@ -263,10 +290,14 @@ async function copyText(text, done) {
     await navigator.clipboard.writeText(text);
     toast(done, true);
   } catch (err) {
-    // If the clipboard refuses we do not stay silent: the user would think it was
-    // copied and send an empty bug report.
-    toast({ stage: "CONFIG_LOAD", chain: `STEP: CONFIG_LOAD\n  → could not write to the clipboard: ${err}` });
+    clipboardRefused("write to", err);
   }
+}
+
+/// If the clipboard refuses we do not stay silent: the user would think it
+/// was copied (or pasted) and send an empty bug report.
+function clipboardRefused(what, err) {
+  toast({ stage: "CONFIG_LOAD", chain: `STEP: CONFIG_LOAD\n  → could not ${what} the clipboard: ${err}` });
 }
 
 // ————————————————————————————————————— file dialog
@@ -530,19 +561,25 @@ function queueRow(item, index, current) {
   const track = item.track;
   return h(
     "li",
-    { class: current ? "current" : null, "aria-current": current ? "true" : null },
+    {
+      class: current ? "current" : null,
+      "aria-current": current ? "true" : null,
+      menu: () => ({
+        title: trackTitle(track),
+        items: [
+          current ? pauseItem() : { label: "play this track", run: () => jumpTo(index) },
+          "-",
+          ...trackItems(track),
+        ],
+      }),
+    },
     h(
       "button",
       {
         class: "q-row",
         type: "button",
         title: current ? "now playing" : "skip to this track",
-        // The decision to jump in the queue is in the core: only the index is passed
-        // on here.
-        onclick: async () => {
-          renderQueue(await call("jump_to", { index }));
-          renderAnchor(await call("anchor"));
-        },
+        onclick: () => jumpTo(index),
       },
       // The playing row shows bars instead of its number (they move while
       // playing, `.queue[data-state]`).
@@ -693,19 +730,33 @@ async function playPrevious() {
   renderAnchor(await call("anchor"));
 }
 
+/// The decision to jump in the queue is in the core: only the index is
+/// passed on here.
+async function jumpTo(index) {
+  renderQueue(await call("jump_to", { index }));
+  renderAnchor(await call("anchor"));
+}
+
+async function stopPlayback() {
+  renderAnchor(await call("stop"));
+  renderQueue(await call("queue"));
+}
+
+async function setShuffle(on) {
+  renderQueue(await call("set_shuffle", { on }));
+}
+
+async function setRepeat(mode) {
+  renderQueue(await call("set_repeat", { mode }));
+}
+
 $("btnPlayPause").addEventListener("click", togglePause);
 $("btnNext").addEventListener("click", playNext);
 $("btnPrev").addEventListener("click", playPrevious);
-$("btnStop").addEventListener("click", async () => {
-  renderAnchor(await call("stop"));
-  renderQueue(await call("queue"));
-});
-$("btnShuffle").addEventListener("click", async () =>
-  renderQueue(await call("set_shuffle", { on: !queue.shuffle })),
-);
-$("btnRepeat").addEventListener("click", async () => {
-  const nextMode = { off: "all", all: "one", one: "off" }[queue.repeat] ?? "off";
-  renderQueue(await call("set_repeat", { mode: nextMode }));
+$("btnStop").addEventListener("click", stopPlayback);
+$("btnShuffle").addEventListener("click", () => setShuffle(!queue.shuffle));
+$("btnRepeat").addEventListener("click", () => {
+  setRepeat({ off: "all", all: "one", one: "off" }[queue.repeat] ?? "off");
 });
 
 // ————————————————————————————————————— covers (D-076)
@@ -951,6 +1002,26 @@ const nowTabs = segmented($("nowTabs"), (tab) => {
 
 function lyricsTabSelected() {
   return nowTabs.selected().id === "tabLyrics";
+}
+
+/// `L`: the lyrics; again, back to up next — and from the whole sheet, back
+/// beside the record.
+function toggleLyrics() {
+  if (!nowOpen) {
+    nowTabs.select($("tabLyrics"));
+    setNowOpen(true);
+  } else if (lyricsFull) {
+    setLyricsFull(false);
+  } else {
+    nowTabs.select(lyricsTabSelected() ? $("tabQueue") : $("tabLyrics"));
+  }
+}
+
+/// What `L` does now, as a menu row says it.
+function lyricsToggleLabel() {
+  if (!nowOpen) return "lyrics";
+  if (lyricsFull) return "lyrics beside the record";
+  return lyricsTabSelected() ? "up next" : "lyrics";
 }
 
 /// Is a lyrics view on screen? That is the user asking for lyrics.
@@ -1454,8 +1525,8 @@ function playQuery() {
   return $("playQuery").value.trim();
 }
 
-async function startPlay(query, all) {
-  const view = await call("play", { query, all, shuffle: false });
+async function startPlay(query, all, shuffle = false) {
+  const view = await call("play", { query, all, shuffle });
   if (!view) return;
   renderQueue(view);
   renderAnchor(await call("anchor"));
@@ -1539,16 +1610,8 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     $("playQuery").focus();
   } else if (event.key === "l" || event.key === "L") {
-    // The lyrics; pressed again, back to up next.
     event.preventDefault();
-    if (!nowOpen) {
-      nowTabs.select($("tabLyrics"));
-      setNowOpen(true);
-    } else if (lyricsFull) {
-      setLyricsFull(false);
-    } else {
-      nowTabs.select(lyricsTabSelected() ? $("tabQueue") : $("tabLyrics"));
-    }
+    toggleLyrics();
   } else if (event.key === "?") {
     event.preventDefault();
     openHelp();
@@ -1620,7 +1683,17 @@ $("searchForm").addEventListener("submit", async (event) => {
       ...hits.map((hit) =>
         h(
           "tr",
-          {},
+          {
+            menu: () => ({
+              title: trackTitle(hit),
+              items: [
+                { label: "play", run: () => startPlay(`${hit.artist} ${hit.title}`, false) },
+                { label: "play every track by the artist", run: () => startPlay(hit.artist, true) },
+                "-",
+                ...trackItems(hit),
+              ],
+            }),
+          },
           h("td", { text: hit.title }),
           h("td", { text: hit.artist }),
           h("td", { class: "dim", text: hit.album ?? "" }),
@@ -1716,12 +1789,30 @@ function renderStats(r) {
   $("statsEmpty").hidden = r.plays > 0;
   $("statsLists").hidden = r.plays === 0;
 
-  renderRanking($("statsArtists"), r.top_artists, (a) => [a.artist, `${countOf(a.unique_tracks, "track")}`, a.plays]);
-  renderRanking($("statsTracks"), r.top_tracks, (t) => [t.title, t.artist, t.plays]);
-  renderRanking($("statsAlbums"), r.top_albums, (a) => [a.album, a.artist, a.plays]);
+  renderRanking(
+    $("statsArtists"),
+    r.top_artists,
+    (a) => [a.artist, `${countOf(a.unique_tracks, "track")}`, a.plays],
+    (a) => artistMenu(a.artist),
+  );
+  renderRanking(
+    $("statsTracks"),
+    r.top_tracks,
+    (t) => [t.title, t.artist, t.plays],
+    (t) => ({
+      title: trackTitle(t),
+      items: [{ label: "play", run: () => startPlay(`${t.artist} ${t.title}`, false) }, "-", ...trackItems(t)],
+    }),
+  );
+  renderRanking(
+    $("statsAlbums"),
+    r.top_albums,
+    (a) => [a.album, a.artist, a.plays],
+    (a) => albumMenu(a.album, a.artist),
+  );
 }
 
-function renderRanking(list, entries, format) {
+function renderRanking(list, entries, format, menuOf) {
   const max = Math.max(1, ...entries.map((entry) => format(entry)[2]));
   const bars = [];
   list.replaceChildren(
@@ -1731,7 +1822,7 @@ function renderRanking(list, entries, format) {
       bars.push([bar, plays / max]);
       return h(
         "li",
-        {},
+        { menu: () => menuOf(entry) },
         bar,
         h("span", { class: "rank-no", text: String(index + 1) }),
         h("span", { class: "rank-name", title: `${name} — ${sub}` }, name, h("span", { class: "rank-sub", text: ` · ${sub}` })),
@@ -1761,6 +1852,15 @@ function renderYears() {
           title: `${entry.year}: ${countOf(entry.plays, "listen")} · ${durationText(entry.ms_played)}`,
           "aria-pressed": "false",
           onclick: () => runStats(stats.year === entry.year ? null : entry.year),
+          menu: () => ({
+            title: `${entry.year} · ${countOf(entry.plays, "listen")}`,
+            items: [
+              stats.year === entry.year
+                ? { label: "back to all time", run: () => runStats(null) }
+                : { label: `narrow down to ${entry.year}`, run: () => runStats(entry.year) },
+              { label: `the ${entry.year} sleeve card`, run: () => sleeveFor(entry.year) },
+            ],
+          }),
         },
         h("span", { class: "year-track" }, fill),
         h("span", { class: "year-label", text: String(entry.year) }),
@@ -1823,7 +1923,17 @@ $("sleeveForm").addEventListener("submit", (event) => {
   previewSleeve();
 });
 
-$("btnSleeveSave").addEventListener("click", async () => {
+/// A year's card, from its bar in the statistics: the preview is drawn for
+/// that year when the section opens.
+function sleeveFor(year) {
+  $("sleeveYear").value = String(year);
+  sleeve.previewed = false;
+  openPanel("sleeve");
+}
+
+$("btnSleeveSave").addEventListener("click", saveSleeve);
+
+async function saveSleeve() {
   const args = sleeveArgs();
   const path = await pickSavePath({
     title: "save the sleeve card",
@@ -1843,7 +1953,7 @@ $("btnSleeveSave").addEventListener("click", async () => {
       : "the card was computed but no file was written",
     true,
   );
-});
+}
 
 // ————————————————————————————————————— import
 
@@ -1881,14 +1991,16 @@ $("importForm").addEventListener("submit", (event) => {
   if (path) runImport(path);
 });
 
-$("btnImportPick").addEventListener("click", async () => {
+$("btnImportPick").addEventListener("click", pickImport);
+
+async function pickImport() {
   const path = await pickFile({
     title: "choose an export archive",
     multiple: false,
     filters: [{ name: "Export archive", extensions: ["zip"] }],
   });
   if (path) runImport(path);
-});
+}
 
 async function runImport(path) {
   $("importPath").value = path;
@@ -2011,22 +2123,21 @@ async function refreshProviders() {
       ...servers.servers.map((server) =>
         h(
           "tr",
-          {},
+          {
+            menu: () => ({
+              title: server.id,
+              items: [
+                { label: "copy the address", run: () => copyText(server.url, "address copied to the clipboard") },
+                "-",
+                { label: "delete", danger: true, confirm: "really delete?", run: () => removeServer(server) },
+              ],
+            }),
+          },
           h("td", { text: server.id }),
           h("td", { class: "dim", text: server.kind }),
           h("td", { class: "mono", text: server.url }),
           h("td", { text: `${server.username} (${server.auth})` }),
-          h(
-            "td",
-            {},
-            armedButton("delete", async () => {
-              const report = await call("server_remove", { name: server.id });
-              if (report) {
-                toast(`${report.id} removed · left: ${fmt(report.remaining)}`, true);
-                refreshProviders();
-              }
-            }),
-          ),
+          h("td", {}, armedButton("delete", () => removeServer(server))),
         ),
       ),
     );
@@ -2034,11 +2145,24 @@ async function refreshProviders() {
   $("serverEmpty").hidden = servers.servers.length > 0;
 }
 
+async function removeServer(server) {
+  const report = await call("server_remove", { name: server.id });
+  if (report) {
+    toast(`${report.id} removed · left: ${fmt(report.remaining)}`, true);
+    refreshProviders();
+  }
+}
+
 function renderMusicDirs() {
   const dirs = environment?.music_dirs ?? [];
   $("musicDirs").replaceChildren(
     ...(dirs.length > 0
-      ? dirs.map((dir) => h("li", { text: dir }))
+      ? dirs.map((dir) =>
+          h("li", {
+            text: dir,
+            menu: () => [{ label: "copy the path", run: () => copyText(dir, "path copied to the clipboard") }],
+          }),
+        )
       : [h("li", { class: "empty", text: "not set" })]),
   );
 }
@@ -2050,43 +2174,39 @@ function providerRow(info) {
   );
   return h(
     "tr",
-    {},
+    {
+      menu: () => ({
+        title: info.display_name,
+        items: [
+          { label: "test", run: () => testProvider(info, status) },
+          "-",
+          { label: `copy “${info.id}”`, run: () => copyText(info.id, "name copied to the clipboard") },
+        ],
+      }),
+    },
     h("td", {}, h("div", { text: info.display_name }), h("div", { class: "dim mono", text: info.id })),
     h("td", {}, h("div", { class: "caps" }, caps.length > 0 ? caps : h("span", { class: "dim", text: "none" }))),
     h("td", {}, status),
-    h(
-      "td",
-      {},
-      h(
-        "button",
-        {
-          type: "button",
-          onclick: async () => {
-            const report = await call("provider_test", { name: info.id });
-            // "I did not look" and "I could not reach it" are separate: the error is in
-            // the notice, the health answer is here.
-            if (!report) {
-              status.className = "health down";
-              status.replaceChildren(h("span", { class: "dot" }), " error (see the notice)");
-              return;
-            }
-            const health = report.health;
-            const count = health.track_count;
-            status.className = health.reachable ? "health up" : "health down";
-            status.replaceChildren(
-              h("span", { class: "dot" }),
-              health.reachable
-                ? ` up${count === null ? "" : ` · ${countOf(count, "track")}`}`
-                : ` unreachable`,
-              health.reachable
-                ? null
-                : h("span", { class: "health-detail", text: ` — ${health.detail ?? "no reason given"}` }),
-            );
-          },
-        },
-        "test",
-      ),
-    ),
+    h("td", {}, h("button", { type: "button", onclick: () => testProvider(info, status) }, "test")),
+  );
+}
+
+async function testProvider(info, status) {
+  const report = await call("provider_test", { name: info.id });
+  // "I did not look" and "I could not reach it" are separate: the error is in
+  // the notice, the health answer is here.
+  if (!report) {
+    status.className = "health down";
+    status.replaceChildren(h("span", { class: "dot" }), " error (see the notice)");
+    return;
+  }
+  const health = report.health;
+  const count = health.track_count;
+  status.className = health.reachable ? "health up" : "health down";
+  status.replaceChildren(
+    h("span", { class: "dot" }),
+    health.reachable ? ` up${count === null ? "" : ` · ${countOf(count, "track")}`}` : ` unreachable`,
+    health.reachable ? null : h("span", { class: "health-detail", text: ` — ${health.detail ?? "no reason given"}` }),
   );
 }
 
@@ -2222,7 +2342,24 @@ function pluginCard(entry) {
     consent ? h("span", { class: consentClass, text: consentText }) : null,
   );
 
-  const card = h("li", { class: "plugin" }, head);
+  const { lead, tail } = pluginActions(entry);
+  const card = h(
+    "li",
+    {
+      class: "plugin",
+      menu: () => ({
+        title: entry.display_name ?? entry.name,
+        items: [
+          ...lead,
+          "-",
+          ...tail,
+          "-",
+          { label: `copy “${entry.name}”`, run: () => copyText(entry.name, "name copied to the clipboard") },
+        ],
+      }),
+    },
+    head,
+  );
 
   // If the manifest could not be read, the reason stays here — so the reason
   // the buttons do not work does not stay out of sight (K9).
@@ -2252,38 +2389,47 @@ function pluginCard(entry) {
     );
   }
 
-  const actions = h("div", { class: "actions" });
+  card.append(
+    h("div", { class: "actions" }, lead.map(actionButton), h("span", { class: "spacer" }), tail.map(actionButton)),
+  );
+  return card;
+}
+
+/// What a plugin offers: the buttons on its card, and the same rows in its
+/// menu — one list, so the two cannot drift apart.
+function pluginActions(entry) {
+  const consent = entry.consent?.state;
   // Install only if something is missing that installing will fix: for an
   // artifact whose platform is not supported, "install" would be a pointless
   // button.
   const installable = (entry.requires ?? []).some(
     (requirement) => requirement.state === "Missing" || requirement.state?.Corrupt,
   );
-  if (consent === "not_asked" || consent === "needs_approval") {
-    actions.append(pluginButton("approve", "plugin_approve", entry.name, true));
-  }
-  if (installable) actions.append(pluginButton("install the tools", "plugin_install", entry.name, true));
-  if (consent === "disabled") actions.append(pluginButton("enable", "plugin_enable", entry.name, true));
-  if (consent === "approved") actions.append(pluginButton("disable", "plugin_disable", entry.name));
-  actions.append(h("span", { class: "spacer" }));
-  if (consent && consent !== "not_asked") {
-    actions.append(pluginButton("forget consent", "plugin_forget", entry.name));
-  }
-  actions.append(
-    // Removing cannot be undone (the directory goes along with `state/`).
-    armedButton("remove", async () => {
-      const report = await call("plugin_remove", { name: entry.name });
-      if (!report) return;
-      const kept = report.kept_secrets.length ? ` · secrets left: ${report.kept_secrets.join(", ")}` : "";
-      toast(
-        `${report.name} removed · consent ${report.consent_forgotten ? "forgotten" : "had no record"}${kept}`,
-        true,
-      );
-      refreshPlugins();
-    }),
-  );
-  card.append(actions);
-  return card;
+  const command = (label, name, primary = false) => ({ label, primary, run: () => pluginCommand(name, entry.name) });
+  const lead = [];
+  if (consent === "not_asked" || consent === "needs_approval") lead.push(command("approve", "plugin_approve", true));
+  if (installable) lead.push(command("install the tools", "plugin_install", true));
+  if (consent === "disabled") lead.push(command("enable", "plugin_enable", true));
+  if (consent === "approved") lead.push(command("disable", "plugin_disable"));
+  const tail = [];
+  if (consent && consent !== "not_asked") tail.push(command("forget consent", "plugin_forget"));
+  // Removing cannot be undone (the directory goes along with `state/`).
+  tail.push({ label: "remove", danger: true, confirm: "really remove?", run: () => removePlugin(entry.name) });
+  return { lead, tail };
+}
+
+/// An action's button: one that cannot be undone asks first.
+function actionButton(action) {
+  if (action.confirm) return armedButton(action.label, action.run);
+  return h("button", { type: "button", class: action.primary ? "primary" : null, onclick: action.run }, action.label);
+}
+
+async function removePlugin(name) {
+  const report = await call("plugin_remove", { name });
+  if (!report) return;
+  const kept = report.kept_secrets.length ? ` · secrets left: ${report.kept_secrets.join(", ")}` : "";
+  toast(`${report.name} removed · consent ${report.consent_forgotten ? "forgotten" : "had no record"}${kept}`, true);
+  refreshPlugins();
 }
 
 /// The artifact state arrives externally tagged: `"Missing"` or
@@ -2310,23 +2456,13 @@ function short(hash) {
   return typeof hash === "string" ? hash.slice(0, 12) : String(hash);
 }
 
-function pluginButton(label, command, name, primary = false) {
-  return h(
-    "button",
-    {
-      type: "button",
-      class: primary ? "primary" : null,
-      onclick: async () => {
-        const report = await call(command, { name });
-        if (!report) return;
-        // The install report's shape differs from the consent report's: each is
-        // summarised with its own fields; no common "result" type is made up.
-        toast(report.action ? consentText(report) : installText(name, report), true);
-        refreshPlugins();
-      },
-    },
-    label,
-  );
+async function pluginCommand(command, name) {
+  const report = await call(command, { name });
+  if (!report) return;
+  // The install report's shape differs from the consent report's: each is
+  // summarised with its own fields; no common "result" type is made up.
+  toast(report.action ? consentText(report) : installText(name, report), true);
+  refreshPlugins();
 }
 
 // The name of the consent command is a wire value (D-036); an unrecognised
@@ -2387,9 +2523,20 @@ async function refreshCatalog() {
 function catalogCard(plugin, platform) {
   const state = plugin.installed?.state;
   const [stateText, stateClass] = plugin.problem ? ["cannot be installed", "chip chip-err"] : (INSTALL[state] ?? [state, "chip"]);
+  const offered = catalogActions(plugin, state);
   const card = h(
     "li",
-    { class: "plugin" },
+    {
+      class: "plugin",
+      menu: () => ({
+        title: plugin.display_name ?? plugin.name,
+        items: [
+          ...offered,
+          "-",
+          { label: `copy “${plugin.name}”`, run: () => copyText(plugin.name, "name copied to the clipboard") },
+        ],
+      }),
+    },
     h(
       "div",
       { class: "plugin-head" },
@@ -2426,15 +2573,20 @@ function catalogCard(plugin, platform) {
     }
   }
 
-  const actions = h("div", { class: "actions" });
-  if (!plugin.problem && state === "not_installed") {
-    actions.append(catalogButton("install", "plugin_install", { name: plugin.name }));
-  }
-  if (!plugin.problem && state === "update_available") {
-    actions.append(catalogButton("update", "plugin_update", { name: plugin.name }));
-  }
-  if (actions.childElementCount) card.append(actions);
+  if (offered.length > 0) card.append(h("div", { class: "actions" }, offered.map(actionButton)));
   return card;
+}
+
+/// What a catalog entry offers, on its card and in its menu alike.
+function catalogActions(plugin, state) {
+  if (plugin.problem) return [];
+  if (state === "not_installed") {
+    return [{ label: "install", primary: true, run: () => catalogCommand("plugin_install", plugin.name) }];
+  }
+  if (state === "update_available") {
+    return [{ label: "update", primary: true, run: () => catalogCommand("plugin_update", plugin.name) }];
+  }
+  return [];
 }
 
 function installDetail(installed) {
@@ -2452,25 +2604,15 @@ function installDetail(installed) {
   }
 }
 
-function catalogButton(label, command, args) {
-  return h(
-    "button",
-    {
-      type: "button",
-      class: "primary",
-      onclick: async () => {
-        const report = await call(command, args);
-        if (!report) return;
-        toast(command === "plugin_update" ? updateText(report) : installText(args.name, report), true);
-        refreshCatalog();
-        // An installed plugin awaits consent (D-040): switch to where the result
-        // lives.
-        if (command === "plugin_install") pluginTabs.select($("tabInstalled"));
-        refreshPlugins();
-      },
-    },
-    label,
-  );
+async function catalogCommand(command, name) {
+  const report = await call(command, { name });
+  if (!report) return;
+  toast(command === "plugin_update" ? updateText(report) : installText(name, report), true);
+  refreshCatalog();
+  // An installed plugin awaits consent (D-040): switch to where the result
+  // lives.
+  if (command === "plugin_install") pluginTabs.select($("tabInstalled"));
+  refreshPlugins();
 }
 
 function updateText(report) {
@@ -2507,7 +2649,9 @@ function updateText(report) {
 }
 
 $("btnCatalogLoad").addEventListener("click", refreshCatalog);
-$("btnCatalogUpdateAll").addEventListener("click", async () => {
+$("btnCatalogUpdateAll").addEventListener("click", updateAllPlugins);
+
+async function updateAllPlugins() {
   const report = await call("plugin_update", { name: null });
   if (!report) return;
   const text = updateText(report);
@@ -2522,7 +2666,7 @@ $("btnCatalogUpdateAll").addEventListener("click", async () => {
   }
   refreshPlugins();
   refreshCatalog();
-});
+}
 
 // ————————————————————————————————————— secrets (D-042)
 
@@ -2535,19 +2679,17 @@ async function refreshSecrets() {
       rows.push(
         h(
           "tr",
-          {},
+          {
+            menu: () => ({
+              title: `${namespace}/${key}`,
+              items: [
+                { label: "delete", danger: true, confirm: "really delete?", run: () => removeSecret(namespace, key) },
+              ],
+            }),
+          },
           h("td", { class: "mono", text: namespace }),
           h("td", { class: "mono", text: key }),
-          h(
-            "td",
-            {},
-            armedButton("delete", async () => {
-              const report = await call("secret_remove", { namespace, key });
-              if (!report) return;
-              toast(`${report.namespace}/${report.key} ${report.changed ? "removed" : "was not there"}`, true);
-              refreshSecrets();
-            }),
-          ),
+          h("td", {}, armedButton("delete", () => removeSecret(namespace, key))),
         ),
       );
     }
@@ -2555,6 +2697,13 @@ async function refreshSecrets() {
   $("secretTable").querySelector("tbody").replaceChildren(...rows);
   $("secretTable").hidden = rows.length === 0;
   $("secretEmpty").hidden = rows.length > 0;
+}
+
+async function removeSecret(namespace, key) {
+  const report = await call("secret_remove", { namespace, key });
+  if (!report) return;
+  toast(`${report.namespace}/${report.key} ${report.changed ? "removed" : "was not there"}`, true);
+  refreshSecrets();
 }
 
 $("secretForm").addEventListener("submit", async (event) => {
@@ -2609,7 +2758,12 @@ async function refreshThemes() {
 
 function themeCard(theme, activeId) {
   const current = (theme.id ?? null) === (activeId ?? null);
-  const card = h("li", { class: current ? "theme current" : "theme" });
+  // The theme in use has nothing to offer: its menu does not open.
+  const card = h("li", {
+    class: current ? "theme current" : "theme",
+    menu: () =>
+      current ? null : { title: theme.name, items: [{ label: "apply", run: () => selectTheme(theme.id ?? null) }] },
+  });
   card.append(swatch(theme.preview));
 
   const name = h("span", { class: "name", text: theme.name });
@@ -2624,22 +2778,17 @@ function themeCard(theme, activeId) {
   foot.append(
     current
       ? h("button", { type: "button", disabled: true }, icon("check"), "in use")
-      : h(
-          "button",
-          {
-            type: "button",
-            onclick: async () => {
-              const active = await call("theme_select", { id: theme.id ?? null });
-              if (!active) return;
-              applyTheme(active);
-              refreshThemes();
-            },
-          },
-          "apply",
-        ),
+      : h("button", { type: "button", onclick: () => selectTheme(theme.id ?? null) }, "apply"),
   );
   card.append(foot);
   return card;
+}
+
+async function selectTheme(id) {
+  const active = await call("theme_select", { id });
+  if (!active) return;
+  applyTheme(active);
+  refreshThemes();
 }
 
 /// A small window drawn with the theme's own tokens. The values are raw CSS
@@ -2727,6 +2876,367 @@ $("resolveForm").addEventListener("submit", async (event) => {
   $("resolveResult").textContent = JSON.stringify(res, null, 2);
   $("resolveCard").hidden = false;
 });
+
+// ————————————————————————————————————— context menus (D-079)
+//
+// The engine's own menu never opens (`menu.js`). In its place every element
+// offers what can be done with it, and one with nothing to offer offers
+// nothing. Each row calls a function this file already has: a menu is a
+// second way to what the interface does, not a capability of its own (K1,
+// D-033). Rows drawn from data carry their menu where they are drawn
+// (`h(…, { menu })`); the page's fixed elements get theirs here.
+
+/// `Title · Artist` — the head of a track's menu.
+function trackTitle(track) {
+  return `${track.title} · ${track.artist}`;
+}
+
+/// What any track offers besides being played.
+function trackItems(track) {
+  return [
+    { label: "find the artist in the library", run: () => searchLibrary(track.artist) },
+    {
+      label: "copy artist and title",
+      run: () => copyText(`${track.artist} — ${track.title}`, "artist and title copied to the clipboard"),
+    },
+    { label: "resolve its identity", run: () => resolveIdentity(track) },
+  ];
+}
+
+/// The space bar's row, named for what it does now.
+function pauseItem() {
+  const running = anchor?.state === "playing" || anchor?.state === "buffering";
+  return { label: running ? "pause" : "play", key: "space", run: togglePause };
+}
+
+/// The library's answer for a query, as if it had been typed there.
+function searchLibrary(query) {
+  openPanel("library");
+  $("searchQuery").value = query;
+  $("searchForm").requestSubmit();
+}
+
+/// Which link gives a track its identity: the diagnostics' form, filled in.
+function resolveIdentity(track) {
+  openPanel("diag");
+  $("resolveQuery").value = `${track.artist} - ${track.title}`;
+  $("resolveForm").requestSubmit();
+}
+
+function artistMenu(artist) {
+  return {
+    title: artist,
+    items: [
+      { label: "play every track", run: () => startPlay(artist, true) },
+      { label: "shuffle every track", run: () => startPlay(artist, true, true) },
+      "-",
+      { label: "find in the library", run: () => searchLibrary(artist) },
+      { label: "copy the name", run: () => copyText(artist, "name copied to the clipboard") },
+    ],
+  };
+}
+
+/// The row does not promise the album played through: the core keeps no
+/// track numbers, so the tracks come in the search's order.
+function albumMenu(album, artist) {
+  return {
+    title: `${album} · ${artist}`,
+    items: [
+      { label: "play every track on it", run: () => startPlay(`${artist} ${album}`, true) },
+      "-",
+      { label: "find in the library", run: () => searchLibrary(album) },
+      { label: "copy the name", run: () => copyText(`${artist} — ${album}`, "name copied to the clipboard") },
+    ],
+  };
+}
+
+/// The player: the bar, the record's card and the head of the whole-sheet
+/// lyrics all offer the same.
+function playerMenu() {
+  const current = queue.items[queue.position];
+  const sheet = nowOpen
+    ? { label: "close now playing", key: "Esc", run: () => setNowOpen(false) }
+    : { label: "now playing", key: "Ctrl+1", run: () => setNowOpen(true) };
+  if (!current) {
+    // Nothing to control yet: the way to begin.
+    return { mark: false, items: [{ label: "play something…", key: "/", run: () => $("playQuery").focus() }, sheet] };
+  }
+  return {
+    title: trackTitle(current.track),
+    mark: false,
+    items: [
+      pauseItem(),
+      { label: "next track", key: "→", run: playNext },
+      { label: "previous track", key: "←", run: playPrevious },
+      { label: "stop", run: stopPlayback },
+      "-",
+      { label: "shuffle", kind: "check", checked: queue.shuffle, run: () => setShuffle(!queue.shuffle) },
+      ...Object.entries(REPEAT_LABELS).map(([mode, label]) => ({
+        label: `repeat: ${label}`,
+        kind: "radio",
+        checked: queue.repeat === mode,
+        run: () => setRepeat(mode),
+      })),
+      "-",
+      { label: lyricsToggleLabel(), key: "L", run: toggleLyrics },
+      sheet,
+      "-",
+      ...trackItems(current.track),
+    ],
+  };
+}
+
+/// The lyrics: the line under the pointer, all of them, and their timing.
+function lyricsMenu(target) {
+  const lines = lyricsItem?.lyrics?.lines ?? [];
+  const line = target.closest?.(".lyric");
+  const synced = lyricsItem?.status === "found" && lyricsItem.synced;
+  return {
+    mark: false,
+    items: [
+      line &&
+        !line.classList.contains("gap") && {
+          label: "copy the line",
+          run: () => copyText(line.textContent, "the line copied to the clipboard"),
+        },
+      lines.length > 0 && {
+        label: "copy the lyrics",
+        run: () => copyText(lines.map((each) => each.text).join("\n"), "the lyrics copied to the clipboard"),
+      },
+      "-",
+      synced && { label: "the lines 0.5 s sooner", run: () => shiftLyrics(SHIFT_STEP_MS) },
+      synced && { label: "the lines 0.5 s later", run: () => shiftLyrics(-SHIFT_STEP_MS) },
+      synced && {
+        label: "back to their own timing",
+        disabled: (lyricsItem.offset_ms ?? 0) === 0,
+        run: () => shiftLyrics(null),
+      },
+      lyricsItem?.status === "failed" && { label: "try again", run: retryLyrics },
+      "-",
+      lyricsFull
+        ? { label: "back beside the record", key: "Esc", run: () => setLyricsFull(false) }
+        : { label: "lyrics on the whole sheet", run: () => setLyricsFull(true) },
+    ],
+  };
+}
+
+function sleeveMenu() {
+  return {
+    mark: false,
+    items: [
+      { label: "save as…", disabled: !sleeve.previewed, run: saveSleeve },
+      { label: "refresh the preview", run: previewSleeve },
+      "-",
+      ...[...$("sleeveForm").querySelectorAll(".segment")].map((segment) => ({
+        label: segment.textContent,
+        kind: "radio",
+        checked: sleeve.format === segment.dataset.format,
+        run: () => sleeveFormat.select(segment),
+      })),
+    ],
+  };
+}
+
+async function copyDiagReport() {
+  const text = await call("diag_text");
+  if (text === undefined) return;
+  if (text === null) toast("no command has been run yet — there is no report to copy", true);
+  else copyText(text, "diagnostics report copied to the clipboard");
+}
+
+/// A section's own work, on its row in the sidebar — without opening it
+/// first. What shows its result in the section opens the section.
+const SECTION_ITEMS = {
+  now: () => [{ label: lyricsToggleLabel(), key: "L", run: toggleLyrics }],
+  library: () => [
+    {
+      label: "search the library",
+      run: () => {
+        openPanel("library");
+        $("searchQuery").focus();
+      },
+    },
+  ],
+  stats: () => [
+    {
+      label: "recompute",
+      run: () => {
+        // Opening a section never computed computes it already.
+        const loaded = stats.loaded;
+        openPanel("stats");
+        if (loaded) runStats(stats.year);
+      },
+    },
+  ],
+  sleeve: () => [{ label: "save the card as…", run: saveSleeve }],
+  import: () => [
+    {
+      label: "choose an export archive…",
+      run: () => {
+        openPanel("import");
+        pickImport();
+      },
+    },
+  ],
+  providers: () => [
+    { label: "scan", run: () => scan(false) },
+    { label: "scan only if changed", run: () => scan(true) },
+  ],
+  plugins: () => [
+    {
+      label: "fetch the catalog",
+      run: () => {
+        openPanel("plugins");
+        pluginTabs.select($("tabCatalog"));
+        refreshCatalog();
+      },
+    },
+    { label: "update every plugin", run: updateAllPlugins },
+    {
+      label: "secrets",
+      run: () => {
+        openPanel("plugins");
+        pluginTabs.select($("tabSecrets"));
+      },
+    },
+  ],
+  diag: () => [{ label: "copy the last run's report", run: copyDiagReport }],
+};
+
+for (const button of document.querySelectorAll(".nav")) {
+  const panel = button.dataset.panel;
+  const shortcut = `Ctrl+${PANELS.indexOf(panel) + 1}`;
+  menus.set(button, () => ({
+    title: button.querySelector(".nav-label").textContent,
+    items: [
+      panel === "now" && nowOpen
+        ? { label: "close", key: "Esc", run: () => setNowOpen(false) }
+        : { label: "open", key: shortcut, disabled: currentPanel === panel, run: () => openPanel(panel) },
+      "-",
+      ...(SECTION_ITEMS[panel]?.() ?? []),
+    ],
+  }));
+}
+
+menus.set($("player"), playerMenu);
+menus.set($("nowCard"), playerMenu);
+menus.set(lyricsFullView.querySelector(".lyrics-full-head"), playerMenu);
+menus.set($("lyricsPanel"), lyricsMenu);
+menus.set($("sleeveStage"), sleeveMenu);
+
+/// A block of text meant to be taken elsewhere: copied whole.
+function copyBlock(block, label) {
+  menus.set(block, () =>
+    block.textContent ? [{ label, run: () => copyText(block.textContent, "copied to the clipboard") }] : null,
+  );
+}
+
+copyBlock($("diagResult"), "copy the report");
+copyBlock($("diagRaw"), "copy the JSON");
+copyBlock($("envBlock"), "copy the environment");
+copyBlock($("importResult"), "copy the JSON");
+copyBlock($("resolveResult"), "copy the JSON");
+copyBlock($("themeDir"), "copy");
+
+const TEXT_TYPES = new Set(["text", "search", "url", "password", "number", "email", "tel"]);
+
+function isTextField(el) {
+  return el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && TEXT_TYPES.has(el.type));
+}
+
+/// What a text box's form does, offered beside the edits once there is
+/// something typed.
+const FIELD_ACTIONS = {
+  playQuery: () => [
+    { label: "play the first match", key: "Enter", run: () => $("playForm").requestSubmit() },
+    { label: "queue every match", key: "Shift+Enter", run: () => startPlay(playQuery(), true) },
+  ],
+  searchQuery: () => [{ label: "search", key: "Enter", run: () => $("searchForm").requestSubmit() }],
+};
+
+/// A text box: the edits every text box has. A password is never copied
+/// out of its box.
+function fieldMenu(field) {
+  // `null` where the box's type has no selection to read (a number).
+  const start = field.selectionStart;
+  const end = field.selectionEnd;
+  const selected = start !== null && end !== null && end > start;
+  const secret = field.type === "password";
+  const locked = field.readOnly || field.disabled;
+  return {
+    owner: field,
+    mark: false,
+    items: [
+      { label: "cut", key: "Ctrl+X", disabled: !selected || secret || locked, run: () => editField(field, "cut") },
+      { label: "copy", key: "Ctrl+C", disabled: !selected || secret, run: () => editField(field, "copy") },
+      { label: "paste", key: "Ctrl+V", disabled: locked, run: () => editField(field, "paste") },
+      "-",
+      {
+        label: "select all",
+        key: "Ctrl+A",
+        disabled: !field.value,
+        run: () => {
+          field.focus();
+          field.select();
+        },
+      },
+      "-",
+      ...(field.value.trim() ? (FIELD_ACTIONS[field.id]?.() ?? []) : []),
+    ],
+  };
+}
+
+/// Cut, copy and paste the way the box's own keys do them: the engine's
+/// commands keep the box's undo history. Where the engine refuses one (it
+/// guards the clipboard), the clipboard API does the same; a refusal there
+/// is said, not swallowed.
+async function editField(field, command) {
+  field.focus({ preventScroll: true });
+  if (document.execCommand(command)) return;
+  try {
+    if (command === "paste") {
+      document.execCommand("insertText", false, await navigator.clipboard.readText());
+    } else {
+      await navigator.clipboard.writeText(field.value.slice(field.selectionStart, field.selectionEnd));
+      if (command === "cut") document.execCommand("delete");
+    }
+  } catch (err) {
+    clipboardRefused(command === "paste" ? "read" : "write to", err);
+  }
+}
+
+/// The page's selected text — if the element under the pointer is part of
+/// it.
+function selectionAt(target) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.containsNode(target, true)) return "";
+  return selection.toString();
+}
+
+/// What the element under the pointer offers: a text box its edits; an
+/// element the nearest menu of its own or its parents'; selected text a copy
+/// on top. Nothing, where there is none of these.
+function findMenu(target) {
+  const field = target.closest?.("input, textarea");
+  if (field && isTextField(field)) return fieldMenu(field);
+  const selected = selectionAt(target);
+  const copy = selected && {
+    label: "copy",
+    key: "Ctrl+C",
+    run: () => document.execCommand("copy") || copyText(selected, "copied to the clipboard"),
+  };
+  for (let el = target; el && el !== document.body; el = el.parentElement) {
+    const build = menus.get(el);
+    if (!build) continue;
+    const built = build(target);
+    if (!built) break;
+    const menu = Array.isArray(built) ? { items: built } : built;
+    return { owner: el, ...menu, items: copy ? [copy, "-", ...menu.items] : menu.items };
+  }
+  return copy ? { mark: false, items: [copy] } : null;
+}
+
+contextMenus({ root: $("contextMenu"), find: findMenu, checkMark: () => icon("check") });
 
 // ————————————————————————————————————— events
 //

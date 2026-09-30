@@ -2749,6 +2749,135 @@ kbd {
   border-bottom: 0;
 }
 
+/* ————————————————— context menus (D-079)
+ *
+ * A raised surface over everything, flat like the rest — no blur (D-028);
+ * the shadow says it floats, the same as a notice's. `menu.js` places it
+ * and makes it grow out of the pointer: its `left`, `top`,
+ * `transform-origin`, `transform` and `opacity` are written inline, so a
+ * theme that gives it a `transform` breaks the growing. */
+
+.menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 30;
+  min-width: 200px;
+  max-width: min(340px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--headshell-border);
+  border-radius: var(--headshell-radius-lg);
+  background: var(--headshell-surface-raised);
+  box-shadow:
+    0 12px 32px rgb(0 0 0 / 34%),
+    0 1px 3px rgb(0 0 0 / 28%);
+  font-size: 13px;
+  user-select: none;
+}
+
+.menu:focus,
+.menu:focus-visible {
+  outline: none;
+}
+
+/* Closing, it fades where it was; nothing on it can be picked any more. */
+.menu.closing {
+  pointer-events: none;
+}
+
+.menu-title {
+  margin: 0;
+  padding: 4px 10px 5px;
+  overflow: hidden;
+  color: var(--headshell-text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--headshell-radius-sm);
+  color: var(--headshell-text);
+  cursor: default;
+}
+
+/* The lit row is the platform's: the accent, full. It changes the moment
+ * the pointer arrives — no transition to wait for. */
+.menu-item.active {
+  background: var(--headshell-accent);
+  color: var(--headshell-bg);
+}
+
+.menu-item.danger {
+  color: var(--headshell-error);
+}
+
+/* An irreversible row lights in the error colour, and stays lit while it
+ * asks "really …?". */
+.menu-item.danger.active,
+.menu-item.armed {
+  background: var(--headshell-error);
+  color: var(--headshell-bg);
+}
+
+.menu-item[aria-disabled="true"] {
+  opacity: 0.45;
+}
+
+.menu-check {
+  display: flex;
+  flex: none;
+  width: 14px;
+}
+
+.menu-check .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.4;
+}
+
+.menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-key {
+  flex: none;
+  padding-left: 20px;
+  color: var(--headshell-text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-item.active .menu-key,
+.menu-item.armed .menu-key {
+  color: inherit;
+  opacity: 0.72;
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--headshell-border);
+}
+
+/* What the open menu is about: a ring, as long as the menu is open. */
+.menu-target {
+  outline: 2px solid var(--headshell-accent);
+  outline-offset: -2px;
+}
+
 /* ————————————————— startup error window (D-070)
  *
  * It uses the same file, but not `body.app`: no skeleton, only text. Long
@@ -2815,8 +2944,13 @@ kbd {
   .table th,
   .table td,
   .sidebar,
-  .player {
+  .player,
+  .menu {
     border-color: var(--headshell-text-dim);
+  }
+
+  .menu-separator {
+    background: var(--headshell-text-dim);
   }
 
   .chip {

@@ -2249,6 +2249,51 @@ without timing, a track with none, a real recording LRCLIB has at its length,
 and one it has only seconds off — marked, shifted, kept; the whole-sheet view,
 `L`, `Esc` and a hand scroll.
 
+### 3.13 Context menus — DONE (D-079)
+
+**The problem:** a right click opened the engine's own menu — "Back",
+"Reload" (which rebuilt the interface and lost the open section, the search
+and the scroll), "Open Image in New Window" on a cover, and in debug builds
+"Inspect Element". None of it was the app's, and none of it was about the
+thing under the pointer.
+
+**Done:**
+
+1. **The engine's menu never opens**, in any build. In its place every element
+   offers what can be done with it: a track (play it, find its artist, copy
+   it, resolve its identity), the player (the transport, shuffle, repeat, the
+   lyrics), a sidebar row (the section's own work without opening it), a
+   plugin's card (its own buttons, from one list), a notice, the lyrics, a
+   year, a text box (cut, copy, paste, select all). An empty spot opens
+   nothing.
+2. **Nothing new underneath (K1, D-033):** every row calls a function the
+   interface already had; no IPC command and no CLI subcommand was added.
+   What each element offers is written where it is drawn (`h(…, { menu })`).
+3. **It behaves as the platform's menus do** (`ui/menu.js`, with
+   /apple-design): it grows out of the pointer and stays inside the window;
+   press, move and let go picks a row in one gesture, a still release never
+   picks; a press outside only closes it; the Menu key and Shift+F10 open the
+   focused element's menu, and every key is the menu's while it is open; a
+   row that cannot be undone asks first.
+4. **Paste reads the clipboard:** WebKitGTK refused it, so the main window is
+   built in `setup` with Tauri's clipboard access (`create: false` in the
+   config) — no new crate.
+
+**Not done:** queue editing — "play next", "add to the queue", "remove from
+the queue" — needs the core (the queue has no insert or remove, and the
+read-ahead would follow them): the user's choice, its own step. An album in
+its order: the core keeps no track numbers.
+
+**Testing:** `tests/menu_js.rs` — the placement (no opening point puts a menu
+outside the window; from the keyboard it does not cover its element), the
+release rule, the type-ahead, the separators; `ui_contract.rs` reads
+`menu.js` too.
+
+**Verification:** the §3.9 container at 1180×780 and 900×600: every kind of
+menu opened, picked from with the pointer, by press–drag–release and from the
+keyboard; the clipboard read back with `xclip`; a click outside swallowed; a
+notice held while its menu was open.
+
 ---
 
 # PHASE 4 — Rooms (the backend starts here)
