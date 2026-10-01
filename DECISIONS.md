@@ -5495,3 +5495,19 @@ then "results from Echo (test):"; a suggestion's menu — the real rows and the 
 ↓ and Enter playing exactly the lit track; Echo chosen — the pill sliding, the placeholder, its
 suggestions with no heading; Esc closing the panel only; a queue row's menu; the window at
 900×600.
+
+**Addendum (2026-10-01): covers in the suggestions.** Left undone above; the user asked
+for them on seeing the panel (*"why are there no covers — can't we load them?"*). The
+suggestion rows had none because the cover worker (D-076) looked only at the queue. It
+takes a second list now, what is on screen (`ArtworkWorker::show`, the desktop's
+`artwork_shown`): the cache's covers come back at once, the rest are asked **only where each
+track lives** — its file's tags and folder, its provider's own cover — after the playing
+track and before the rest of the queue, and a found one arrives with the tick's
+`artwork_ready`, as the queue's do. The third parties (MusicBrainz, the Cover Art Archive)
+are never asked for a suggestion: the list changes at every pause in typing, and they take
+a request a second. For the same reason nothing found is not kept as "not found" — the queue,
+online, still asks them for that album later. A new list replaces the old one's pending
+lookups. The CLI's counterpart stays `headshell artwork`: the covers of what a query finds,
+waited for. Verified in the container: a local album's folder cover on its suggestion rows,
+the echo plugin's own cover on its track, and a track whose plugin has none keeping the small
+record.

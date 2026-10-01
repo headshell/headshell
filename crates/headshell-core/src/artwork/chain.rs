@@ -104,11 +104,58 @@ impl Chain {
             return known;
         }
         let mut notes = Vec::new();
+        if let Some(settled) = self.provider_cover(id, &key, &mut notes) {
+            return settled;
+        }
+        self.third_parties(key, track, notes)
+    }
+
+    /// A track on screen besides the queue — a suggestion (D-080): what the
+    /// cache knows, or its provider's own cover. The third parties are not
+    /// asked: a suggestion list changes at every pause in typing. So nothing
+    /// found is `None`, and nothing is kept for it — the queue still asks
+    /// them for the same album later, when online.
+    pub(crate) fn resolve_where_it_lives(
+        &self,
+        id: &ProviderTrackId,
+        track: &TrackRef,
+    ) -> Option<Outcome> {
+        let key = key_for(track);
+        if let Some(known) = self.known(&key) {
+            return Some(known);
+        }
+        let mut notes = Vec::new();
+        let settled = self.provider_cover(id, &key, &mut notes);
+        if settled.is_none() && !notes.is_empty() {
+            tracing::info!(
+                key = key.as_str(),
+                notes = notes.join(" | "),
+                "cover of a suggestion: a link failed on the way"
+            );
+        }
+        settled
+    }
+
+    /// The provider's own cover: `Some` when it was found — and kept — or
+    /// when the plugin gave way to a call for the user (pending); `None`
+    /// otherwise, with what failed written into `notes`.
+    fn provider_cover(
+        &self,
+        id: &ProviderTrackId,
+        key: &ArtworkKey,
+        notes: &mut Vec<String>,
+    ) -> Option<Outcome> {
         match self.links.registry.get(&id.provider) {
             Some(provider) if provider.info().capabilities.contains(Capabilities::ARTWORK) => {
                 match block_on(provider.artwork(id, REQUEST_EDGE)) {
-                    Ok(Some(found)) => match self.keep(&key, found.source, &found.bytes, None) {
-                        Ok(status) => return Outcome { key, status, notes },
+                    Ok(Some(found)) => match self.keep(key, found.source, &found.bytes, None) {
+                        Ok(status) => {
+                            return Some(Outcome {
+                                key: key.clone(),
+                                status,
+                                notes: std::mem::take(notes),
+                            });
+                        }
                         Err(err) => notes.push(format!(
                             "the cover from {} is unusable — {}",
                             id.provider,
@@ -119,11 +166,11 @@ impl Chain {
                     // It gave way to a call for the user (D-077): not an
                     // answer. The row stays pending and the worker asks again.
                     Err(err) if matches!(err.kind(), ErrorKind::PluginPreempted { .. }) => {
-                        return Outcome {
-                            key,
+                        return Some(Outcome {
+                            key: key.clone(),
                             status: ArtworkStatus::Pending,
-                            notes,
-                        };
+                            notes: std::mem::take(notes),
+                        });
                     }
                     Err(err) => notes.push(format!(
                         "{} could not give its cover — {}",
@@ -139,7 +186,7 @@ impl Chain {
                 id.provider
             )),
         }
-        self.third_parties(key, track, notes)
+        None
     }
 
     /// A file on disk (`headshell artwork --file`): its tags and its folder,

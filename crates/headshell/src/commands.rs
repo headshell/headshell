@@ -616,6 +616,21 @@ pub async fn artwork_queue(state: State<'_, AppState>) -> CommandResult<ArtworkR
         .await
 }
 
+/// Covers for what is on screen besides the queue — the play box's
+/// suggestions (D-080). Only where each track lives is asked; what the cache
+/// knows comes back at once, a cover found later arrives with the tick's
+/// `artwork_ready`. The CLI's counterpart is `headshell artwork`: the covers of
+/// what a query finds, waited for.
+#[tauri::command]
+pub async fn artwork_shown(
+    state: State<'_, AppState>,
+    items: Vec<QueueItem>,
+) -> CommandResult<ArtworkReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.artwork_shown(&items) }))
+        .await
+}
+
 /// One size — the label or the thumbnail — of the given cover keys. A key
 /// the core never gave is the interface's mistake, and it is said, not
 /// skipped (K9).

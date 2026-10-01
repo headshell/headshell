@@ -2319,7 +2319,11 @@ song could not be added to the queue.
    (`/`, Enter plays, Tab adds).
 
 **Not done:** play next (the gapless handover must be taken back first);
-playlists, radios, likes; covers in the suggestions.
+playlists, radios, likes.
+
+**Covers in the suggestions** (an addendum): the cover worker takes what is on
+screen beside the queue, and asks only where each track lives — never the
+third parties for a list that changes at every pause.
 
 **Testing:** the ranking; the order and the fallback with fake providers;
 `enqueue`; the TUI's keys and rows; `suggest` and `provider use` through the

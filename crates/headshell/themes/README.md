@@ -120,7 +120,7 @@ of the pointer by the springs: its `left`, `top`, `transform-origin`,
 D-080 added two more. The play box's suggestions are `.suggest` (under the
 field, its `transform`, `opacity` and width written inline — the same warning
 as `.menu`), with `.suggest-row` (`.lit` when lit, `.artist` for an artist),
-`.suggest-art`, `.suggest-main`, `.suggest-title`, `.suggest-sub`,
+`.suggest-art` (a found cover is an `img` inside it), `.suggest-main`, `.suggest-title`, `.suggest-sub`,
 `.suggest-time`, `.suggest-heading` ("results from …"), `.suggest-note` and
 `.suggest-failure`. The providers section's choice is `.play-from` (a
 `.card`), `.play-from-list`, `.play-from-row` (`aria-checked="true"` when

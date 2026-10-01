@@ -1634,7 +1634,7 @@ async function askSuggest(query) {
   const report = await call("suggest", { query });
   clearTimeout(slow);
   if (asked !== suggestAsked || playInput.value !== query || document.activeElement !== playInput) return;
-  if (report) drawSuggest(report);
+  if (report) drawSuggest(report, asked);
 }
 
 function showSearching() {
@@ -1649,7 +1649,7 @@ function showSearching() {
   openSuggest();
 }
 
-function drawSuggest(report) {
+function drawSuggest(report, asked) {
   suggestRows = [];
   suggestLit = -1;
   const nodes = [];
@@ -1681,6 +1681,49 @@ function drawSuggest(report) {
   suggestPanel.classList.remove("stale");
   playInput.removeAttribute("aria-activedescendant");
   openSuggest();
+  coverSuggestions(asked);
+}
+
+// The suggestions' covers (D-080): the cache's at once, the rest as the
+// cover worker finds them where the tracks live — its file, its provider —
+// announced by the tick, as the queue's are. Only the rows on screen keep
+// theirs. A cover fades in the first time it appears; a list drawn again
+// shows the ones already seen at once.
+const suggestThumbs = new Map();
+
+async function coverSuggestions(asked) {
+  const tracks = suggestRows.filter((row) => row.item);
+  if (tracks.length === 0) return;
+  const report = await call("artwork_shown", { items: tracks.map((row) => row.item) });
+  if (!report || asked !== suggestAsked) return;
+  report.items.forEach((entry, index) => {
+    tracks[index].key = entry.key;
+  });
+  const onScreen = new Set(tracks.map((row) => row.key));
+  for (const key of suggestThumbs.keys()) if (!onScreen.has(key)) suggestThumbs.delete(key);
+  await paintSuggestCovers(report.items.filter((entry) => entry.status === "found").map((entry) => entry.key));
+}
+
+async function paintSuggestCovers(keys) {
+  const wanted = [...new Set(keys)].filter(
+    (key) => !suggestThumbs.has(key) && suggestRows.some((row) => row.key === key),
+  );
+  if (wanted.length > 0) {
+    for (const picture of (await call("artwork_images", { keys: wanted, variant: "thumb" })) ?? []) {
+      suggestThumbs.set(picture.key, picture.uri);
+    }
+  }
+  for (const row of suggestRows) {
+    const uri = row.key ? suggestThumbs.get(row.key) : undefined;
+    const slot = row.el.querySelector(".suggest-art");
+    if (!uri || slot.querySelector("img")) continue;
+    const img = h("img", { alt: "", src: uri });
+    slot.append(img);
+    if (!coversSeen.has(row.key)) {
+      animate(img, { opacity: 1 }, { from: { opacity: 0 } });
+      coversSeen.add(row.key);
+    }
+  }
 }
 
 function suggestTrack(item) {
@@ -1703,7 +1746,7 @@ function suggestTrack(item) {
     ),
     h("span", { class: "suggest-time", text: track.duration_ms ? clock(track.duration_ms) : "" }),
   );
-  suggestRows.push({ el: row, pick: () => playItems([item]) });
+  suggestRows.push({ el: row, item, key: null, pick: () => playItems([item]) });
   return row;
 }
 
@@ -3693,6 +3736,8 @@ listen("headshell://tick", async (event) => {
     // A cover's answer arrived: the rows and the label are painted again.
     refreshCovers();
   }
+  // A suggestion's cover found while the list is up (D-080).
+  if (report.artwork_ready?.length > 0 && suggestUp) paintSuggestCovers(report.artwork_ready);
   if (report.lyrics_ready) {
     // The playing track's lyrics changed: a new track, an answer, a shift.
     refreshLyrics();

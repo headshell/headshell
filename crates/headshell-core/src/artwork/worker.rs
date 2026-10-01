@@ -13,6 +13,12 @@
 //! queue replaces the old one's pending work; a lookup already under way is
 //! finished and kept in the cache, only its answer is not written into a
 //! queue that is gone.
+//!
+//! Besides the queue, what is on screen (D-080): the play box's
+//! suggestions, handed over by [`ArtworkWorker::show`]. Only where each of
+//! them lives is asked, never the third parties; they come after the playing
+//! track and before the rest of the queue, and a new list replaces the old
+//! one's pending lookups the same way.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -59,9 +65,18 @@ struct State {
     tracks: Vec<(ProviderTrackId, TrackRef)>,
     /// Indices into `items`, in the order they are worked on.
     todo: VecDeque<usize>,
+    /// The queue's index that was playing when it was handed over: looked up
+    /// before anything shown.
+    playing: Option<usize>,
+    /// The tracks on screen besides the queue, and which of them are still
+    /// to be asked; bumped by every new list like `generation`.
+    shown_generation: u64,
+    shown: Vec<(ProviderTrackId, TrackRef)>,
+    shown_todo: VecDeque<usize>,
     /// Keys whose answer arrived since the last
     /// [`ArtworkWorker::drain_ready`] — found or not: a row whose cover was
-    /// not found shows why, and it learns that from the same signal.
+    /// not found shows why, and it learns that from the same signal. A shown
+    /// track's key comes only when its cover was found.
     ready: Vec<ArtworkKey>,
     /// A registry the thread has not picked up yet.
     registry: Option<ProviderRegistry>,
@@ -148,6 +163,7 @@ impl ArtworkWorker {
         // The playing track first, then play order, then what was played.
         let count = items.len();
         let start = position.min(count);
+        state.playing = (start < count).then_some(start);
         let order: VecDeque<usize> = (start..count).chain(0..start).collect();
         state.todo = order
             .into_iter()
@@ -155,6 +171,68 @@ impl ArtworkWorker {
             .collect();
         drop(state);
         self.shared.signal.notify_one();
+    }
+
+    /// Hands over the tracks on screen besides the queue (D-080), in the
+    /// order shown, replacing the ones handed over before. What the cache
+    /// knows comes back at once; the rest is asked where each track lives —
+    /// its file, its provider — and its key arrives in
+    /// [`Self::drain_ready`] when a cover was found.
+    #[must_use]
+    pub fn show(&self, items: &[QueueItem]) -> ArtworkReport {
+        let known: Vec<Option<ArtworkStatus>> = match self.shared.cache.lock() {
+            Ok(mut cache) => {
+                // Another process (the CLI) may have filled the cache meanwhile.
+                if let Err(err) = cache.reload() {
+                    tracing::warn!(error = %err.chain_text().replace('\n', " "), "the cover index could not be reread");
+                }
+                items
+                    .iter()
+                    .map(|item| known_status(&cache, &key_for(&item.track)))
+                    .collect()
+            }
+            Err(_) => vec![None; items.len()],
+        };
+        let rows: Vec<ArtworkItem> = items
+            .iter()
+            .zip(&known)
+            .enumerate()
+            .map(|(index, (item, known))| ArtworkItem {
+                index,
+                key: key_for(&item.track),
+                provider: item.id.provider.clone(),
+                artist: item.track.artist.clone(),
+                title: item.track.title.clone(),
+                album: item.track.album.clone(),
+                status: known.clone().unwrap_or(ArtworkStatus::Pending),
+                notes: Vec::new(),
+            })
+            .collect();
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.shown_generation += 1;
+            state.shown = items
+                .iter()
+                .map(|item| (item.id.clone(), item.track.clone()))
+                .collect();
+            state.shown_todo = (0..items.len())
+                .filter(|&index| known[index].is_none())
+                .collect();
+            drop(state);
+            self.shared.signal.notify_one();
+        } else {
+            tracing::warn!(
+                "the cover worker's lock is poisoned; the shown tracks were not handed over"
+            );
+        }
+        ArtworkReport {
+            subject: "shown".to_owned(),
+            // The third parties are never asked for what is only shown.
+            online: false,
+            summary: ArtworkSummary::of(&rows),
+            items: rows,
+            written: Vec::new(),
+            diag: None,
+        }
     }
 
     /// The keys whose answer arrived since the last call, found or not.
@@ -257,10 +335,34 @@ fn lock(shared: &Shared) -> Option<MutexGuard<'_, State>> {
     shared.state.lock().ok()
 }
 
+/// What the thread works on next.
+enum Job {
+    /// A queue row: its index, the queue's generation.
+    Queue(usize, u64),
+    /// A shown track: its index, the shown list's generation.
+    Shown(usize, u64),
+}
+
+/// The playing track first; then what is on screen; then the rest of the
+/// queue in play order.
+fn next_job(state: &mut State) -> Option<(Job, ProviderTrackId, TrackRef)> {
+    let playing_first = state
+        .todo
+        .front()
+        .is_some_and(|&index| Some(index) == state.playing);
+    if !playing_first && let Some(index) = state.shown_todo.pop_front() {
+        let (id, track) = state.shown[index].clone();
+        return Some((Job::Shown(index, state.shown_generation), id, track));
+    }
+    let index = state.todo.pop_front()?;
+    let (id, track) = state.tracks[index].clone();
+    Some((Job::Queue(index, state.generation), id, track))
+}
+
 fn run(shared: &Shared, mut chain: Chain) {
     loop {
         // Wait for work; take the next item.
-        let (generation, index, id, track) = {
+        let (job, id, track) = {
             let Some(mut state) = lock(shared) else {
                 tracing::warn!("the cover worker's lock is poisoned; the worker stops");
                 return;
@@ -272,9 +374,8 @@ fn run(shared: &Shared, mut chain: Chain) {
                 if let Some(registry) = state.registry.take() {
                     chain.set_registry(registry);
                 }
-                if let Some(index) = state.todo.pop_front() {
-                    let (id, track) = state.tracks[index].clone();
-                    break (state.generation, index, id, track);
+                if let Some(next) = next_job(&mut state) {
+                    break next;
                 }
                 state = match shared.signal.wait(state) {
                     Ok(state) => state,
@@ -286,41 +387,72 @@ fn run(shared: &Shared, mut chain: Chain) {
             }
         };
 
-        let outcome = chain.resolve(&id, &track);
-        if !outcome.notes.is_empty() {
-            tracing::info!(
-                key = outcome.key.as_str(),
-                notes = outcome.notes.join(" | "),
-                "cover: a link failed on the way"
-            );
-        }
-
-        let Some(mut state) = lock(shared) else {
-            return;
-        };
-        if state.generation != generation {
-            // The queue changed meanwhile; the answer is in the cache if it was
-            // one to keep, and the new queue reads it from there.
-            continue;
-        }
-        if outcome.status == ArtworkStatus::Pending {
-            // The plugin was needed for a call the user made (D-077): this row
-            // is asked again, first, once that call is through.
-            state.todo.push_front(index);
-            continue;
-        }
-        // Every row of the same album gets the answer at once.
-        let mut settled = HashSet::new();
-        for (row, item) in state.items.iter_mut().enumerate() {
-            if item.key == outcome.key && (row == index || item.status == ArtworkStatus::Pending) {
-                item.status = outcome.status.clone();
-                item.notes.clone_from(&outcome.notes);
-                settled.insert(row);
+        match job {
+            Job::Shown(index, generation) => {
+                let outcome = chain.resolve_where_it_lives(&id, &track);
+                let Some(mut state) = lock(shared) else {
+                    return;
+                };
+                if state.shown_generation != generation {
+                    // Another list is on screen now; a cover found is in the
+                    // cache, and the new list reads it from there.
+                    continue;
+                }
+                match outcome {
+                    // Gave way to a call for the user (D-077): asked again, first.
+                    Some(outcome) if outcome.status == ArtworkStatus::Pending => {
+                        state.shown_todo.push_front(index);
+                    }
+                    Some(outcome)
+                        if matches!(outcome.status, ArtworkStatus::Found { .. })
+                            && !state.ready.contains(&outcome.key) =>
+                    {
+                        state.ready.push(outcome.key);
+                    }
+                    // Nothing where it lives: the row keeps its record.
+                    _ => {}
+                }
             }
-        }
-        state.todo.retain(|row| !settled.contains(row));
-        if !settled.is_empty() && !state.ready.contains(&outcome.key) {
-            state.ready.push(outcome.key);
+            Job::Queue(index, generation) => {
+                let outcome = chain.resolve(&id, &track);
+                if !outcome.notes.is_empty() {
+                    tracing::info!(
+                        key = outcome.key.as_str(),
+                        notes = outcome.notes.join(" | "),
+                        "cover: a link failed on the way"
+                    );
+                }
+
+                let Some(mut state) = lock(shared) else {
+                    return;
+                };
+                if state.generation != generation {
+                    // The queue changed meanwhile; the answer is in the cache if it was
+                    // one to keep, and the new queue reads it from there.
+                    continue;
+                }
+                if outcome.status == ArtworkStatus::Pending {
+                    // The plugin was needed for a call the user made (D-077): this row
+                    // is asked again, first, once that call is through.
+                    state.todo.push_front(index);
+                    continue;
+                }
+                // Every row of the same album gets the answer at once.
+                let mut settled = HashSet::new();
+                for (row, item) in state.items.iter_mut().enumerate() {
+                    if item.key == outcome.key
+                        && (row == index || item.status == ArtworkStatus::Pending)
+                    {
+                        item.status = outcome.status.clone();
+                        item.notes.clone_from(&outcome.notes);
+                        settled.insert(row);
+                    }
+                }
+                state.todo.retain(|row| !settled.contains(row));
+                if !settled.is_empty() && !state.ready.contains(&outcome.key) {
+                    state.ready.push(outcome.key);
+                }
+            }
         }
     }
 }
@@ -442,5 +574,110 @@ mod tests {
                 source: ArtworkSource::Folder
             }
         );
+    }
+
+    fn local_item(path: &std::path::Path, artist: &str, title: &str, album: &str) -> QueueItem {
+        QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("local"), path.to_string_lossy()),
+            track: TrackRef::new(artist, title).with_album(Some(album.to_owned())),
+        }
+    }
+
+    #[test]
+    fn a_shown_track_gets_the_cover_where_it_lives_and_nothing_found_is_not_kept() {
+        let music = TempDir::new("artwork-shown-music");
+        let album = music.path().join("Currents");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("cover.png"), tiny_png()).unwrap();
+        let found = album.join("Tame Impala - Let It Happen.wav");
+        std::fs::write(&found, b"not audio").unwrap();
+        let bare = music.path().join("Bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let missing = bare.join("Other - Song.wav");
+        std::fs::write(&missing, b"not audio").unwrap();
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(Arc::new(LocalProvider::new(vec![
+            music.path().to_path_buf(),
+        ])));
+        let cache = TempDir::new("artwork-shown-cache");
+        let worker = ArtworkWorker::spawn(
+            cache.path(),
+            Links {
+                registry,
+                online: None,
+            },
+        )
+        .unwrap();
+
+        let shown = [
+            local_item(&found, "Tame Impala", "Let It Happen", "Currents"),
+            local_item(&missing, "Other", "Song", "Bare"),
+        ];
+        let report = worker.show(&shown);
+        assert_eq!(report.subject, "shown");
+        assert!(
+            !report.online,
+            "the third parties are never asked for what is only shown"
+        );
+        assert_eq!(report.summary.pending, 2, "nothing known yet: {report:#?}");
+        let wanted = report.items[0].key.clone();
+        let bare_key = report.items[1].key.clone();
+
+        // The found cover is announced; the other one never is.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut ready = Vec::new();
+        while !ready.contains(&wanted) && std::time::Instant::now() < deadline {
+            ready.extend(worker.drain_ready());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            ready,
+            std::slice::from_ref(&wanted),
+            "only a found cover is announced for a shown track"
+        );
+        let thumbs = worker.images(&ready, ArtworkVariant::Thumb).unwrap();
+        assert!(thumbs[0].uri.starts_with("data:image/png;base64,"));
+
+        // Nothing found where it lives is not kept as "not found": the queue,
+        // online, still asks the third parties for that album.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let cache = worker.shared.cache.lock().unwrap();
+        assert!(
+            known_status(&cache, &bare_key).is_none(),
+            "a shown track's miss was kept"
+        );
+        drop(cache);
+
+        // Shown again, the known cover comes back at once.
+        let report = worker.show(&shown[..1]);
+        assert_eq!(
+            report.items[0].status,
+            ArtworkStatus::Found {
+                source: ArtworkSource::Folder
+            }
+        );
+    }
+
+    #[test]
+    fn the_playing_track_comes_before_what_is_shown_and_that_before_the_rest_of_the_queue() {
+        let item = |title: &str| {
+            (
+                ProviderTrackId::new(ProviderId::new("local"), title),
+                TrackRef::new("Artist", title),
+            )
+        };
+        let mut state = State {
+            tracks: vec![item("playing"), item("next")],
+            todo: VecDeque::from([0, 1]),
+            playing: Some(0),
+            shown: vec![item("shown")],
+            shown_todo: VecDeque::from([0]),
+            ..State::default()
+        };
+        let order: Vec<String> = std::iter::from_fn(|| next_job(&mut state))
+            .map(|(_, id, _)| id.id)
+            .collect();
+        assert_eq!(order, ["playing", "shown", "next"]);
     }
 }

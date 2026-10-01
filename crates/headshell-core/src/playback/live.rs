@@ -20,7 +20,7 @@ use crate::ids::ProviderTrackId;
 use crate::library::WriteSummary;
 use crate::lyrics::{LyricsItem, LyricsKey, LyricsWorker};
 use crate::model::Listen;
-use crate::playback::{PlayState, PlaybackAnchor, Player};
+use crate::playback::{PlayState, PlaybackAnchor, Player, QueueItem};
 use crate::session::{LookupMode, Session};
 use crate::{Error, Result};
 
@@ -204,6 +204,23 @@ impl LiveSession {
     pub fn artwork_report(&mut self) -> Result<ArtworkReport> {
         self.sync_artwork();
         self.worker()?.report()
+    }
+
+    /// Covers for tracks on screen besides the queue — the play box's
+    /// suggestions (D-080). Only where each track lives is asked (its file,
+    /// its provider), never the third parties: a suggestion list changes at
+    /// every pause in typing. What the cache knows comes back at once; the
+    /// rest is looked up in the background — after the playing track,
+    /// before the rest of the queue — and a found one is announced in
+    /// [`TickReport::artwork_ready`]. A new list replaces the old one's
+    /// pending lookups.
+    ///
+    /// # Errors
+    /// If no cover worker runs — "not started" is not "no covers" (K9).
+    pub fn artwork_shown(&mut self, items: &[QueueItem]) -> Result<ArtworkReport> {
+        // The worker's providers are the ones the player plays from.
+        self.sync_artwork();
+        Ok(self.worker()?.show(items))
     }
 
     /// One size of the covers of `keys` as `data:` URIs, for the interface.

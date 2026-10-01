@@ -206,6 +206,7 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             // Covers (D-076)
             commands::artwork,
             commands::artwork_queue,
+            commands::artwork_shown,
             commands::artwork_images,
             commands::lyrics,
             commands::lyrics_now,
