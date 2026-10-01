@@ -96,6 +96,34 @@ pub struct WrittenCard {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderListReport {
     pub providers: Vec<ProviderInfo>,
+    /// Which of them the play box asks first (D-080).
+    pub play_from: PlayFrom,
+    pub diag: DiagReport,
+}
+
+/// Where the play box and its suggestions search first (D-080). The others
+/// are asked only when this one finds nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayFrom {
+    /// The provider asked first; `None` when no registered provider can play.
+    pub provider: Option<ProviderId>,
+    /// The user chose it; `false`: nothing chosen yet, so the registry's
+    /// first one that can play — local files.
+    pub chosen: bool,
+    /// Its answers come from the scanned catalog: at once, without the
+    /// network. Otherwise it is asked over its own connection, and the
+    /// interface waits for a pause in typing before asking.
+    pub instant: bool,
+    /// A choice that cannot be kept — the provider is no longer registered
+    /// or can no longer play (a server removed, a plugin disabled). Said, not
+    /// dropped (K9).
+    pub missing: Option<ProviderId>,
+}
+
+/// What `headshell provider use` answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayFromReport {
+    pub play_from: PlayFrom,
     pub diag: DiagReport,
 }
 
@@ -798,9 +826,108 @@ impl Session {
             "provider.count",
             i64::try_from(registry.len()).unwrap_or(i64::MAX),
         );
-        let result = Ok(registry.list());
-        self.finish(rec, result, |providers, diag| ProviderListReport {
-            providers,
+        let result = self
+            .play_from(registry)
+            .map(|play_from| (registry.list(), play_from));
+        self.finish(rec, result, |(providers, play_from), diag| {
+            ProviderListReport {
+                providers,
+                play_from,
+                diag,
+            }
+        })
+    }
+
+    /// Where the play box searches first (D-080): the user's choice while
+    /// that provider is registered and can play; otherwise the registry's
+    /// first one that can — local files — and a choice that could not be
+    /// kept is named in `missing`.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read, or the catalog cannot say
+    /// whether the provider was scanned.
+    pub fn play_from(&self, registry: &ProviderRegistry) -> Result<PlayFrom> {
+        let saved = crate::preferences::load(&self.config.preferences_path())?.play_from;
+        let (provider, chosen, missing) = match saved {
+            Some(id) if can_play(registry, &id) => (Some(id), true, None),
+            saved => (
+                registry
+                    .with_capability(crate::provider::Capabilities::STREAM)
+                    .first()
+                    .map(|provider| provider.info().id),
+                false,
+                saved,
+            ),
+        };
+        let instant = match &provider {
+            Some(id) => self.library.last_scanned_at_ms(id)?.is_some(),
+            None => false,
+        };
+        Ok(PlayFrom {
+            provider,
+            chosen,
+            instant,
+            missing,
+        })
+    }
+
+    /// Chooses where the play box searches first (D-080). Only a registered
+    /// provider that can play can be chosen; the choice is kept in
+    /// `preferences.json`, and the CLI's `play` follows it as the desktop's
+    /// play box does.
+    ///
+    /// # Errors
+    /// If no such provider is registered, it cannot play, or the choice
+    /// cannot be written.
+    pub fn set_play_from(
+        &self,
+        registry: &ProviderRegistry,
+        id: &ProviderId,
+    ) -> Result<PlayFromReport> {
+        let rec = Recorder::start(
+            format!("provider use {id}"),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = (|| {
+            let Some(provider) = registry.get(id) else {
+                let known: Vec<String> = registry
+                    .list()
+                    .into_iter()
+                    .map(|info| info.id.to_string())
+                    .collect();
+                return Err(Error::new(
+                    Stage::ProviderCall,
+                    ErrorKind::NotFound {
+                        what: format!(
+                            "provider {:?} (registered: {})",
+                            id.as_str(),
+                            known.join(", ")
+                        ),
+                    },
+                ));
+            };
+            let info = provider.info();
+            if !info
+                .capabilities
+                .contains(crate::provider::Capabilities::STREAM)
+            {
+                return Err(Error::new(
+                    Stage::ProviderCall,
+                    ErrorKind::Unsupported {
+                        provider: info.id.to_string(),
+                        what: "playing — so it cannot be the one played from".to_owned(),
+                        capabilities: info.capabilities.describe(),
+                    },
+                ));
+            }
+            let path = self.config.preferences_path();
+            let mut preferences = crate::preferences::load(&path)?;
+            preferences.play_from = Some(id.clone());
+            crate::preferences::save(&path, &preferences)?;
+            self.play_from(registry)
+        })();
+        self.finish(rec, result, |play_from, diag| PlayFromReport {
+            play_from,
             diag,
         })
     }
@@ -1178,11 +1305,18 @@ impl Session {
 
     /// Turns a search into a playable queue.
     ///
+    /// The provider chosen to play from is asked first (D-080); the others
+    /// only when it finds nothing, one after another in the registry's order
+    /// — local files, servers, plugins. A provider whose catalog was scanned
+    /// answers from the catalog (FTS, without touching the disk or the
+    /// network); one never scanned is asked by its own search.
+    ///
     /// If `all` is false only the first match is taken. An empty result is an
     /// **error**: better than "played it, but no sound".
     ///
     /// # Errors
-    /// If there is no provider, the search fails, or nothing matches.
+    /// If there is no provider, the chosen one's search fails, or nothing
+    /// matches anywhere.
     pub async fn queue_from_search(
         &self,
         registry: &ProviderRegistry,
@@ -1190,45 +1324,42 @@ impl Session {
         all: bool,
         limit: usize,
     ) -> Result<Vec<QueueItem>> {
-        // The **persistent catalog** first: the scan happens once, and the search
-        // is answered by FTS without touching the disk. Asking the provider is
-        // needed only if the catalog is empty (not scanned yet, or a remote
-        // provider).
-        let mut items: Vec<QueueItem> = self
-            .library
-            .search_catalog(query, limit)?
-            .into_iter()
-            .filter(|hit| {
-                // Skip a provider that is still in the catalog but can no longer play.
-                registry.get(&hit.id.provider).is_some_and(|provider| {
-                    provider
-                        .info()
-                        .capabilities
-                        .contains(crate::provider::Capabilities::STREAM)
-                })
-            })
-            .map(|hit| QueueItem {
-                id: hit.id,
-                track: hit.track,
-            })
-            .collect();
+        let play_from = self.play_from(registry)?;
+        let order = search_order(registry, play_from.provider.as_ref());
+        let Some((first, others)) = order.split_first() else {
+            return Err(Error::new(
+                Stage::PlaybackResolve,
+                ErrorKind::NotFound {
+                    what: "provider that can stream audio".to_owned(),
+                },
+            ));
+        };
+        let catalog = self.library.search_catalog(query, limit)?;
 
+        // The chosen one's failure is the answer (K9): "could not reach it" is
+        // not a reason to play something else instead.
+        let mut items = self.hits_from(first, query, limit, &catalog).await?;
         if items.is_empty() {
-            let streamers = registry.with_capability(crate::provider::Capabilities::STREAM);
-            if streamers.is_empty() {
-                return Err(Error::new(
-                    Stage::PlaybackResolve,
-                    ErrorKind::NotFound {
-                        what: "provider that can stream audio".to_owned(),
-                    },
-                ));
+            // One that fails among the others does not hide what the rest
+            // found; when none found anything, its failure is the answer.
+            let mut failure = None;
+            for provider in others {
+                match self.hits_from(provider, query, limit, &catalog).await {
+                    Ok(hits) => items.extend(hits),
+                    Err(err) => {
+                        tracing::warn!(
+                            provider = %provider.info().id,
+                            error = %err.chain_text().replace('\n', " "),
+                            "a provider asked after the chosen one could not be searched"
+                        );
+                        failure.get_or_insert(err);
+                    }
+                }
             }
-            for provider in streamers {
-                let hits = provider.search(query, limit).await?;
-                items.extend(hits.into_iter().map(|hit| QueueItem {
-                    id: hit.id,
-                    track: hit.track,
-                }));
+            if items.is_empty()
+                && let Some(err) = failure
+            {
+                return Err(err);
             }
         }
 
@@ -1246,6 +1377,114 @@ impl Session {
             items.truncate(1);
         }
         Ok(items)
+    }
+
+    /// One provider's answer: its rows in the scanned catalog, at once — or,
+    /// for one never scanned, its own search.
+    async fn hits_from(
+        &self,
+        provider: &Arc<dyn crate::provider::Provider>,
+        query: &str,
+        limit: usize,
+        catalog: &[CatalogTrack],
+    ) -> Result<Vec<QueueItem>> {
+        if let Some(rows) = self.scanned_rows(provider, catalog)? {
+            return Ok(rows);
+        }
+        Ok(provider
+            .search(query, limit)
+            .await?
+            .into_iter()
+            .map(|hit| QueueItem {
+                id: hit.id,
+                track: hit.track,
+            })
+            .collect())
+    }
+
+    /// A scanned provider's rows among the catalog's matches; `None` for one
+    /// never scanned — its own search is the answer then.
+    fn scanned_rows(
+        &self,
+        provider: &Arc<dyn crate::provider::Provider>,
+        catalog: &[CatalogTrack],
+    ) -> Result<Option<Vec<QueueItem>>> {
+        let id = provider.info().id;
+        if self.library.last_scanned_at_ms(&id)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(
+            catalog
+                .iter()
+                .filter(|hit| hit.id.provider == id)
+                .map(|hit| QueueItem {
+                    id: hit.id.clone(),
+                    track: hit.track.clone(),
+                })
+                .collect(),
+        ))
+    }
+
+    /// What the play box offers while it is typed in (D-080): the chosen
+    /// provider's matches, ranked as `crate::suggest` says; when it has none,
+    /// every other provider's, each a section of its own.
+    ///
+    /// Not a recorded run — it is asked at every pause in typing, and the
+    /// last run `headshell diag` shows must stay the user's last command. A
+    /// provider that could not be asked is in `failures`, with its stage and
+    /// chain (K9); the others are still asked.
+    ///
+    /// # Errors
+    /// If `preferences.json` or the catalog cannot be read.
+    pub async fn suggest(
+        &self,
+        registry: &ProviderRegistry,
+        query: &str,
+    ) -> Result<crate::suggest::SuggestReport> {
+        Ok(self.suggest_plan(registry, query)?.finish().await)
+    }
+
+    /// The first half of [`Session::suggest`]: who is asked, in order, with
+    /// the catalog's answers read. The rest — a server's, a plugin's search —
+    /// is [`crate::suggest::SuggestPlan::finish`], which needs no session: the
+    /// desktop asks those off the thread that plays.
+    ///
+    /// # Errors
+    /// If `preferences.json` or the catalog cannot be read.
+    pub fn suggest_plan(
+        &self,
+        registry: &ProviderRegistry,
+        query: &str,
+    ) -> Result<crate::suggest::SuggestPlan> {
+        let play_from = self.play_from(registry)?;
+        let mut steps = Vec::new();
+        if !query.trim().is_empty() {
+            let catalog = self.library.search_catalog(query, SUGGEST_CATALOG_ROWS)?;
+            for provider in search_order(registry, play_from.provider.as_ref()) {
+                let catalog = self.scanned_rows(&provider, &catalog)?;
+                steps.push(crate::suggest::SuggestStep { provider, catalog });
+            }
+        }
+        Ok(crate::suggest::SuggestPlan {
+            query: query.to_owned(),
+            play_from,
+            steps,
+        })
+    }
+
+    /// A player for exactly these tracks — what a picked suggestion plays,
+    /// with no search in between (D-080).
+    ///
+    /// # Errors
+    /// If there is no track, or the first one cannot be played.
+    pub async fn player_from_items(
+        &self,
+        registry: &ProviderRegistry,
+        items: Vec<QueueItem>,
+    ) -> Result<crate::playback::Player> {
+        let mut player = crate::playback::Player::new(registry.clone());
+        player.play_items(items).await?;
+        Ok(player)
     }
 
     /// Searches, queues, plays and writes the listen records.
@@ -2599,9 +2838,404 @@ fn lookup_mode_of(raw: Option<&str>) -> Result<LookupMode> {
     }
 }
 
+/// How many catalog rows a suggestion ranks: enough for the lists
+/// `crate::suggest` offers after duplicates are folded.
+const SUGGEST_CATALOG_ROWS: usize = 60;
+
+/// Is `id` registered, and can it play?
+fn can_play(registry: &ProviderRegistry, id: &ProviderId) -> bool {
+    registry.get(id).is_some_and(|provider| {
+        provider
+            .info()
+            .capabilities
+            .contains(crate::provider::Capabilities::STREAM)
+    })
+}
+
+/// Who is asked for a text, in order (D-080): `first` — the provider chosen
+/// to play from — then every other one that can play, in the registry's
+/// order (local files, servers, plugins).
+fn search_order(
+    registry: &ProviderRegistry,
+    first: Option<&ProviderId>,
+) -> Vec<Arc<dyn crate::provider::Provider>> {
+    let mut order = registry.with_capability(crate::provider::Capabilities::STREAM);
+    if let Some(first) = first
+        && let Some(at) = order
+            .iter()
+            .position(|provider| &provider.info().id == first)
+    {
+        let chosen = order.remove(at);
+        order.insert(0, chosen);
+    }
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{
+        AudioSource, Capabilities, Provider, ProviderFuture, ProviderHealth, ProviderTrack,
+    };
+    use crate::test_support::TempDir;
+
+    /// A provider with a fixed list, answering its own search — the way a
+    /// server or a plugin does, never scanned. It notes what it was asked.
+    struct Listed {
+        id: &'static str,
+        capabilities: Capabilities,
+        tracks: Vec<(&'static str, &'static str)>,
+        fails: bool,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Listed {
+        fn new(id: &'static str, tracks: Vec<(&'static str, &'static str)>) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                capabilities: Capabilities::SEARCH | Capabilities::STREAM,
+                tracks,
+                fails: false,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn failing(id: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                capabilities: Capabilities::SEARCH | Capabilities::STREAM,
+                tracks: Vec::new(),
+                fails: true,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl Provider for Listed {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: ProviderId::new(self.id),
+                display_name: format!("{} server", self.id),
+                capabilities: self.capabilities,
+            }
+        }
+        fn health<'a>(&'a self) -> ProviderFuture<'a, ProviderHealth> {
+            Box::pin(async move {
+                Ok(ProviderHealth {
+                    id: ProviderId::new(self.id),
+                    reachable: true,
+                    track_count: None,
+                    detail: None,
+                })
+            })
+        }
+        fn search<'a>(
+            &'a self,
+            query: &'a str,
+            _limit: usize,
+        ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push(query.to_owned());
+                if self.fails {
+                    return Err(Error::new(
+                        Stage::NetworkRequest,
+                        ErrorKind::Network {
+                            url: format!("https://{}.example", self.id),
+                            detail: "connection refused".to_owned(),
+                        },
+                    ));
+                }
+                let wanted = query.to_lowercase();
+                Ok(self
+                    .tracks
+                    .iter()
+                    .filter(|(artist, title)| {
+                        format!("{artist} {title}").to_lowercase().contains(&wanted)
+                    })
+                    .map(|(artist, title)| ProviderTrack {
+                        id: ProviderTrackId::new(ProviderId::new(self.id), *title),
+                        track: TrackRef::new(*artist, *title),
+                    })
+                    .collect())
+            })
+        }
+        fn resolve_source<'a>(
+            &'a self,
+            _id: &'a ProviderTrackId,
+        ) -> ProviderFuture<'a, Option<AudioSource>> {
+            Box::pin(async move { Ok(None) })
+        }
+    }
+
+    /// A session whose catalog holds `local`'s scanned tracks, and a
+    /// registry of `local` (answering from that catalog) and `others`.
+    fn session_with(
+        dir: &TempDir,
+        local: &[(&str, &str)],
+        others: &[Arc<Listed>],
+    ) -> (Session, ProviderRegistry) {
+        let mut session = Session::open(Config::with_data_dir(dir.path())).unwrap();
+        let rows: Vec<CatalogTrack> = local
+            .iter()
+            .map(|(artist, title)| CatalogTrack {
+                id: ProviderTrackId::new(ProviderId::new("local"), format!("/music/{title}.flac")),
+                track: TrackRef::new(*artist, *title),
+                from_tags: true,
+                mtime_ms: Some(1),
+            })
+            .collect();
+        session
+            .library
+            .replace_catalog(&ProviderId::new("local"), &rows)
+            .unwrap();
+        let mut registry = ProviderRegistry::new();
+        registry.register(Listed::new("local", Vec::new()));
+        for other in others {
+            registry.register(Arc::clone(other) as Arc<dyn Provider>);
+        }
+        (session, registry)
+    }
+
+    fn titles(items: &[QueueItem]) -> Vec<&str> {
+        items.iter().map(|item| item.track.title.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn with_nothing_chosen_the_catalog_answers_and_the_others_only_when_it_has_nothing() {
+        let dir = TempDir::new("play-from-default");
+        let server = Listed::new("srv", vec![("Radiohead", "Reckoner")]);
+        let (session, registry) = session_with(
+            &dir,
+            &[("Tame Impala", "Let It Happen")],
+            &[Arc::clone(&server)],
+        );
+
+        let from = session.play_from(&registry).unwrap();
+        assert_eq!(from.provider, Some(ProviderId::new("local")));
+        assert!(
+            !from.chosen && from.instant && from.missing.is_none(),
+            "{from:?}"
+        );
+
+        let items = session
+            .queue_from_search(&registry, "let it", true, 100)
+            .await
+            .unwrap();
+        assert_eq!(titles(&items), ["Let It Happen"]);
+        assert!(
+            server.asked().is_empty(),
+            "the server was asked although local files had it"
+        );
+
+        let items = session
+            .queue_from_search(&registry, "reckoner", true, 100)
+            .await
+            .unwrap();
+        assert_eq!(titles(&items), ["Reckoner"]);
+        assert_eq!(server.asked(), ["reckoner"]);
+    }
+
+    #[tokio::test]
+    async fn the_chosen_provider_is_asked_first_and_its_answer_wins() {
+        let dir = TempDir::new("play-from-chosen");
+        let server = Listed::new("srv", vec![("Tame Impala", "Let It Happen (Live)")]);
+        let (session, registry) = session_with(
+            &dir,
+            &[("Tame Impala", "Let It Happen")],
+            &[Arc::clone(&server)],
+        );
+
+        let report = session
+            .set_play_from(&registry, &ProviderId::new("srv"))
+            .unwrap();
+        let from = report.play_from;
+        assert_eq!(from.provider, Some(ProviderId::new("srv")));
+        assert!(
+            from.chosen && !from.instant,
+            "a server is asked over its connection: {from:?}"
+        );
+
+        let items = session
+            .queue_from_search(&registry, "let it", true, 100)
+            .await
+            .unwrap();
+        assert_eq!(titles(&items), ["Let It Happen (Live)"]);
+        // The choice outlives the session: it is in the data directory.
+        let again = Session::open(Config::with_data_dir(dir.path())).unwrap();
+        assert_eq!(
+            again.play_from(&registry).unwrap().provider,
+            Some(ProviderId::new("srv"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_choice_that_cannot_be_kept_is_named_not_dropped() {
+        let dir = TempDir::new("play-from-missing");
+        let (session, registry) = session_with(&dir, &[("Tame Impala", "Let It Happen")], &[]);
+        crate::preferences::save(
+            &session.config.preferences_path(),
+            &crate::preferences::Preferences {
+                play_from: Some(ProviderId::new("ytmusic")),
+            },
+        )
+        .unwrap();
+
+        let from = session.play_from(&registry).unwrap();
+        assert_eq!(from.provider, Some(ProviderId::new("local")));
+        assert!(!from.chosen);
+        assert_eq!(from.missing, Some(ProviderId::new("ytmusic")));
+        // Searching still works, from local files.
+        let items = session
+            .queue_from_search(&registry, "let it", false, 100)
+            .await
+            .unwrap();
+        assert_eq!(titles(&items), ["Let It Happen"]);
+    }
+
+    #[test]
+    fn only_a_registered_provider_that_can_play_can_be_chosen() {
+        let dir = TempDir::new("play-from-refused");
+        let mute = Arc::new(Listed {
+            id: "mute",
+            capabilities: Capabilities::SEARCH,
+            tracks: Vec::new(),
+            fails: false,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let (session, registry) = session_with(&dir, &[], &[mute]);
+
+        let err = session
+            .set_play_from(&registry, &ProviderId::new("nope"))
+            .unwrap_err();
+        let text = err.chain_text();
+        assert!(
+            text.contains("\"nope\"") && text.contains("local") && text.contains("mute"),
+            "{text}"
+        );
+
+        let err = session
+            .set_play_from(&registry, &ProviderId::new("mute"))
+            .unwrap_err();
+        assert!(
+            err.chain_text().contains("cannot do this"),
+            "{}",
+            err.chain_text()
+        );
+        // Nothing was written by either refusal.
+        assert!(!session.config.preferences_path().exists());
+    }
+
+    #[tokio::test]
+    async fn the_chosen_ones_failure_is_the_answer_not_a_reason_to_play_something_else() {
+        let dir = TempDir::new("play-from-failing");
+        let down = Listed::failing("down");
+        let (session, registry) = session_with(
+            &dir,
+            &[("Tame Impala", "Let It Happen")],
+            &[Arc::clone(&down)],
+        );
+        session
+            .set_play_from(&registry, &ProviderId::new("down"))
+            .unwrap();
+
+        let err = session
+            .queue_from_search(&registry, "let it", false, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::NetworkRequest);
+        assert!(
+            err.chain_text().contains("connection refused"),
+            "{}",
+            err.chain_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn after_the_chosen_one_a_failure_does_not_hide_what_the_others_found() {
+        let dir = TempDir::new("play-from-fallback");
+        let down = Listed::failing("down");
+        let server = Listed::new("srv", vec![("Radiohead", "Reckoner")]);
+        let (session, registry) = session_with(
+            &dir,
+            &[("Tame Impala", "Let It Happen")],
+            &[Arc::clone(&down), Arc::clone(&server)],
+        );
+
+        let items = session
+            .queue_from_search(&registry, "reckoner", false, 100)
+            .await
+            .unwrap();
+        assert_eq!(titles(&items), ["Reckoner"]);
+        assert_eq!(down.asked(), ["reckoner"]);
+
+        // Found nowhere: the failure is the answer, not "not found" (K9).
+        let err = session
+            .queue_from_search(&registry, "nowhere", false, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::NetworkRequest);
+    }
+
+    #[tokio::test]
+    async fn suggestions_come_from_the_chosen_provider_alone_when_it_has_something() {
+        let dir = TempDir::new("suggest-chosen");
+        let server = Listed::new("srv", vec![("Tame Impala", "Let It Happen (Live)")]);
+        let (session, registry) = session_with(
+            &dir,
+            &[
+                ("Tame Impala", "Let It Happen"),
+                ("Ray LaMontagne", "Let It Be Me"),
+            ],
+            &[Arc::clone(&server)],
+        );
+
+        let report = session.suggest(&registry, "let it").await.unwrap();
+        assert_eq!(report.sections.len(), 1, "{report:?}");
+        let section = &report.sections[0];
+        assert_eq!(section.provider, ProviderId::new("local"));
+        assert!(!section.fallback);
+        assert_eq!(titles(&section.tracks), ["Let It Happen", "Let It Be Me"]);
+        assert_eq!(section.artists[0].artist, "Tame Impala");
+        assert!(
+            server.asked().is_empty(),
+            "nobody else is asked when the chosen one answers"
+        );
+
+        // Nothing typed: nobody is asked at all.
+        let report = session.suggest(&registry, "   ").await.unwrap();
+        assert!(report.sections.is_empty() && report.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn when_the_chosen_has_nothing_every_other_answer_is_a_named_section() {
+        let dir = TempDir::new("suggest-fallback");
+        let down = Listed::failing("down");
+        let server = Listed::new("srv", vec![("Radiohead", "Reckoner")]);
+        let (session, registry) = session_with(
+            &dir,
+            &[("Tame Impala", "Let It Happen")],
+            &[Arc::clone(&down), Arc::clone(&server)],
+        );
+
+        let report = session.suggest(&registry, "reck").await.unwrap();
+        assert_eq!(report.sections.len(), 1, "{report:?}");
+        let section = &report.sections[0];
+        assert_eq!(section.provider, ProviderId::new("srv"));
+        assert_eq!(section.display_name, "srv server");
+        assert!(
+            section.fallback,
+            "it was asked because the chosen one had nothing"
+        );
+        assert_eq!(titles(&section.tracks), ["Reckoner"]);
+        // The provider that could not be asked is said, with its stage.
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].provider, ProviderId::new("down"));
+        assert_eq!(report.failures[0].stage, "NETWORK_REQUEST");
+    }
 
     #[test]
     fn the_online_variable_takes_one_or_zero_and_says_what_else_it_got() {

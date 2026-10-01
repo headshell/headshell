@@ -195,14 +195,23 @@
             <input
               id="playQuery"
               type="search"
+              role="combobox"
               placeholder="play: artist or track"
               aria-label="track or artist to play"
+              aria-autocomplete="list"
+              aria-expanded="false"
+              aria-controls="suggest"
               autocomplete="off"
               spellcheck="false"
             />
           </label>
           <button type="submit" class="primary">play</button>
           <button id="btnPlayAll" type="button" title="queue every matching track (Shift+Enter)">queue all</button>
+          <!-- What the play box offers while it is typed in (D-080): the
+               chosen provider's tracks whose title begins with the text, then
+               the artists, then the rest; when it has nothing, the others'
+               answers under their names. Filled by `app.js`. -->
+          <div id="suggest" class="suggest" role="listbox" aria-label="suggestions" hidden></div>
         </form>
         <span id="busy" class="busy" role="status" hidden></span>
         <button id="btnHelp" class="icon-button" type="button" title="keyboard shortcuts (?)" aria-label="keyboard shortcuts">
@@ -394,6 +403,20 @@
               <button id="btnScan" type="button">scan</button>
             </div>
           </header>
+
+          <!-- Where the play box searches first (D-080); the others are asked
+               only when it finds nothing. -->
+          <div class="card play-from">
+            <h2 class="section-title">play from</h2>
+            <p class="hint">
+              The play box and its suggestions search here first; the others are asked only when
+              nothing is found here, and their results are named.
+            </p>
+            <div id="playFromList" class="play-from-list" role="radiogroup" aria-label="play from">
+              <span id="playFromPill" class="play-from-pill" aria-hidden="true" hidden></span>
+            </div>
+            <p id="playFromMissing" class="warn-note" hidden></p>
+          </div>
 
           <div class="card">
             <h2 class="section-title">local directories</h2>
@@ -857,6 +880,7 @@
           <li><span><kbd>/</kbd></span> go to the play box</li>
           <li><span><kbd>L</kbd></span> the lyrics — and again, back to up next</li>
           <li><span><kbd>Enter</kbd></span> play the first match</li>
+          <li><span><kbd>↓</kbd> <kbd>↑</kbd></span> in the play box: through the suggestions — <kbd>Enter</kbd> plays the lit one</li>
           <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> queue every matching track</li>
           <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></span> sections, in the sidebar's order</li>
           <li><span><kbd>Shift</kbd>+<kbd>F10</kbd></span> what the focused item offers — the right click's menu</li>

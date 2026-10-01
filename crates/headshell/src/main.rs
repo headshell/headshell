@@ -183,6 +183,7 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::resolve,
             // Providers
             commands::providers,
+            commands::provider_use,
             commands::provider_test,
             commands::provider_scan,
             commands::servers_list,
@@ -190,6 +191,11 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::server_remove,
             // Playback
             commands::play,
+            // Suggestions, exact tracks and adding to the queue (D-080)
+            commands::suggest,
+            commands::play_items,
+            commands::queue_add,
+            commands::queue_add_search,
             commands::toggle_pause,
             commands::stop,
             commands::next,

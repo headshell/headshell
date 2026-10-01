@@ -2282,7 +2282,8 @@ thing under the pointer.
 **Not done:** queue editing — "play next", "add to the queue", "remove from
 the queue" — needs the core (the queue has no insert or remove, and the
 read-ahead would follow them): the user's choice, its own step. An album in
-its order: the core keeps no track numbers.
+its order: the core keeps no track numbers. ("Add to the queue" landed in
+§3.14.)
 
 **Testing:** `tests/menu_js.rs` — the placement (no opening point puts a menu
 outside the window; from the keyboard it does not cover its element), the
@@ -2293,6 +2294,41 @@ release rule, the type-ahead, the separators; `ui_contract.rs` reads
 menu opened, picked from with the pointer, by press–drag–release and from the
 keyboard; the clipboard read back with `xclip`; a click outside swallowed; a
 notice held while its menu was open.
+
+### 3.14 Play from a chosen provider, suggestions, a song's menu — DONE (D-080)
+
+**The problem:** only local files are in the catalog; servers and plugins
+were asked only when it found nothing, so with local music there was no way to
+play from YouTube Music. The play box offered nothing while typed in, and a
+song could not be added to the queue.
+
+**Done:**
+
+1. **Play from a chosen provider** (`provider use`, the providers section's
+   "play from" card): it is searched first — its scanned catalog, or its own
+   search — and the others only when it finds nothing, their results named.
+   The choice is kept in `preferences.json`; one that cannot be kept is said.
+2. **Suggestions while typing** (`suggest`): the tracks whose title begins
+   with the text, the artists, the other matches; the chosen provider's, or
+   every other one's under its name. The catalog at once, a server or a
+   plugin after a pause — asked off the thread that plays.
+3. **Every song's menu:** play now, add to queue, find the artist / album,
+   copy, resolve — and "soon" placeholders: play next, add to a playlist…,
+   start a radio, like. "Add to queue" is `Player::enqueue`.
+4. **The CLI:** `headshell suggest`, `provider use`; the TUI's search line
+   (`/`, Enter plays, Tab adds).
+
+**Not done:** play next (the gapless handover must be taken back first);
+playlists, radios, likes; covers in the suggestions.
+
+**Testing:** the ranking; the order and the fallback with fake providers;
+`enqueue`; the TUI's keys and rows; `suggest` and `provider use` through the
+CLI (a snapshot).
+
+**Verification:** the §3.9 container with the echo plugin: suggestions from
+the catalog and from the plugin as a fallback, picked with the pointer and
+the keyboard; adding to an empty and a full queue; choosing the plugin to
+play from.
 
 ---
 

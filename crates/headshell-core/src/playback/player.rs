@@ -291,6 +291,32 @@ impl Player {
         self.start_current().await
     }
 
+    /// Adds tracks at the end of the queue (D-080) — with shuffle on too, the
+    /// play order gets them last. Into an empty queue they start playing:
+    /// there is nothing for them to come after.
+    ///
+    /// The read-ahead sees them at the next tick; its plan is rebuilt from
+    /// the queue every round (D-077).
+    ///
+    /// # Errors
+    /// If there is no track, or the queue was empty and the first one cannot
+    /// be played.
+    pub async fn enqueue(&mut self, items: Vec<QueueItem>) -> Result<()> {
+        if items.is_empty() {
+            return Err(Error::new(
+                Stage::PlaybackResolve,
+                ErrorKind::InvalidInput {
+                    detail: "there is no track to add to the queue".to_owned(),
+                },
+            ));
+        }
+        if self.queue.is_empty() {
+            return self.play_items(items).await;
+        }
+        self.queue.append(items);
+        Ok(())
+    }
+
     /// Plays the current track in the queue.
     ///
     /// # Errors
@@ -856,6 +882,55 @@ mod tests {
         let mut player = Player::new(ProviderRegistry::new());
         let err = player.play_items(vec![]).await.expect_err("an empty list");
         assert!(err.chain_text().contains("there is no track to play"));
+    }
+
+    #[tokio::test]
+    async fn an_added_track_comes_last_in_the_play_order_shuffled_or_not() {
+        let mut player = Player::new(ProviderRegistry::new());
+        player.queue_mut().replace(vec![
+            item("local", "a"),
+            item("local", "b"),
+            item("local", "c"),
+        ]);
+        player.enqueue(vec![item("local", "added")]).await.unwrap();
+        let order: Vec<String> = player
+            .queue()
+            .items()
+            .into_iter()
+            .map(|i| i.id.id)
+            .collect();
+        assert_eq!(order, ["a", "b", "c", "added"]);
+
+        // Shuffled, the list keeps its own order, and the play order — what
+        // "next" follows — still gets the new track last.
+        player.queue_mut().set_shuffle(true);
+        player.enqueue(vec![item("local", "later")]).await.unwrap();
+        let order = player.queue().items();
+        assert_eq!(order.len(), 5);
+        assert_eq!(order.last().map(|i| i.id.id.as_str()), Some("later"));
+    }
+
+    #[tokio::test]
+    async fn adding_to_an_empty_queue_plays_and_adding_nothing_is_said() {
+        // Nothing to come after: it is played — here, by a provider that is not
+        // registered, so the attempt shows as that provider's error rather than
+        // a silent queue nobody hears.
+        let mut player = Player::new(ProviderRegistry::new());
+        let err = player
+            .enqueue(vec![item("missing", "1")])
+            .await
+            .expect_err("an empty queue starts playing what is added");
+        assert!(err.chain_text().contains("missing"), "{}", err.chain_text());
+
+        let err = player
+            .enqueue(Vec::new())
+            .await
+            .expect_err("nothing to add");
+        assert!(
+            err.chain_text().contains("no track to add"),
+            "{}",
+            err.chain_text()
+        );
     }
 
     #[test]

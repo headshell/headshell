@@ -27,10 +27,10 @@ use headshell_core::diag::Stage;
 use headshell_core::ids::ProviderId;
 use headshell_core::lyrics::{LyricsItem, LyricsKey, LyricsReport};
 use headshell_core::model::PlayRule;
-use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueView, RepeatMode};
+use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueItem, QueueView, RepeatMode};
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::session::{
-    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, PlayOptions,
+    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, PlayFromReport, PlayOptions,
     PluginCatalogReport, PluginConsentReport, PluginInstallReport, PluginListReport,
     PluginRemoveReport, PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport,
     ScanReport, SearchReport, SecretListReport, SecretWriteReport, ServerAddReport,
@@ -38,6 +38,7 @@ use headshell_core::session::{
 };
 use headshell_core::sleeve::CardPreset;
 use headshell_core::stats::StatsQuery;
+use headshell_core::suggest::SuggestReport;
 
 use crate::state::{AppState, CommandError, CommandResult};
 use crate::theme::{ActiveTheme, ThemeList};
@@ -225,6 +226,24 @@ pub async fn providers(state: State<'_, AppState>) -> CommandResult<ProviderList
         .await
 }
 
+/// Chooses where the play box searches first (D-080) — `headshell provider
+/// use`. The answer is where it searches now.
+#[tauri::command]
+pub async fn provider_use(
+    state: State<'_, AppState>,
+    name: String,
+) -> CommandResult<PlayFromReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live
+                    .session()
+                    .set_play_from(&core.registry, &ProviderId::new(name))
+            })
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn provider_test(
     app: AppHandle,
@@ -376,6 +395,88 @@ pub async fn play(
                 let player = busy(&app, "searching for the track", task).await?;
                 // The old player's accumulated listens are **taken**, not thrown away.
                 core.live.replace_player(player);
+                Ok(core.live.player().queue().view())
+            })
+        })
+        .await
+}
+
+/// What the play box offers while it is typed in (D-080) — `headshell
+/// suggest`.
+///
+/// The catalog is read on the core thread, at once. A server or a plugin is
+/// asked **off** it (`SuggestPlan::finish` needs no session): typing must not
+/// hold the player's rounds and controls the way a search for a track to
+/// play does. No busy notice either — this is not a job the user waits on.
+#[tauri::command]
+pub async fn suggest(state: State<'_, AppState>, query: String) -> CommandResult<SuggestReport> {
+    let plan = state
+        .run_on_core(move |core| {
+            Box::pin(async move { core.live.session().suggest_plan(&core.registry, &query) })
+        })
+        .await?;
+    Ok(plan.finish().await)
+}
+
+/// Plays exactly these tracks — a picked suggestion, a song's "play now"
+/// (D-080). No search in between. The TUI's search line does the same with
+/// Enter.
+#[tauri::command]
+pub async fn play_items(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    items: Vec<QueueItem>,
+) -> CommandResult<QueueView> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let task = core.live.session().player_from_items(&core.registry, items);
+                let player = busy(&app, "starting the track", task).await?;
+                // The old player's accumulated listens are **taken**, not thrown away.
+                core.live.replace_player(player);
+                Ok(core.live.player().queue().view())
+            })
+        })
+        .await
+}
+
+/// Adds tracks at the end of the queue (D-080); into an empty queue they
+/// play. The TUI's search line does the same with Tab.
+#[tauri::command]
+pub async fn queue_add(
+    state: State<'_, AppState>,
+    items: Vec<QueueItem>,
+) -> CommandResult<QueueView> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().enqueue(items).await?;
+                Ok(core.live.player().queue().view())
+            })
+        })
+        .await
+}
+
+/// Adds what a text finds to the queue — a history row has a name, not a
+/// provider's track: the search the play box does finds it (D-080). `all`
+/// adds every match (an artist's tracks), otherwise the first.
+#[tauri::command]
+pub async fn queue_add_search(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: String,
+    all: bool,
+) -> CommandResult<QueueView> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let limit = PlayOptions::new(String::new()).limit;
+                let task =
+                    core.live
+                        .session()
+                        .queue_from_search(&core.registry, &query, all, limit);
+                let items = busy(&app, "searching for the track", task).await?;
+                core.live.player_mut().enqueue(items).await?;
                 Ok(core.live.player().queue().view())
             })
         })

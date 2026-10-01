@@ -99,6 +99,13 @@ impl Config {
         self.data_dir.join("servers.json")
     }
 
+    /// The user's choices that are not library data (D-080): today, the
+    /// provider the play box searches first. Deleting it only forgets them.
+    #[must_use]
+    pub fn preferences_path(&self) -> PathBuf {
+        self.data_dir.join("preferences.json")
+    }
+
     /// The namespaced secret store (D-042). Written as `0600` on Unix.
     ///
     /// Separate from `servers.json`, and deliberately so: what lives there is a

@@ -455,6 +455,9 @@ window.addEventListener("resize", () => {
   sleeveFormat.placeThumb(true);
   pluginTabs.placeThumb(true);
   nowTabs.placeThumb(true);
+  placePlayFromPill(true);
+  // The field changed width; the panel under it follows.
+  if (suggestUp) openSuggest();
 });
 
 // ————————————————————————————————————— segmented control
@@ -564,14 +567,7 @@ function queueRow(item, index, current) {
     {
       class: current ? "current" : null,
       "aria-current": current ? "true" : null,
-      menu: () => ({
-        title: trackTitle(track),
-        items: [
-          current ? pauseItem() : { label: "play this track", run: () => jumpTo(index) },
-          "-",
-          ...trackItems(track),
-        ],
-      }),
+      menu: () => songMenu(track, { item, queueIndex: index, current }),
     },
     h(
       "button",
@@ -1526,11 +1522,42 @@ function playQuery() {
 }
 
 async function startPlay(query, all, shuffle = false) {
+  closeSuggest();
   const view = await call("play", { query, all, shuffle });
   if (!view) return;
   renderQueue(view);
   renderAnchor(await call("anchor"));
   openPanel("now");
+}
+
+/// Exactly these tracks, with no search in between (D-080): a picked
+/// suggestion, a song's "play now".
+async function playItems(items) {
+  closeSuggest();
+  const view = await call("play_items", { items });
+  if (!view) return;
+  renderQueue(view);
+  renderAnchor(await call("anchor"));
+  openPanel("now");
+}
+
+/// Adds at the end of the queue (D-080); into an empty queue it plays. The
+/// sheet does not open: adding is not leaving what the user is doing.
+async function addItems(items, what) {
+  queueAdded(await call("queue_add", { items }), what);
+}
+
+/// A history row has a name, not a provider's track: the play box's search
+/// finds it, in the core (D-080).
+async function addSearch(query, all, what) {
+  queueAdded(await call("queue_add_search", { query, all }), what);
+}
+
+async function queueAdded(view, what) {
+  if (!view) return;
+  renderQueue(view);
+  renderAnchor(await call("anchor"));
+  toast(`added to the queue: ${what}`, true);
 }
 
 $("playForm").addEventListener("submit", (event) => {
@@ -1552,6 +1579,265 @@ $("btnPlayAll").addEventListener("click", () => {
   const query = playQuery();
   if (query) startPlay(query, true);
   else $("playQuery").focus();
+});
+
+// ————————————————————————————————————— suggestions (D-080)
+//
+// What the play box offers while it is typed in. The core ranks the matches
+// and decides who is asked (`suggest`): the provider chosen to play from,
+// the others only when it has nothing. This asks at the right moment, draws
+// the answer and takes the pick.
+//
+// - A scanned catalog answers at once: it is asked 90 ms after a key, so a
+//   fast typist's keys do not each cost a question — and when the catalog
+//   has nothing and the others go over the network, they are not asked at
+//   every key either. A server or a plugin chosen to play from is asked
+//   300 ms after the last key.
+// - Only the newest question's answer is drawn; an older one arriving late
+//   is dropped.
+// - The panel grows out of the field and goes back into it. The field keeps
+//   the focus all along: the arrows light a row, Enter plays it, Esc closes.
+//   A press on the panel does not take the focus away, so a row's menu can
+//   add one song after another with the panel still up.
+
+const SUGGEST_AT_ONCE_MS = 90;
+const SUGGEST_PAUSE_MS = 300;
+const SUGGEST_SLOW_MS = 250;
+
+const playInput = $("playQuery");
+const suggestPanel = $("suggest");
+let suggestTimer = 0;
+let suggestAsked = 0;
+let suggestRows = [];
+let suggestLit = -1;
+let suggestUp = false;
+
+function scheduleSuggest() {
+  clearTimeout(suggestTimer);
+  const query = playInput.value;
+  if (!query.trim()) {
+    // An answer still on its way is for a text that is gone.
+    suggestAsked += 1;
+    closeSuggest();
+    return;
+  }
+  const wait = playFrom?.instant === false ? SUGGEST_PAUSE_MS : SUGGEST_AT_ONCE_MS;
+  suggestTimer = setTimeout(() => askSuggest(query), wait);
+}
+
+async function askSuggest(query) {
+  const asked = ++suggestAsked;
+  // "Searching" is said only when the answer takes long enough to notice.
+  const slow = setTimeout(() => {
+    if (asked === suggestAsked) showSearching();
+  }, SUGGEST_SLOW_MS);
+  const report = await call("suggest", { query });
+  clearTimeout(slow);
+  if (asked !== suggestAsked || playInput.value !== query || document.activeElement !== playInput) return;
+  if (report) drawSuggest(report);
+}
+
+function showSearching() {
+  if (suggestRows.length > 0) {
+    // What is up stays readable, dimmed: it answers the text before.
+    suggestPanel.classList.add("stale");
+    return;
+  }
+  suggestPanel.replaceChildren(
+    h("p", { class: "suggest-note searching", text: `searching ${providerName(playFrom?.provider)}…` }),
+  );
+  openSuggest();
+}
+
+function drawSuggest(report) {
+  suggestRows = [];
+  suggestLit = -1;
+  const nodes = [];
+  if (report.sections[0]?.fallback) {
+    nodes.push(h("p", { class: "suggest-note", text: `nothing in ${providerName(report.play_from.provider)}` }));
+  }
+  for (const section of report.sections) {
+    if (section.fallback) {
+      nodes.push(h("p", { class: "suggest-heading", text: `results from ${section.display_name}:` }));
+    }
+    for (const item of section.tracks) nodes.push(suggestTrack(item));
+    for (const artist of section.artists) nodes.push(suggestArtist(artist.artist));
+    for (const item of section.more) nodes.push(suggestTrack(item));
+  }
+  if (report.sections.length === 0) {
+    nodes.push(h("p", { class: "suggest-note", text: `nothing found for “${report.query.trim()}”` }));
+  }
+  // "Not found" and "could not ask" are different answers (K9).
+  for (const failure of report.failures) {
+    nodes.push(
+      h("p", {
+        class: "suggest-failure",
+        text: `could not ask ${failure.display_name} — STEP: ${failure.stage} — ${firstLine(failure.chain)}`,
+        title: failure.chain,
+      }),
+    );
+  }
+  suggestPanel.replaceChildren(...nodes);
+  suggestPanel.classList.remove("stale");
+  playInput.removeAttribute("aria-activedescendant");
+  openSuggest();
+}
+
+function suggestTrack(item) {
+  const track = item.track;
+  const row = h(
+    "div",
+    {
+      class: "suggest-row",
+      role: "option",
+      id: `suggest-row-${suggestRows.length}`,
+      "aria-selected": "false",
+      menu: () => songMenu(track, { item }),
+    },
+    h("span", { class: "suggest-art", "aria-hidden": "true" }),
+    h(
+      "span",
+      { class: "suggest-main" },
+      h("span", { class: "suggest-title", text: track.title }),
+      h("span", { class: "suggest-sub", text: [track.artist, track.album].filter(Boolean).join(" · ") }),
+    ),
+    h("span", { class: "suggest-time", text: track.duration_ms ? clock(track.duration_ms) : "" }),
+  );
+  suggestRows.push({ el: row, pick: () => playItems([item]) });
+  return row;
+}
+
+function suggestArtist(artist) {
+  const row = h(
+    "div",
+    {
+      class: "suggest-row artist",
+      role: "option",
+      id: `suggest-row-${suggestRows.length}`,
+      "aria-selected": "false",
+      menu: () => artistMenu(artist),
+    },
+    // The name's first letter stands for the artist: there is no picture.
+    h("span", { class: "suggest-art", "aria-hidden": "true", text: [...artist.trim()][0] ?? "" }),
+    h(
+      "span",
+      { class: "suggest-main" },
+      h("span", { class: "suggest-title", text: artist }),
+      h("span", { class: "suggest-sub", text: "artist · plays every track" }),
+    ),
+  );
+  suggestRows.push({ el: row, pick: () => startPlay(artist, true) });
+  return row;
+}
+
+function lightSuggest(index) {
+  const before = suggestRows[suggestLit];
+  before?.el.classList.remove("lit");
+  before?.el.setAttribute("aria-selected", "false");
+  suggestLit = index;
+  const row = suggestRows[index];
+  if (!row) {
+    playInput.removeAttribute("aria-activedescendant");
+    return;
+  }
+  row.el.classList.add("lit");
+  row.el.setAttribute("aria-selected", "true");
+  playInput.setAttribute("aria-activedescendant", row.el.id);
+  row.el.scrollIntoView({ block: "nearest" });
+}
+
+/// It grows out of the field; caught closing, it turns around from where it
+/// is seen.
+function openSuggest() {
+  suggestPanel.style.width = `${playInput.closest(".field").offsetWidth}px`;
+  playInput.setAttribute("aria-expanded", "true");
+  if (suggestUp) return;
+  suggestUp = true;
+  const fresh = suggestPanel.hidden;
+  suggestPanel.hidden = false;
+  animate(
+    suggestPanel,
+    { opacity: 1, scale: 1 },
+    fresh ? { from: { opacity: 0, scale: 0.98 }, responseScale: 0.5 } : { responseScale: 0.5 },
+  );
+}
+
+function closeSuggest() {
+  clearTimeout(suggestTimer);
+  playInput.setAttribute("aria-expanded", "false");
+  playInput.removeAttribute("aria-activedescendant");
+  if (!suggestUp) return;
+  suggestUp = false;
+  animate(
+    suggestPanel,
+    { opacity: 0, scale: 0.98 },
+    {
+      responseScale: 0.4,
+      onRest: () => {
+        suggestPanel.hidden = true;
+        suggestPanel.replaceChildren();
+        suggestRows = [];
+        suggestLit = -1;
+      },
+    },
+  );
+}
+
+function suggestRowAt(target) {
+  const el = target.closest?.(".suggest-row");
+  return suggestRows.findIndex((row) => row.el === el);
+}
+
+playInput.addEventListener("input", scheduleSuggest);
+playInput.addEventListener("focus", () => {
+  if (playInput.value.trim()) scheduleSuggest();
+});
+playInput.addEventListener("blur", () => {
+  suggestAsked += 1;
+  closeSuggest();
+});
+playInput.addEventListener("keydown", (event) => {
+  if (!suggestUp) {
+    // The arrow brings the panel back for what is typed.
+    if (event.key === "ArrowDown" && playInput.value.trim()) {
+      event.preventDefault();
+      askSuggest(playInput.value);
+    }
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    lightSuggest(Math.min(suggestLit + 1, suggestRows.length - 1));
+  } else if (event.key === "ArrowUp") {
+    // Above the first row is the field again.
+    event.preventDefault();
+    lightSuggest(Math.max(suggestLit - 1, -1));
+  } else if (event.key === "Enter" && !event.shiftKey && suggestRows[suggestLit]) {
+    event.preventDefault();
+    suggestRows[suggestLit].pick();
+  } else if (event.key === "Escape") {
+    // The panel first; the sheet behind it is the next Esc's.
+    event.preventDefault();
+    event.stopPropagation();
+    suggestAsked += 1;
+    closeSuggest();
+  }
+});
+
+// A press on the panel keeps the field's focus; a row lights on the way down
+// and plays on the way up.
+suggestPanel.addEventListener("mousedown", (event) => event.preventDefault());
+suggestPanel.addEventListener("pointerdown", (event) => {
+  const index = suggestRowAt(event.target);
+  if (index !== -1 && event.button === 0) lightSuggest(index);
+});
+suggestPanel.addEventListener("pointermove", (event) => {
+  const index = suggestRowAt(event.target);
+  if (index !== -1 && index !== suggestLit) lightSuggest(index);
+});
+suggestPanel.addEventListener("click", (event) => {
+  const index = suggestRowAt(event.target);
+  if (index !== -1) suggestRows[index].pick();
 });
 
 // ————————————————————————————————————— keyboard
@@ -1684,15 +1970,7 @@ $("searchForm").addEventListener("submit", async (event) => {
         h(
           "tr",
           {
-            menu: () => ({
-              title: trackTitle(hit),
-              items: [
-                { label: "play", run: () => startPlay(`${hit.artist} ${hit.title}`, false) },
-                { label: "play every track by the artist", run: () => startPlay(hit.artist, true) },
-                "-",
-                ...trackItems(hit),
-              ],
-            }),
+            menu: () => songMenu(hit),
           },
           h("td", { text: hit.title }),
           h("td", { text: hit.artist }),
@@ -1799,10 +2077,7 @@ function renderStats(r) {
     $("statsTracks"),
     r.top_tracks,
     (t) => [t.title, t.artist, t.plays],
-    (t) => ({
-      title: trackTitle(t),
-      items: [{ label: "play", run: () => startPlay(`${t.artist} ${t.title}`, false) }, "-", ...trackItems(t)],
-    }),
+    (t) => songMenu(t),
   );
   renderRanking(
     $("statsAlbums"),
@@ -2101,6 +2376,124 @@ const CAPABILITIES = [
 // A catalog entry's capabilities arrive as text.
 const CAPABILITY_NAMES = { search: "search", browse: "browse", stream: "play", control: "control" };
 
+// ————————————————————————————————————— play from (D-080)
+//
+// Which provider the play box and its suggestions search first; the others
+// are asked only when it finds nothing. The choice is the core's to keep
+// (`provider_use`, the CLI's `provider use`); this shows it and makes it.
+// The choice shows the moment the row is pressed — the core is told after,
+// and if it refuses, what the core says is drawn again.
+
+const STREAM = 1 << 2;
+let playFrom = null;
+const providerNames = new Map();
+
+/// The providers list's answer: the names, for the play box and the
+/// suggestions, and where it searches first.
+function takeProviders(list) {
+  providerNames.clear();
+  for (const info of list.providers) providerNames.set(info.id, info.display_name);
+  playFrom = list.play_from;
+  updatePlayPlaceholder();
+}
+
+function providerName(id) {
+  return (id && providerNames.get(id)) ?? id ?? "nowhere";
+}
+
+function updatePlayPlaceholder() {
+  playInput.placeholder = playFrom?.provider
+    ? `play from ${providerName(playFrom.provider)}: artist or track`
+    : "play: artist or track";
+}
+
+function renderPlayFrom(list) {
+  const rows = list.providers.filter((info) => (info.capabilities & STREAM) !== 0).map(playFromRow);
+  $("playFromList").replaceChildren($("playFromPill"), ...rows);
+  const missing = $("playFromMissing");
+  missing.hidden = !playFrom.missing;
+  missing.textContent = playFrom.missing
+    ? `The chosen ${playFrom.missing} is not registered or cannot play now — the play box searches ` +
+      `${providerName(playFrom.provider)} first instead.`
+    : "";
+  placePlayFromPill(true);
+}
+
+function playFromRow(info) {
+  const chosen = info.id === playFrom?.provider;
+  const row = h(
+    "button",
+    {
+      type: "button",
+      role: "radio",
+      class: "play-from-row",
+      "aria-checked": String(chosen),
+      tabindex: chosen ? "0" : "-1",
+      dataset: { provider: info.id },
+    },
+    h("span", { class: "play-from-name", text: info.display_name }),
+    h("span", { class: "play-from-id", text: info.id }),
+  );
+  // Chosen the moment the button goes down, as the sidebar's rows are;
+  // `click` is for the keyboard and touch.
+  row.addEventListener("pointerdown", (event) => {
+    if (event.button === 0 && event.pointerType !== "touch") choosePlayFrom(info.id);
+  });
+  row.addEventListener("click", () => choosePlayFrom(info.id));
+  row.addEventListener("keydown", (event) => {
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const rows = [...$("playFromList").querySelectorAll(".play-from-row")];
+    const next = rows[(rows.indexOf(row) + step + rows.length) % rows.length];
+    choosePlayFrom(next.dataset.provider);
+    next.focus();
+  });
+  return row;
+}
+
+function markPlayFrom(id) {
+  for (const row of $("playFromList").querySelectorAll(".play-from-row")) {
+    const chosen = row.dataset.provider === id;
+    row.setAttribute("aria-checked", String(chosen));
+    row.tabIndex = chosen ? 0 : -1;
+  }
+  placePlayFromPill(false);
+}
+
+/// The light under the chosen row slides to it; quick choices in a row turn
+/// it around halfway (the sidebar's pill).
+function placePlayFromPill(instant) {
+  const pill = $("playFromPill");
+  const row = [...$("playFromList").querySelectorAll(".play-from-row")].find(
+    (each) => each.getAttribute("aria-checked") === "true",
+  );
+  if (!row?.offsetHeight) {
+    pill.hidden = true;
+    return;
+  }
+  pill.style.height = `${row.offsetHeight}px`;
+  if (instant || pill.hidden) {
+    place(pill, { y: row.offsetTop });
+    pill.hidden = false;
+  } else {
+    animate(pill, { y: row.offsetTop });
+  }
+}
+
+async function choosePlayFrom(id) {
+  if (playFrom?.provider === id && playFrom.chosen) return;
+  markPlayFrom(id);
+  const report = await call("provider_use", { name: id });
+  if (!report) {
+    refreshProviders();
+    return;
+  }
+  playFrom = report.play_from;
+  updatePlayPlaceholder();
+  $("playFromMissing").hidden = true;
+}
+
 let environment = null;
 
 async function refreshProviders() {
@@ -2108,6 +2501,8 @@ async function refreshProviders() {
 
   const list = await call("providers");
   if (list) {
+    takeProviders(list);
+    renderPlayFrom(list);
     $("providerTable")
       .querySelector("tbody")
       .replaceChildren(...list.providers.map(providerRow));
@@ -2895,12 +3290,49 @@ function trackTitle(track) {
 function trackItems(track) {
   return [
     { label: "find the artist in the library", run: () => searchLibrary(track.artist) },
+    track.album && { label: "find the album in the library", run: () => searchLibrary(track.album) },
     {
       label: "copy artist and title",
       run: () => copyText(`${track.artist} — ${track.title}`, "artist and title copied to the clipboard"),
     },
     { label: "resolve its identity", run: () => resolveIdentity(track) },
   ];
+}
+
+/// Every song's menu (D-080), wherever the song is drawn: play it now, add
+/// it to the queue — exactly that track when it is a provider's (`item`: a
+/// suggestion, a queue row), found by the play box's search when it is a
+/// history row (library, statistics) — then what else it offers. A queue
+/// row's "play now" jumps to it; the playing row's pauses.
+///
+/// The rows marked "soon" have nothing behind them yet: they are shown so
+/// the menu keeps its shape when they come, and they cannot be picked.
+/// "Play next" needs the queue to take a track between the playing one and
+/// the one already handed to the engine for a gapless start (D-077).
+function songMenu(track, { item = null, queueIndex = null, current = false } = {}) {
+  const query = `${track.artist} ${track.title}`;
+  const name = trackTitle(track);
+  let playNow;
+  if (current) playNow = pauseItem();
+  else if (queueIndex !== null) playNow = { label: "play now", run: () => jumpTo(queueIndex) };
+  else if (item) playNow = { label: "play now", run: () => playItems([item]) };
+  else playNow = { label: "play now", run: () => startPlay(query, false) };
+  return {
+    title: name,
+    items: [
+      playNow,
+      item
+        ? { label: "add to queue", run: () => addItems([item], name) }
+        : { label: "add to queue", run: () => addSearch(query, false, name) },
+      { label: "play next", disabled: true, key: "soon" },
+      "-",
+      { label: "add to a playlist…", disabled: true, key: "soon" },
+      { label: "start a radio from it", disabled: true, key: "soon" },
+      { label: "like", disabled: true, key: "soon" },
+      "-",
+      ...trackItems(track),
+    ],
+  };
 }
 
 /// The space bar's row, named for what it does now.
@@ -2929,6 +3361,10 @@ function artistMenu(artist) {
     items: [
       { label: "play every track", run: () => startPlay(artist, true) },
       { label: "shuffle every track", run: () => startPlay(artist, true, true) },
+      {
+        label: "add every track to the queue",
+        run: () => addSearch(artist, true, `every track by ${artist}`),
+      },
       "-",
       { label: "find in the library", run: () => searchLibrary(artist) },
       { label: "copy the name", run: () => copyText(artist, "name copied to the clipboard") },
@@ -2943,6 +3379,10 @@ function albumMenu(album, artist) {
     title: `${album} · ${artist}`,
     items: [
       { label: "play every track on it", run: () => startPlay(`${artist} ${album}`, true) },
+      {
+        label: "add every track on it to the queue",
+        run: () => addSearch(`${artist} ${album}`, true, `every track on ${album}`),
+      },
       "-",
       { label: "find in the library", run: () => searchLibrary(album) },
       { label: "copy the name", run: () => copyText(`${artist} — ${album}`, "name copied to the clipboard") },
@@ -3307,6 +3747,13 @@ listen("headshell://busy", (event) => {
   renderQueue(await call("queue"));
   renderAnchor(await call("anchor"));
   refreshLyrics();
+
+  // Where the play box searches first, and the providers' names — for its
+  // placeholder and its suggestions (D-080). Read from disk; nothing goes
+  // online. Before the plugins: `diag`'s last run stays "plugin list", as it
+  // was before this was asked here.
+  const providers = await call("providers");
+  if (providers) takeProviders(providers);
 
   // The plugin badge in the sidebar: read from disk, nothing goes online.
   const plugins = await call("plugins");

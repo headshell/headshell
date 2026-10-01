@@ -989,6 +989,83 @@ fn without_a_terminal_the_password_prompt_points_at_the_env_var() {
     );
 }
 
+/// D-080: what the play box offers, from the CLI. The track whose title
+/// begins with the text comes first, then its artist; the provider is named.
+/// A track's id is its file's absolute path — that depends on the checkout,
+/// so it is reduced to the file name before the snapshot.
+#[test]
+fn suggest_offers_the_track_then_the_artist() {
+    let dir = temp_dir("suggest");
+    let music = audio_fixtures();
+    let (_, stderr, ok) = run_with_music(&dir, Some(&music), &["provider", "scan"]);
+    assert!(ok, "{stderr}");
+
+    let (stdout, stderr, ok) = run_with_music(&dir, Some(&music), &["suggest", "sine", "--json"]);
+    assert!(ok, "{stderr}");
+    let mut value = json(&stdout);
+    for section in value["sections"].as_array_mut().expect("sections") {
+        for list in ["tracks", "more"] {
+            for item in section[list].as_array_mut().expect("a list") {
+                let path = item["id"]["id"].as_str().expect("a track id").to_owned();
+                let name = Path::new(&path).file_name().expect("a file name");
+                item["id"]["id"] = serde_json::json!(name.to_string_lossy());
+            }
+        }
+    }
+    assert_snapshot("suggest", &value.to_string());
+
+    // The human form says the same, in the same order.
+    let (stdout, stderr, ok) = run_with_music(&dir, Some(&music), &["suggest", "sine"]);
+    assert!(ok, "{stderr}");
+    let track = stdout.find("track   Sine 440").expect(&stdout);
+    let artist = stdout.find("artist  Test Artist").expect(&stdout);
+    assert!(track < artist, "{stdout}");
+
+    // Nothing anywhere is said, not left blank.
+    let (stdout, _, ok) = run_with_music(&dir, Some(&music), &["suggest", "zzz"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("nothing found for \"zzz\" anywhere"),
+        "{stdout}"
+    );
+}
+
+/// D-080: the provider the play box searches first is a choice kept in the
+/// data directory; only a registered one can be chosen, and the list marks it.
+#[test]
+fn the_provider_to_play_from_is_chosen_kept_and_listed() {
+    let dir = temp_dir("provideruse");
+
+    let (stdout, stderr, ok) = run(&dir, &["provider", "list", "--json"]);
+    assert!(ok, "{stderr}");
+    let list = json(&stdout);
+    assert_eq!(list["play_from"]["provider"], "local");
+    assert_eq!(
+        list["play_from"]["chosen"], false,
+        "nothing chosen yet: the first that can play"
+    );
+
+    let (_, stderr, ok) = run(&dir, &["provider", "use", "ytmusic"]);
+    assert!(!ok, "an unregistered provider must not be chosen");
+    assert!(
+        stderr.contains("PROVIDER_CALL") && stderr.contains("registered: local"),
+        "{stderr}"
+    );
+
+    let (stdout, stderr, ok) = run(&dir, &["provider", "use", "local", "--json"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(json(&stdout)["play_from"]["chosen"], true);
+    assert!(dir.join("preferences.json").exists());
+
+    let (stdout, stderr, ok) = run(&dir, &["provider", "list"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("* local"),
+        "the chosen one is marked:\n{stdout}"
+    );
+    assert!(stdout.contains("play from: local (chosen)"), "{stdout}");
+}
+
 #[test]
 fn testing_an_unknown_provider_lists_the_known_ones() {
     let dir = temp_dir("providertest");

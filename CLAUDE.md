@@ -182,14 +182,15 @@ headshell lyrics "<query>" [--all] | --file <audio> [--print] [--shift MS]
 headshell prefetch "<query>" [--all]
 headshell library search <query> [--limit N] [--min-ms MS]
 headshell sleeve [--year N] [--out <file>] [--format square|story]
-headshell provider list | test <name> | scan [--if-stale]
+headshell provider list | test <name> | scan [--if-stale] | use <name>
 headshell provider add <kind> --url U --user K [--name NAME] [--api-key A] [--verify]
 headshell provider remove <name> | servers
 headshell plugin list | approve <name> | install <name> | disable <name> | enable <name> | forget <name>
 headshell plugin catalog | update [<name>] | remove <name>
 headshell plugin index <catalog-repo> [--url-template T] [--check]
 headshell secret list | set <namespace> <key> | remove <namespace> <key>
-headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]
+headshell suggest "<query>"                       # what the play box offers while typed in
+headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues
 headshell diag                                   # the last run's diagnostics report
 ```
 

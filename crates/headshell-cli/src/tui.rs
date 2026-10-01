@@ -27,11 +27,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph};
 
-use headshell_core::playback::{LiveSession, PlayState, PlaybackAnchor, Player, RepeatMode};
+use headshell_core::playback::{
+    LiveSession, PlayState, PlaybackAnchor, Player, QueueItem, RepeatMode,
+};
+use headshell_core::session::PlayOptions;
+use headshell_core::suggest::SuggestReport;
 
 /// How often the screen is refreshed. Independent of the audio pipeline: only
 /// drawing.
 const TICK: Duration = Duration::from_millis(200);
+
+/// How long the search line waits after the last key before asking a
+/// provider that goes over the network (D-080) — the desktop's pause.
+const SEARCH_PAUSE: Duration = Duration::from_millis(300);
 
 /// Tests that the terminal can really be taken **before** the TUI opens.
 ///
@@ -95,6 +103,8 @@ enum Action {
     PlaySelected,
     ToggleShuffle,
     CycleRepeat,
+    /// Opens the search line (D-080).
+    Search,
 }
 
 fn action_for(key: KeyEvent) -> Option<Action> {
@@ -112,7 +122,219 @@ fn action_for(key: KeyEvent) -> Option<Action> {
         KeyCode::Enter => Some(Action::PlaySelected),
         KeyCode::Char('s') => Some(Action::ToggleShuffle),
         KeyCode::Char('r') => Some(Action::CycleRepeat),
+        KeyCode::Char('/') => Some(Action::Search),
         _ => None,
+    }
+}
+
+// ————————————————————————————————————— the search line (D-080)
+//
+// What the TUI has of the desktop's play box: suggestions while typing, from
+// the provider chosen to play from — and when it has nothing, from the
+// others, named. A row is played at once or added to the queue. The ranking,
+// the order the providers are asked in and the queue are the core's; this is
+// keys and drawing.
+
+/// What a key does while the search line is open: letters are text there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchAction {
+    Quit,
+    Close,
+    Type(char),
+    Erase,
+    Up,
+    Down,
+    /// Play the chosen row at once.
+    Play,
+    /// Add the chosen row to the queue; the search line stays open.
+    Add,
+}
+
+fn search_key(key: KeyEvent) -> Option<SearchAction> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return (key.code == KeyCode::Char('c')).then_some(SearchAction::Quit);
+    }
+    match key.code {
+        KeyCode::Esc => Some(SearchAction::Close),
+        KeyCode::Enter => Some(SearchAction::Play),
+        KeyCode::Tab => Some(SearchAction::Add),
+        KeyCode::Up => Some(SearchAction::Up),
+        KeyCode::Down => Some(SearchAction::Down),
+        KeyCode::Backspace => Some(SearchAction::Erase),
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
+            Some(SearchAction::Type(c))
+        }
+        _ => None,
+    }
+}
+
+/// A line of the suggestions, in the order drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Row {
+    /// "results from …": the chosen provider had nothing.
+    Heading(String),
+    Track(QueueItem),
+    Artist(String),
+    /// A provider that could not be asked (K9).
+    Failure(String),
+}
+
+impl Row {
+    fn pickable(&self) -> bool {
+        matches!(self, Self::Track(_) | Self::Artist(_))
+    }
+}
+
+/// The core's answer as lines: the chosen provider's section as it is, the
+/// others under their names, the failures last.
+fn rows(report: &SuggestReport) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for section in &report.sections {
+        if section.fallback {
+            rows.push(Row::Heading(format!(
+                "results from {}:",
+                section.display_name
+            )));
+        }
+        rows.extend(section.tracks.iter().cloned().map(Row::Track));
+        rows.extend(
+            section
+                .artists
+                .iter()
+                .map(|artist| Row::Artist(artist.artist.clone())),
+        );
+        rows.extend(section.more.iter().cloned().map(Row::Track));
+    }
+    for failure in &report.failures {
+        rows.push(Row::Failure(format!(
+            "could not ask {} — STEP: {}",
+            failure.display_name, failure.stage
+        )));
+    }
+    rows
+}
+
+/// The open search line.
+struct Search {
+    text: String,
+    /// The text the drawn rows answer.
+    answered: String,
+    rows: Vec<Row>,
+    /// Which pickable row is chosen (an index among the pickable ones).
+    chosen: usize,
+    /// Where the play box searches first, for the line's title.
+    from: String,
+    /// The chosen provider answers from the catalog: asked at every key.
+    instant: bool,
+    changed: Instant,
+    /// What the last Tab did, said once.
+    note: Option<String>,
+}
+
+impl Search {
+    fn open(from: String, instant: bool) -> Self {
+        Self {
+            text: String::new(),
+            answered: String::new(),
+            rows: Vec::new(),
+            chosen: 0,
+            from,
+            instant,
+            changed: Instant::now(),
+            note: None,
+        }
+    }
+
+    fn type_char(&mut self, c: char) {
+        self.text.push(c);
+        self.changed = Instant::now();
+    }
+
+    fn erase(&mut self) {
+        self.text.pop();
+        self.changed = Instant::now();
+    }
+
+    /// Is it time to ask: the text changed, and either the answer is at
+    /// once or typing has paused.
+    fn due(&self, now: Instant) -> bool {
+        self.text != self.answered
+            && (self.instant || now.saturating_duration_since(self.changed) >= SEARCH_PAUSE)
+    }
+
+    fn take(&mut self, text: String, report: &SuggestReport) {
+        self.rows = rows(report);
+        self.answered = text;
+        let count = self.pickable().len();
+        self.chosen = self.chosen.min(count.saturating_sub(1));
+    }
+
+    fn pickable(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.pickable())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn step(&mut self, down: bool) {
+        let count = self.pickable().len();
+        if count == 0 {
+            return;
+        }
+        self.chosen = if down {
+            (self.chosen + 1).min(count - 1)
+        } else {
+            self.chosen.saturating_sub(1)
+        };
+    }
+
+    /// The chosen row, if there is one to choose.
+    fn chosen_row(&self) -> Option<&Row> {
+        self.pickable()
+            .get(self.chosen)
+            .and_then(|&index| self.rows.get(index))
+    }
+}
+
+/// Plays the chosen row at once, or adds it to the queue (D-080). With no
+/// row the typed text's first match is taken, as Enter in the play box does.
+/// Returns what was done, to be said.
+async fn pick(
+    live: &mut LiveSession,
+    search: &Search,
+    play: bool,
+) -> headshell_core::Result<Option<String>> {
+    let registry = live.player().providers().clone();
+    let limit = PlayOptions::new(String::new()).limit;
+    let (items, what) = match search.chosen_row() {
+        Some(Row::Track(item)) => (vec![item.clone()], item.track.display_name()),
+        Some(Row::Artist(name)) => (
+            live.session()
+                .queue_from_search(&registry, name, true, limit)
+                .await?,
+            format!("every track by {name}"),
+        ),
+        _ if search.text.trim().is_empty() => return Ok(None),
+        _ => {
+            let items = live
+                .session()
+                .queue_from_search(&registry, &search.text, false, limit)
+                .await?;
+            let what = items
+                .first()
+                .map_or_else(String::new, |item| item.track.display_name());
+            (items, what)
+        }
+    };
+    if play {
+        let player = live.session().player_from_items(&registry, items).await?;
+        live.replace_player(player);
+        Ok(Some(format!("playing {what}")))
+    } else {
+        live.player_mut().enqueue(items).await?;
+        Ok(Some(format!("added to the queue: {what}")))
     }
 }
 
@@ -129,8 +351,29 @@ pub async fn run(live: &mut LiveSession) -> anyhow::Result<usize> {
     selection.select(Some(live.player().queue().position()));
     let mut last_error: Option<String> = None;
     let mut recorded = 0usize;
+    let mut search: Option<Search> = None;
+    let mut search_list = ListState::default();
 
     let result = loop {
+        // — The search line asks once its text has rested (D-080).
+        if let Some(open) = search.as_mut()
+            && open.due(Instant::now())
+        {
+            let text = open.text.clone();
+            let registry = live.player().providers().clone();
+            match live.session().suggest(&registry, &text).await {
+                Ok(report) => open.take(text, &report),
+                Err(err) => {
+                    // Not asked again until the text changes.
+                    open.answered = text;
+                    last_error = Some(err.chain_text());
+                }
+            }
+        }
+        if let Some(open) = search.as_ref() {
+            search_list.select(open.pickable().get(open.chosen).copied());
+        }
+
         // — Draw.
         let player = live.player();
         let anchor = player.anchor();
@@ -159,8 +402,10 @@ pub async fn run(live: &mut LiveSession) -> anyhow::Result<usize> {
                     repeat: queue.repeat,
                     shuffle: queue.shuffle,
                     error: last_error.as_deref(),
+                    search: search.as_ref(),
                 },
                 &mut selection,
+                &mut search_list,
             );
         })?;
 
@@ -179,11 +424,63 @@ pub async fn run(live: &mut LiveSession) -> anyhow::Result<usize> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            // While the search line is open, keys are its own: a letter is text.
+            if let Some(open) = search.as_mut() {
+                let Some(action) = search_key(key) else {
+                    continue;
+                };
+                match action {
+                    SearchAction::Quit => {
+                        quit = true;
+                        break;
+                    }
+                    SearchAction::Close => search = None,
+                    SearchAction::Type(c) => open.type_char(c),
+                    SearchAction::Erase => open.erase(),
+                    SearchAction::Up => open.step(false),
+                    SearchAction::Down => open.step(true),
+                    SearchAction::Play | SearchAction::Add => {
+                        let play = action == SearchAction::Play;
+                        match pick(live, open, play).await {
+                            Ok(done) => {
+                                last_error = None;
+                                if play && done.is_some() {
+                                    search = None;
+                                } else {
+                                    open.note = done;
+                                }
+                                selection.select(Some(live.player().queue().position()));
+                            }
+                            Err(err) => last_error = Some(err.chain_text()),
+                        }
+                    }
+                }
+                // Draw what the key did, and ask, before the next key.
+                break;
+            }
             let Some(action) = action_for(key) else {
                 continue;
             };
             if action == Action::Quit {
                 quit = true;
+                break;
+            }
+            if action == Action::Search {
+                let registry = live.player().providers().clone();
+                match live.session().play_from(&registry) {
+                    Ok(from) => {
+                        let name = from
+                            .provider
+                            .as_ref()
+                            .and_then(|id| registry.get(id))
+                            .map_or_else(
+                                || "nowhere".to_owned(),
+                                |provider| provider.info().display_name,
+                            );
+                        search = Some(Search::open(name, from.instant));
+                    }
+                    Err(err) => last_error = Some(err.chain_text()),
+                }
                 break;
             }
             if let Err(err) =
@@ -242,8 +539,9 @@ async fn apply(
     queue_len: usize,
 ) -> headshell_core::Result<()> {
     match action {
-        // Quitting is handled in the calling loop; it never gets here.
-        Action::Quit => {}
+        // Quitting and the search line are handled in the calling loop; they
+        // never get here.
+        Action::Quit | Action::Search => {}
         Action::TogglePause => player.toggle_pause(),
         Action::Next => {
             player.next().await?;
@@ -292,9 +590,15 @@ struct View<'a> {
     repeat: RepeatMode,
     shuffle: bool,
     error: Option<&'a str>,
+    search: Option<&'a Search>,
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, view: &View<'_>, selection: &mut ListState) {
+fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    view: &View<'_>,
+    selection: &mut ListState,
+    search_list: &mut ListState,
+) {
     let area = frame.area();
     let chunks = Layout::vertical([
         Constraint::Length(3), // playing track
@@ -306,8 +610,78 @@ fn draw(frame: &mut ratatui::Frame<'_>, view: &View<'_>, selection: &mut ListSta
 
     draw_now_playing(frame, chunks[0], view);
     draw_progress(frame, chunks[1], view.anchor);
-    draw_queue(frame, chunks[2], view, selection);
+    match view.search {
+        Some(search) => draw_search(frame, chunks[2], search, search_list),
+        None => draw_queue(frame, chunks[2], view, selection),
+    }
     draw_footer(frame, chunks[3], view);
+}
+
+/// The search line and its suggestions, where the queue was.
+fn draw_search(frame: &mut ratatui::Frame<'_>, area: Rect, search: &Search, list: &mut ListState) {
+    let parts = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
+    let accent = Style::default().fg(Color::Rgb(255, 180, 84));
+    let dim = Style::default().fg(Color::DarkGray);
+    let typed = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            search.text.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("▏", accent),
+    ]);
+    frame.render_widget(
+        Paragraph::new(typed).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" play from {} ", search.from)),
+        ),
+        parts[0],
+    );
+
+    let items: Vec<ListItem<'_>> = search
+        .rows
+        .iter()
+        .map(|row| match row {
+            Row::Heading(text) => ListItem::new(Line::from(Span::styled(
+                text.clone(),
+                accent.add_modifier(Modifier::BOLD),
+            ))),
+            Row::Track(item) => ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    item.track.title.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" · {}", item.track.artist), dim),
+            ])),
+            Row::Artist(name) => ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(name.clone()),
+                Span::styled("  artist", dim),
+            ])),
+            Row::Failure(text) => ListItem::new(Line::from(Span::styled(
+                text.clone(),
+                Style::default().fg(Color::Red),
+            ))),
+        })
+        .collect();
+    let title = if search.text.trim().is_empty() {
+        " type a track or an artist "
+    } else if search.text != search.answered {
+        " … "
+    } else if search.rows.is_empty() {
+        " nothing found "
+    } else {
+        " suggestions "
+    };
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        parts[1],
+        list,
+    );
 }
 
 fn draw_now_playing(frame: &mut ratatui::Frame<'_>, area: Rect, view: &View<'_>) {
@@ -431,9 +805,23 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, view: &View<'_>) {
         );
         return;
     }
+    if let Some(search) = view.search {
+        let mut spans = vec![Span::styled(
+            " enter play · tab add to the queue · ↑↓ choose · esc back",
+            Style::default().fg(Color::DarkGray),
+        )];
+        if let Some(note) = &search.note {
+            spans.push(Span::styled(
+                format!("   {note}"),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " space pause · n/b next/previous · ↑↓ select · enter play · s shuffle · r repeat · q quit",
+            " space pause · n/b next/previous · ↑↓ select · enter play · / search · s shuffle · r repeat · q quit",
             Style::default().fg(Color::DarkGray),
         ))),
         area,
@@ -506,6 +894,125 @@ mod tests {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(action_for(ctrl_c), Some(Action::Quit));
         assert_eq!(action_for(key(KeyCode::Char('c'))), None);
+    }
+
+    #[test]
+    fn slash_opens_the_search_line_and_there_letters_are_text() {
+        assert_eq!(action_for(key(KeyCode::Char('/'))), Some(Action::Search));
+        // `q` quits the player, but in the search line it is a letter.
+        assert_eq!(
+            search_key(key(KeyCode::Char('q'))),
+            Some(SearchAction::Type('q'))
+        );
+        assert_eq!(
+            search_key(key(KeyCode::Char(' '))),
+            Some(SearchAction::Type(' '))
+        );
+        assert_eq!(search_key(key(KeyCode::Enter)), Some(SearchAction::Play));
+        assert_eq!(search_key(key(KeyCode::Tab)), Some(SearchAction::Add));
+        assert_eq!(search_key(key(KeyCode::Esc)), Some(SearchAction::Close));
+        assert_eq!(
+            search_key(key(KeyCode::Backspace)),
+            Some(SearchAction::Erase)
+        );
+        assert_eq!(search_key(key(KeyCode::Down)), Some(SearchAction::Down));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(search_key(ctrl_c), Some(SearchAction::Quit));
+    }
+
+    fn report_with_fallback() -> SuggestReport {
+        use headshell_core::ids::{ProviderId, ProviderTrackId};
+        use headshell_core::model::TrackRef;
+        use headshell_core::session::PlayFrom;
+        use headshell_core::suggest::{ArtistSuggestion, SuggestFailure, SuggestSection};
+
+        let track = |title: &str| QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("echo"), title),
+            track: TrackRef::new("Ezhel", title),
+        };
+        SuggestReport {
+            query: "gece".to_owned(),
+            play_from: PlayFrom {
+                provider: Some(ProviderId::new("local")),
+                chosen: false,
+                instant: true,
+                missing: None,
+            },
+            sections: vec![SuggestSection {
+                provider: ProviderId::new("echo"),
+                display_name: "Echo (test)".to_owned(),
+                fallback: true,
+                tracks: vec![track("Geceler")],
+                artists: vec![ArtistSuggestion {
+                    artist: "Ezhel".to_owned(),
+                }],
+                more: vec![track("Gece Yarısı")],
+            }],
+            failures: vec![SuggestFailure {
+                provider: ProviderId::new("srv"),
+                display_name: "srv".to_owned(),
+                stage: "NETWORK_REQUEST".to_owned(),
+                chain: "STEP: NETWORK_REQUEST\n  → refused".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn suggestions_are_drawn_in_the_cores_order_with_the_fallback_named() {
+        let lines = rows(&report_with_fallback());
+        assert_eq!(
+            lines[0],
+            Row::Heading("results from Echo (test):".to_owned())
+        );
+        assert!(matches!(&lines[1], Row::Track(item) if item.track.title == "Geceler"));
+        assert_eq!(lines[2], Row::Artist("Ezhel".to_owned()));
+        assert!(matches!(&lines[3], Row::Track(item) if item.track.title == "Gece Yarısı"));
+        assert_eq!(
+            lines[4],
+            Row::Failure("could not ask srv — STEP: NETWORK_REQUEST".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_choice_skips_headings_and_stays_inside_the_list() {
+        let mut search = Search::open("Local files".to_owned(), true);
+        search.text = "gece".to_owned();
+        search.take("gece".to_owned(), &report_with_fallback());
+        assert!(
+            matches!(search.chosen_row(), Some(Row::Track(item)) if item.track.title == "Geceler")
+        );
+        search.step(true);
+        assert_eq!(search.chosen_row(), Some(&Row::Artist("Ezhel".to_owned())));
+        search.step(true);
+        search.step(true);
+        assert!(
+            matches!(search.chosen_row(), Some(Row::Track(item)) if item.track.title == "Gece Yarısı"),
+            "the failure line cannot be chosen, and the choice stops at the last row"
+        );
+        search.step(false);
+        search.step(false);
+        search.step(false);
+        assert!(
+            matches!(search.chosen_row(), Some(Row::Track(item)) if item.track.title == "Geceler")
+        );
+    }
+
+    #[test]
+    fn a_provider_over_the_network_is_asked_after_a_pause_the_catalog_at_once() {
+        let mut catalog = Search::open("Local files".to_owned(), true);
+        catalog.type_char('g');
+        assert!(
+            catalog.due(catalog.changed),
+            "the catalog is asked at every key"
+        );
+
+        let mut network = Search::open("YouTube Music".to_owned(), false);
+        network.type_char('g');
+        assert!(!network.due(network.changed + Duration::from_millis(100)));
+        assert!(network.due(network.changed + SEARCH_PAUSE));
+        // Once answered, the same text is not asked again.
+        network.answered = "g".to_owned();
+        assert!(!network.due(network.changed + SEARCH_PAUSE));
     }
 
     #[test]

@@ -1,0 +1,39 @@
+{
+  "failures": [],
+  "play_from": {
+    "chosen": false,
+    "instant": true,
+    "missing": null,
+    "provider": "local"
+  },
+  "query": "sine",
+  "sections": [
+    {
+      "artists": [
+        {
+          "artist": "Test Artist"
+        }
+      ],
+      "display_name": "Local files",
+      "fallback": false,
+      "more": [],
+      "provider": "local",
+      "tracks": [
+        {
+          "id": {
+            "id": "tagged.flac",
+            "provider": "local"
+          },
+          "track": {
+            "album": "Fixture Album",
+            "artist": "Test Artist",
+            "duration_ms": 1000,
+            "isrc": null,
+            "provider_track_id": null,
+            "title": "Sine 440 ünïcode"
+          }
+        }
+      ]
+    }
+  ]
+}

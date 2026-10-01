@@ -188,6 +188,15 @@ enum Command {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// What the play box offers for a text while it is typed (D-080).
+    ///
+    /// The tracks whose title begins with it, then the artists, then the other
+    /// matches — from the provider chosen to play from (`provider use`), or,
+    /// when it has nothing, from every other one, each named.
+    Suggest {
+        /// The text typed so far.
+        query: String,
+    },
     /// Play a local track.
     Play {
         /// The search text for finding the track to play.
@@ -258,6 +267,15 @@ enum ProviderCommand {
     },
     /// List the registered remote servers (credentials are not shown).
     Servers,
+    /// Choose the provider the play box and `play` search first (D-080).
+    ///
+    /// The others are asked only when it finds nothing. The choice is kept
+    /// in the data directory; the desktop's providers section makes the same
+    /// choice.
+    Use {
+        /// The provider name (`local`, a server's name, a plugin's name).
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -562,6 +580,11 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                     let report = session.test_provider(&registry, &id).await?;
                     render(cli.json, &report, || output::provider_test(&report))
                 }
+                ProviderCommand::Use { name } => {
+                    let id = ProviderId::new(name.clone());
+                    let report = session.set_play_from(&registry, &id)?;
+                    render(cli.json, &report, || output::play_from(&report.play_from))
+                }
                 ProviderCommand::Scan { if_stale } => {
                     let report = if *if_stale {
                         session.scan_providers_if_stale(&registry).await?
@@ -681,6 +704,11 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                 render(cli.json, &report, || output::secret_write(&report))
             }
         },
+        Command::Suggest { query } => {
+            let registry = provider::default_registry(session.config())?;
+            let report = session.suggest(&registry, query).await?;
+            render(cli.json, &report, || output::suggest(&report))
+        }
         Command::Play {
             query,
             all,

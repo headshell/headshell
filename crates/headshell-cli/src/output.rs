@@ -9,13 +9,14 @@ use headshell_core::lyrics::{LyricsFit, LyricsReport, LyricsSource, LyricsStatus
 use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
 use headshell_core::plugin::catalog::UpdateOutcome;
 use headshell_core::session::{
-    ImportReport, PlayReport, PluginCatalogReport, PluginConsentReport, PluginIndexReport,
-    PluginInstallReport, PluginListReport, PluginRemoveReport, PluginUpdateReport,
-    ProviderListReport, ProviderTestReport, ResolveReport, ScanReport, SearchReport,
-    SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport,
-    SleeveResponse, StatsResponse,
+    ImportReport, PlayFrom, PlayReport, PluginCatalogReport, PluginConsentReport,
+    PluginIndexReport, PluginInstallReport, PluginListReport, PluginRemoveReport,
+    PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport, ScanReport,
+    SearchReport, SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport,
+    ServerRemoveReport, SleeveResponse, StatsResponse,
 };
 use headshell_core::stats::StatsReport;
+use headshell_core::suggest::SuggestReport;
 
 /// Turns milliseconds into a readable duration like `12h 3m`.
 fn duration(ms: u64) -> String {
@@ -511,12 +512,100 @@ pub fn provider_list(report: &ProviderListReport) -> String {
         return out;
     }
     for info in &report.providers {
+        // The one the play box asks first is marked (D-080).
+        let mark = if report.play_from.provider.as_ref() == Some(&info.id) {
+            '*'
+        } else {
+            ' '
+        };
+        // `as_str`: the id's `Display` writes the string as it is and ignores
+        // the column width.
         let _ = writeln!(
             out,
-            "{:<10} {:<22} {}",
-            info.id,
+            "{mark} {:<10} {:<22} {}",
+            info.id.as_str(),
             truncate(&info.display_name, 22),
             info.capabilities
+        );
+    }
+    out.push_str(&play_from(&report.play_from));
+    out
+}
+
+/// Where the play box searches first (D-080) — and why, when it is not the
+/// user's choice.
+pub fn play_from(from: &PlayFrom) -> String {
+    let mut out = match (&from.provider, from.chosen) {
+        (Some(id), true) => format!("play from: {id} (chosen)\n"),
+        (Some(id), false) => format!(
+            "play from: {id} (nothing chosen yet: the first that can play — `headshell provider use <name>`)\n"
+        ),
+        (None, _) => "play from: none — no registered provider can play\n".to_owned(),
+    };
+    if let Some(missing) = &from.missing {
+        out.push_str(&format!(
+            "  the chosen {missing} is not registered or cannot play now — searching from the one above\n"
+        ));
+    }
+    out
+}
+
+/// What the play box offers for a text (D-080): the chosen provider's
+/// section, or every other one's, named.
+pub fn suggest(report: &SuggestReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let first = report
+        .play_from
+        .provider
+        .as_ref()
+        .map_or_else(|| "no provider".to_owned(), ToString::to_string);
+    if report
+        .sections
+        .first()
+        .is_some_and(|section| section.fallback)
+    {
+        let _ = writeln!(out, "nothing in {first} for {:?}", report.query);
+    }
+    for section in &report.sections {
+        if section.fallback {
+            let _ = writeln!(out, "results from {}:", section.display_name);
+        } else {
+            let _ = writeln!(out, "{}:", section.display_name);
+        }
+        for item in &section.tracks {
+            let _ = writeln!(
+                out,
+                "  track   {} · {}",
+                item.track.title, item.track.artist
+            );
+        }
+        for artist in &section.artists {
+            let _ = writeln!(out, "  artist  {}", artist.artist);
+        }
+        for item in &section.more {
+            let _ = writeln!(
+                out,
+                "  more    {} · {}",
+                item.track.title, item.track.artist
+            );
+        }
+    }
+    if report.sections.is_empty() && !report.query.trim().is_empty() {
+        let _ = writeln!(out, "nothing found for {:?} anywhere", report.query);
+    }
+    // "Not found" and "could not ask" are different answers (K9).
+    for failure in &report.failures {
+        let first_line = failure
+            .chain
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("STEP:"))
+            .unwrap_or(&failure.chain);
+        let _ = writeln!(
+            out,
+            "could not ask {} — STEP: {} — {}",
+            failure.display_name, failure.stage, first_line
         );
     }
     out

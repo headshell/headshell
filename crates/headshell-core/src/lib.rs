@@ -20,12 +20,14 @@ pub mod model;
 pub mod net;
 pub mod playback;
 pub mod plugin;
+pub mod preferences;
 pub mod provider;
 pub mod secrets;
 pub mod session;
 pub mod sleeve;
 pub mod stats;
 mod store;
+pub mod suggest;
 #[cfg(test)]
 mod test_support;
 

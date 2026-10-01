@@ -5380,3 +5380,118 @@ row's ring on a table row; a notice held past its lifetime while its menu was op
 empty spot opening nothing; selected text copied; the echo plugin's card — its menu, the
 armed row taken back, and removed on the second pick; the icons-only sidebar at 900 px;
 a lyric line copied from the lyrics LRCLIB gave.
+
+**Addendum (2026-10-01, D-080).** "Add to queue" — decision 1's "its own step" — landed
+in D-080, with the songs' menus now one builder: a library result, a statistics track, a
+queue row and a suggestion offer the same rows. The library result lost "play every track
+by the artist" on the way; an artist's own menu (the statistics, the suggestions) has it.
+
+## D-080 — Play from a chosen provider; suggestions while typing; a menu for every song
+
+**Date:** 2026-10-01 · **Status:** APPLIED (2026-10-01)
+
+**Question:** The user: *"Add a part for choosing a provider in the providers section, and
+in the song search let it suggest while I type — as I type 'let it', first Let It Happen,
+then the artist, then the other results if there are any."* The code was read first:
+only local files are in the catalog, and servers and plugins were asked only when the
+catalog found nothing — with local music there was no way to play from YouTube Music.
+Three questions were asked (§0.2); the answers are the decisions below. The interface was
+done with /apple-design.
+
+**Decision:**
+
+1. **The chosen provider is searched first; the others only when it finds nothing, and
+   their results are named** — the user's own words over "only the chosen one" and "a
+   priority order": *"search the one chosen in providers; if nothing comes up, show the
+   other provider's results as 'results from <name>:'"*. Nothing chosen is the registry's
+   first that can play — local files, today's behaviour.
+2. **Suggestions come from the chosen provider**: the catalog at once, a server or a plugin
+   after a pause in typing — each pause a question over the network, which the user chose.
+3. **A picked suggestion plays at once, and every song gets a menu** — the user: *"play it
+   at once; also give every song a right-click 'add to queue' and 'play now', and there can
+   be 7–8 more options; let them stay placeholders for now, write ones that could really be
+   useful."* The real rows: play now, add to queue, find the artist / the album in the
+   library, copy artist and title, resolve its identity. The placeholders, shown as "soon"
+   and not pickable: play next, add to a playlist…, start a radio from it, like.
+
+**The order, in the core.** `Session::queue_from_search` — so `play`, the CLI's `play`,
+`artwork` and `lyrics` follow it alike — asks the chosen provider first: its rows in the
+scanned catalog when it was scanned, its own search when not. Only when it finds nothing are
+the others asked, in the registry's order (local files, servers, plugins), their answers one
+after another. The chosen one's failure is the answer — "could not reach it" is not a reason
+to play something else; among the others, one that fails does not hide what the rest found,
+and when none found anything its failure is the answer (K9).
+
+**The choice** is kept in `preferences.json` in the data directory, not the database (D-021's
+line: a choice is not library data); a broken file is an error, never a silent "nothing
+chosen". `Session::play_from` says where the search starts, whether the user chose it, whether
+it answers at once (a scanned catalog), and a choice that cannot be kept — a server removed, a
+plugin disabled — is named in `missing`. Only a registered provider that can play can be chosen.
+
+**The ranking** (`suggest.rs`, pure): the tracks whose title begins with the text (four), the
+artists — whose name or a word of it begins with it, then the artists of those tracks (three)
+— then every other match (five), the same song twice once. Words are compared as the identity
+chain compares them, an apostrophe dropped first.
+
+**Not a recorded run.** `suggest` is asked at every pause in typing; recording it would make
+`headshell diag`'s last run always "suggest". A provider that could not be asked is in the
+report's `failures`, with its stage and chain.
+
+**Typing does not hold the player.** The desktop's commands and the player's rounds share one
+thread (D-032). A plugin's search for a suggestion would have held the rounds and the controls
+for as long as it took, so `Session::suggest_plan` reads the catalog there, at once, and
+`SuggestPlan::finish` — which needs no session — asks the network off it. A test fails to
+compile if either stops being `Send`.
+
+**The CLI (D-033).** `headshell suggest "<query>"` (and `--json`), `headshell provider use
+<name>`; `provider list` marks the chosen one and says why when it is not a choice. The TUI's
+live counterpart of the desktop's suggestions, "play now" and "add to queue" is a search line:
+`/` opens it, Enter plays the chosen row, Tab adds it to the queue. "Add to queue" is
+`Player::enqueue`: at the end of the play order, shuffled or not; into an empty queue it plays.
+The read-ahead (D-077) sees the new track at its next round.
+
+**"Play next" stays a placeholder.** It puts a track between the playing one and the one
+already handed to the engine for a gapless start (D-077); that handover has to be taken back
+first. Appending changes nothing already handed over.
+
+**The interface (with /apple-design).** The suggestions are a panel under the play box with
+the context menu's surface, growing out of the field; the field keeps the focus all along — the
+arrows light a row, Enter plays it, Esc closes the panel before anything behind it. A press on
+the panel does not take the focus, so a row's menu can add one song after another with the panel
+up. The catalog is asked 90 ms after a key, a server or a plugin 300 ms after; an older answer
+arriving late is dropped. The providers section's "play from" card lights the chosen row with a
+pill that slides to it on a spring, chosen on pointer-down; the play box's placeholder says where
+it searches.
+
+**Found while verifying:**
+- **"dont" did not begin "Don't".** The identity chain's normalisation turns an apostrophe into
+  a space; suggestions drop it first.
+- **The provider list's columns were never aligned:** a provider id's `Display` ignores the
+  column width. It is written as a string now.
+- **In the container, typing lagged while the now-playing sheet was up and the record turned:**
+  the container runs WebKit without compositing, so the turning record is painted on the page's
+  thread every frame. With playback paused or the sheet down the field answered at once. This
+  change adds no per-frame work; on a machine with compositing it is to be watched, not assumed.
+- **The container's WebKitGTK is 2.54.0 now** (Debian updated it); this machine's is 2.52.6.
+- **A playback test failed once in the workspace run** with an ALSA I/O error from this
+  machine's sound device, while its sibling tests used it too; alone it passed three times out
+  of three.
+
+**Not done, and why:** play next (above); playlists, radios and likes — the placeholders, no
+store behind them yet; covers in the suggestion rows; the TUI's search line was not seen on a
+terminal, only tested through its keys and rows.
+
+**Testing:** the ranking (the user's example, artists before their tracks, Turkish letters,
+apostrophes, duplicates, sizes); the order and the fallback with fake providers (nothing chosen,
+the chosen one first, a choice that cannot be kept, refusals, the chosen one's failure, a failing
+fallback); `enqueue` (last in the play order, shuffled too; an empty queue plays); the choice's
+file; the TUI's keys, rows and timing; `suggest` (a snapshot) and `provider use` / `provider
+list` through the CLI.
+
+**Verification:** the §3.9 container (Debian 13, Xvfb, a PulseAudio null sink) with the echo
+plugin approved: "let it" → Let It Happen, then Tame Impala; "gece" → "nothing in Local files",
+then "results from Echo (test):"; a suggestion's menu — the real rows and the placeholders;
+"add to queue" into an empty queue (it played) and into a full one (last, the panel still up);
+↓ and Enter playing exactly the lit track; Echo chosen — the pill sliding, the placeholder, its
+suggestions with no heading; Esc closing the panel only; a queue row's menu; the window at
+900×600.
