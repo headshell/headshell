@@ -14,7 +14,7 @@
 [![Lisans](https://img.shields.io/badge/lisans-MIT%20%7C%20Apache--2.0-2f6feb?style=for-the-badge)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-1.87%2B-e07b39?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/linux%20·%20macOS%20·%20windows-3c3833?style=for-the-badge)](#kurulum)
-[![Durum](https://img.shields.io/badge/durum-v0.0.2--beta-ffb454?style=for-the-badge)](#kurulum)
+[![Durum](https://img.shields.io/badge/durum-v0.0.3--beta-ffb454?style=for-the-badge)](#kurulum)
 
 **[Ne yapar](#ne-yapar)** · **[Kurulum](#kurulum)** · **[Nasıl kullanılır](#nasıl-kullanılır)** · **[Nereden çalar](#nereden-çalar)** · **[Gizlilik](#gizlilik)** · **[Yol haritası](#yol-haritası)**
 
