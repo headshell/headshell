@@ -27,7 +27,7 @@
   "permissions_enforced": true,
   "plugins": [
     {
-      "api": 4,
+      "api": 5,
       "artwork": true,
       "consent": {
         "state": "not_asked"
@@ -43,7 +43,8 @@
       },
       "problem": null,
       "requires": [],
-      "version": "0.2.0"
+      "version": "0.3.0",
+      "video": true
     }
   ],
   "summary": {

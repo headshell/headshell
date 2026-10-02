@@ -35,7 +35,7 @@ pub use anchor::{PlayState, PlaybackAnchor};
 #[cfg(feature = "audio")]
 pub use engine::AudioEngine;
 pub use live::{LiveSession, TickReport};
-pub use player::Player;
+pub use player::{Player, Surface};
 pub use prefetch::{
     Habits, PlanReason, PrefetchCounters, PrefetchItem, PrefetchReport, PrefetchStatus,
     PrefetchSummary,

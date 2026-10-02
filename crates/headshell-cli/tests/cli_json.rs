@@ -1526,7 +1526,7 @@ fn a_plugin_goes_from_the_catalog_through_approval_and_update_to_removal() {
     // 3. Installing: it comes down from the catalog and awaits consent (D-040).
     let (stdout, stderr, ok) = run_with_index(&dir, &index, &["plugin", "install", "echo"]);
     assert!(ok, "plugin install failed: {stderr}");
-    assert!(stdout.contains("catalog    : 0.2.0 downloaded"), "{stdout}");
+    assert!(stdout.contains("catalog    : 0.3.0 downloaded"), "{stdout}");
     assert!(
         stdout.contains("awaiting consent"),
         "coming from the catalog is not consent:\n{stdout}"
@@ -1544,7 +1544,7 @@ fn a_plugin_goes_from_the_catalog_through_approval_and_update_to_removal() {
     // what is out of date; it is rebuilt without giving the template.
     let manifest = std::fs::read_to_string(repo.join("echo/plugin.json"))
         .unwrap()
-        .replace("\"0.2.0\"", "\"0.3.0\"");
+        .replace("\"0.3.0\"", "\"0.4.0\"");
     std::fs::write(repo.join("echo/plugin.json"), manifest).unwrap();
     let (_, stderr, ok) = run(&dir, &["plugin", "index", repo_arg, "--check"]);
     assert!(!ok, "an outdated index must not pass --check");
@@ -1564,7 +1564,7 @@ fn a_plugin_goes_from_the_catalog_through_approval_and_update_to_removal() {
     // place.
     let (stdout, stderr, ok) = run_with_index(&dir, &index, &["plugin", "update"]);
     assert!(ok, "plugin update failed: {stderr}");
-    assert!(stdout.contains("updated: 0.2.0 → 0.3.0"), "{stdout}");
+    assert!(stdout.contains("updated: 0.3.0 → 0.4.0"), "{stdout}");
     let (stdout, _, ok) = run(&dir, &["plugin", "list"]);
     assert!(ok);
     assert!(stdout.contains("approved"), "{stdout}");
@@ -1732,4 +1732,94 @@ fn install_echo_plugin(data_dir: &Path) {
     for file in ["plugin.json", "main.js"] {
         std::fs::copy(source.join(file), target.join(file)).expect("plugin file");
     }
+}
+
+/// D-086: music and video follow the main provider until each is chosen on
+/// its own; `provider follow` lets one follow again.
+#[test]
+fn roles_are_chosen_apart_and_followed_again() {
+    let dir = temp_dir("roles");
+    install_echo_plugin(&dir);
+    let (_, stderr, ok) = run(&dir, &["plugin", "approve", "echo"]);
+    assert!(ok, "{stderr}");
+
+    let (stdout, stderr, ok) = run(&dir, &["--json", "provider", "list"]);
+    assert!(ok, "{stderr}");
+    let list = json(&stdout);
+    assert_eq!(list["roles"]["main"]["provider"], "local");
+    assert_eq!(
+        list["roles"]["video"]["provider"], "local",
+        "local files show videos: the video role follows the main one"
+    );
+    assert_eq!(list["roles"]["video"]["follows_main"], true);
+
+    let (stdout, stderr, ok) = run(
+        &dir,
+        &["--json", "provider", "use", "echo", "--for", "video"],
+    );
+    assert!(ok, "{stderr}");
+    let roles = &json(&stdout)["roles"];
+    assert_eq!(roles["video"]["provider"], "echo");
+    assert_eq!(roles["video"]["follows_main"], false);
+    assert_eq!(
+        roles["main"]["provider"], "local",
+        "the main one did not move"
+    );
+
+    let (stdout, stderr, ok) = run(&dir, &["provider", "list"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("video from: echo (chosen)"), "{stdout}");
+
+    let (stdout, stderr, ok) = run(&dir, &["--json", "provider", "follow", "video"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(json(&stdout)["roles"]["video"]["provider"], "local");
+    assert_eq!(json(&stdout)["roles"]["video"]["follows_main"], true);
+
+    // Music chosen apart is what the play box searches.
+    let (stdout, stderr, ok) = run(
+        &dir,
+        &["--json", "provider", "use", "echo", "--for", "music"],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(json(&stdout)["roles"]["music"]["provider"], "echo");
+    let (stdout, _, _) = run(&dir, &["--json", "provider", "list"]);
+    assert_eq!(json(&stdout)["play_from"]["provider"], "echo");
+}
+
+/// D-086: a video file is its own video; a song's video is searched for at
+/// the video provider, and the plan says what it found.
+#[test]
+fn video_finds_a_files_own_video_and_searches_for_a_song() {
+    let dir = temp_dir("video");
+    let videos = fixtures().join("video");
+    let clip = videos.join("Video Artist - Clip.mp4");
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&videos),
+        &["--json", "video", "--file", clip.to_str().unwrap()],
+    );
+    assert!(ok, "{stderr}");
+    let plan = &json(&stdout)["plan"];
+    assert_eq!(plan["own"], true, "{stdout}");
+    assert_eq!(plan["candidates"][0]["source"]["kind"], "local_file");
+
+    install_echo_plugin(&dir);
+    let (_, stderr, ok) = run(&dir, &["plugin", "approve", "echo"]);
+    assert!(ok, "{stderr}");
+    let (_, stderr, ok) = run(&dir, &["provider", "use", "echo", "--for", "video"]);
+    assert!(ok, "{stderr}");
+    let (stdout, stderr, ok) = run(&dir, &["--json", "video", "Ezhel - Geceler"]);
+    assert!(ok, "{stderr}");
+    let plan = &json(&stdout)["plan"];
+    assert_eq!(plan["provider"], "echo");
+    assert_eq!(plan["own"], false);
+    assert_eq!(
+        plan["candidates"][0]["source"],
+        serde_json::json!({ "kind": "youtube", "video_id": "echoTrack01" }),
+        "{stdout}"
+    );
+
+    let (stdout, stderr, ok) = run(&dir, &["video", "Ezhel - Geceler"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("youtube echoTrack01"), "{stdout}");
 }

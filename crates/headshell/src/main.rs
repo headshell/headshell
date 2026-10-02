@@ -14,22 +14,28 @@
 // lines are visible.
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod command_names;
 mod commands;
 mod core_thread;
 mod debug;
 mod env;
+mod localhost;
 mod state;
 mod theme;
 mod ui_settings;
+mod video;
+mod video_server;
 
 use std::process::ExitCode;
 
 use headshell_core::config::Config;
+use tauri::Manager as _;
 use tokio::sync::mpsc;
 
 use crate::debug::{DebugSwitch, Variable};
 use crate::state::{AppState, Core};
 use crate::theme::ThemeStore;
+use crate::video::VideoDesk;
 
 fn main() -> ExitCode {
     // First thing: fixing up the environment. GDK reads `GDK_BACKEND` during
@@ -63,7 +69,7 @@ fn main() -> ExitCode {
     // The library is opened **before** the window: if the data directory
     // is missing or the database is corrupt, the user should look at an
     // error that says its stage, not at an empty window.
-    let (core, themes, debug) = match open_core(config, held) {
+    let (core, themes, debug, video) = match open_core(config, held) {
         Ok(opened) => opened,
         Err(text) => {
             report(&text);
@@ -72,7 +78,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(core, themes, debug, context) {
+    match run(core, themes, debug, video, context) {
         Ok(()) => ExitCode::SUCCESS,
         Err(text) => {
             // If the window could not be opened at all there is no surface to
@@ -91,14 +97,22 @@ fn report(text: &str) {
 fn open_core(
     config: headshell_core::Result<Config>,
     debug_held: bool,
-) -> Result<(Core, ThemeStore, DebugSwitch), String> {
+) -> Result<(Core, ThemeStore, DebugSwitch, VideoDesk), String> {
     let config = config.map_err(|err| err.chain_text())?;
-    // The theme store and the debug switch do not go to the core; they only
-    // know the data directory (§3.3, D-083).
+    // The theme store, the debug switch and the video desk do not go to the
+    // core; they only know the data directory (§3.3, D-083, D-086).
     let themes = ThemeStore::new(config.data_dir());
     let debug = DebugSwitch::new(config.data_dir(), debug_held);
-    let core = Core::open(config).map_err(|err| err.chain_text())?;
-    Ok((core, themes, debug))
+    let video = VideoDesk::new(config.data_dir());
+    // Videos turned off in settings: the first player shows none (D-086).
+    // An unreadable `ui.json` is said in the log, and videos stay on — the
+    // debug switch and the theme report the same file their own way.
+    let shows_video = video.enabled().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "the video setting could not be read; videos stay on");
+        true
+    });
+    let core = Core::open(config, shows_video).map_err(|err| err.chain_text())?;
+    Ok((core, themes, debug, video))
 }
 
 /// Shows the error in a window if startup failed (D-070).
@@ -168,16 +182,27 @@ fn run(
     core: Core,
     themes: ThemeStore,
     debug: DebugSwitch,
+    video: VideoDesk,
     context: tauri::Context,
 ) -> Result<(), String> {
     let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
+    let port = localhost::free_port()?;
 
     tauri::Builder::default()
         // It only lets the user pick a path. The side that reads/writes the
         // file is the core — which is why `capabilities/default.json` grants no
         // `fs` permission.
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new(jobs_tx, themes, debug))
+        // D-086: the interface is served from `http://127.0.0.1:<port>/`, not
+        // from `tauri://localhost`. YouTube's player refuses to play in a page
+        // that sends no `Referer` (its "Error 153"), and a page from a custom
+        // scheme never sends one. Only the loopback address listens.
+        .plugin(
+            tauri_plugin_localhost::Builder::new(port)
+                .host(localhost::HOST)
+                .build(),
+        )
+        .manage(AppState::new(jobs_tx, themes, debug, video))
         .setup(move |app| {
             // The main window is built here rather than from the config alone
             // (`create: false`): the config has no switch for the clipboard. The
@@ -186,13 +211,30 @@ fn run(
             // Only the app's own code runs in the page (CSP `script-src 'self'`,
             // nothing is written as markup — `ui_contract.rs`), and it reads the
             // clipboard only when "paste" is picked.
-            let main = app
+            let mut main = app
                 .config()
                 .app
                 .windows
                 .first()
-                .ok_or("STEP: CONFIG_LOAD\n  tauri.conf.json declares no window")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), main)?
+                .ok_or("STEP: CONFIG_LOAD\n  tauri.conf.json declares no window")?
+                .clone();
+            let page = localhost::page_url(port)?;
+            // The page is not the app's own scheme, so Tauri lets it call
+            // nothing until it is granted: the core's events and the file
+            // dialog, and the app's own commands — for this address only.
+            let mut grant = tauri::ipc::CapabilityBuilder::new("page")
+                .remote(page.to_string())
+                .window(main.label.clone())
+                .permission("core:default")
+                .permission("dialog:allow-open")
+                .permission("dialog:allow-save");
+            for command in command_names::COMMANDS {
+                grant = grant.permission(format!("allow-{}", command.replace('_', "-")));
+            }
+            app.add_capability(grant)?;
+            main.url = tauri::WebviewUrl::External(page);
+            localhost::wait_until_listening(port)?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &main)?
                 .enable_clipboard_access()
                 .build()?;
             // The core is moved onto its own thread here: the `AppHandle` only
@@ -234,6 +276,19 @@ fn run(
             commands::jump_to,
             commands::set_shuffle,
             commands::set_repeat,
+            // Music videos (D-086)
+            commands::provider_roles,
+            commands::provider_role_set,
+            commands::video_find,
+            commands::video_show,
+            commands::video_media,
+            commands::video_report,
+            commands::video_ended,
+            commands::video_audio,
+            commands::video_away,
+            commands::video_away_set,
+            commands::videos_enabled,
+            commands::videos_set,
             // Covers (D-076)
             commands::artwork,
             commands::artwork_queue,

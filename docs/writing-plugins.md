@@ -1,4 +1,4 @@
-# Writing plugins (contract api 4)
+# Writing plugins (contract api 5)
 
 `headshell` plugins are written in **JavaScript** and run in the **QuickJS**
 engine embedded in `headshell` (D-069). No Python, Node or other runtime is
@@ -22,10 +22,19 @@ Three working examples:
 - [`ytmusic/main.js`](https://github.com/headshell/plugins/blob/main/ytmusic/main.js)
   — a plugin that takes its metadata from a service and its audio from **a
   tool the engine installs** (yt-dlp), and gives timed lyrics.
+- [`youtube/main.js`](https://github.com/headshell/plugins/blob/main/youtube/main.js)
+  — **a video service**: it finds music videos and hands over YouTube ids;
+  the app plays them in YouTube's own player. No stream, no tool.
 - [`fixtures/plugins/echo/main.js`](../fixtures/plugins/echo/main.js) — a test
-  plugin with a fixed catalog, a cover and lyrics (~90 lines). For seeing the
-  contract bare.
+  plugin with a fixed catalog, a cover, lyrics and a video (~100 lines). For
+  seeing the contract bare.
 
+> **If you're coming from api 4:** api 5 (D-086) adds videos. The manifest
+> **must** say whether the plugin gives them — `"video": true` or
+> `"video": false`; an api 4 manifest doesn't, so it no longer loads. With
+> `false`, raising `"api"` to `5` and adding that one line is the whole port.
+> With `true`, export `resolve_video(id)` (§3).
+>
 > **If you're coming from api 3:** api 4 (D-078) adds lyrics. The manifest
 > **must** say whether the plugin gives them — `"lyrics": true` or
 > `"lyrics": false`; an api 3 manifest doesn't, so it no longer loads. With
@@ -81,10 +90,11 @@ same as the directory name; if they don't match, the plugin is rejected.
 {
   "name": "soundcloud",
   "display_name": "SoundCloud",
-  "version": "0.4.0",
-  "api": 4,
+  "version": "0.5.0",
+  "api": 5,
   "artwork": true,
   "lyrics": false,
+  "video": false,
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {
@@ -100,9 +110,10 @@ same as the directory name; if they don't match, the plugin is rejected.
 | `name` | yes | The same as the directory name. The provider ID. |
 | `display_name` | yes | The name shown to the user. |
 | `version` | yes in the catalog | The plugin's own version. Every plugin in the catalog is versioned: that is what catches an update, and the file addresses are pinned to it (§9). |
-| `api` | yes | The contract version it speaks: `4` today. |
+| `api` | yes | The contract version it speaks: `5` today. |
 | `artwork` | yes | Does the plugin give covers: `true` — it exports `artwork(id, size)` (§3) — or `false`. There is no default: a missing field is rejected, so "it gives none" is always a statement, never a guess. |
 | `lyrics` | yes | Does the plugin give lyrics: `true` — it exports `lyrics(id)` (§3) — or `false`. No default either, for the same reason. |
+| `video` | yes | Does the plugin give videos: `true` — it exports `resolve_video(id)` (§3) — or `false`. No default, for the same reason. A plugin with `video` and without `stream` is a video service: its tracks are videos only. |
 | `main` | yes | The script's path relative to the plugin directory. It must be `.js` and can't leave the directory (`..` and absolute paths are rejected). |
 | `capabilities` | no | `search`, `stream`. The engine checks that the function of every declared capability is exported. |
 | `permissions.net` | no | The hosts to connect to. See §2. |
@@ -173,6 +184,7 @@ export function resolve_source(id) {
 | `resolve_source(id)` | if it has the `stream` capability | a source, or `null` |
 | `artwork(id, size)` | if the manifest says `"artwork": true` | a cover, or `null` |
 | `lyrics(id)` | if the manifest says `"lyrics": true` | lyrics, or `null` |
+| `resolve_video(id)` | if the manifest says `"video": true` | a video, or `null` |
 
 The names are deliberately the same as api 1's method names and the core's
 `Provider` trait (`resolve_source`, not `resolveSource`). You can write an
@@ -267,6 +279,35 @@ error, the app can still ask LRCLIB for a synced version of the recording's
 length — for a plugin's track at once, since it plays from the internet
 anyway. Keep the call short: it is asked the moment a track starts, beside
 playback, and gives way to the user's own calls (§6).
+
+### `resolve_video(id)`
+
+The video of one of your items (D-086), for the app's music/video switch:
+
+```js
+{ kind: "youtube", video_id: "CCHdMIEGaaM" }
+```
+
+The app plays it in **YouTube's own player** — the official IFrame embed —
+so nothing is downloaded and no stream is resolved; the ads and the view
+counting stay YouTube's. The id is checked before the app gets it: eleven
+characters of `A-Z a-z 0-9 _ -`, anything else is a contract error. A plugin
+cannot hand over a file (`local_file` is refused, the same line
+`resolve_source` draws).
+
+`null` means "this item has no video". The app also finds videos for songs
+from **other** providers: it searches your plugin with the song's artist and
+title, weighs the rows against the song (a live take, a cover, another song
+are left out and counted) and asks `resolve_video` for the best few. So your
+`search` rows should name the song, not the video: take `(Official Video)`
+and the artist prefix off the title.
+
+YouTube's player has rules — it stays on screen while it plays, nothing is
+laid over it, it is never smaller than 200×200 — and the **app** keeps them;
+the plugin only answers "which video".
+
+With `video` and **without** `stream`, the plugin is a video service: its
+tracks have no sound of their own, and the video is what plays.
 
 ### Raising an error
 
@@ -436,7 +477,8 @@ to `PLATFORMS` doesn't raise `api`. The move from api 1 → 2 was of the second
 kind: where the plugin runs changed. So was api 2 → 3 (D-076): the manifest
 gained a **required** field (`artwork`), and an api 2 manifest doesn't have
 it — an optional field would have left "gives no covers" and "was written
-before covers" looking the same. api 3 → 4 (D-078) did the same for `lyrics`.
+before covers" looking the same. api 3 → 4 (D-078) did the same for `lyrics`,
+and api 4 → 5 (D-086) for `video`.
 
 ---
 

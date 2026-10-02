@@ -33,7 +33,9 @@ arch=('x86_64')
 url='https://github.com/headshell/headshell'
 license=('MIT' 'Apache-2.0')
 depends=('webkit2gtk-4.1' 'gtk3' 'alsa-lib' 'hicolor-icon-theme')
-optdepends=('headshell-cli-bin: command line interface')
+optdepends=('headshell-cli-bin: command line interface'
+            'gst-plugins-good: local music videos (D-086)'
+            'gst-libav: local music videos in H.264 (D-086)')
 provides=("headshell=$pkgver")
 conflicts=('headshell')
 # The binary comes from upstream; `makepkg` must not `strip` it again. Without

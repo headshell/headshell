@@ -5835,3 +5835,105 @@ out), with a snapshot.
 **Verification:** the §3.9 container with a home whose Music folder held two songs: the default folder
 listed; a folder added through the dialog (3 songs after the automatic check), taken off (2 songs), the
 choice written each time.
+
+## D-086 — Music or its video: the suitcase lid, YouTube's own player, and a provider for each part
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** The user asked for a music/video switch: pressing it closes the turntable like a suitcase
+record player's lid and the song goes on from the same second as a video, and back again; local video files
+and every plugin able to give videos; a YouTube plugin that plays through YouTube's official IFrame player
+instead of yt-dlp (lawful, and the artist is paid the usual way); the plugin api raised so a plugin is asked
+whether it gives videos; and a provider chosen apart for music and for video, both following a main provider
+until picked apart. PLAN §1.4 said "video is out of scope — if needed, it is discussed as a separate
+provider"; this is that discussion. Asked during planning, the user chose: a YouTube track on the turntable
+view **keeps a small window on the turntable** (YouTube's rules forbid hiding the player); search through
+**InnerTube**, keyless; and when the player is left during a video, **both** behaviours, chosen in settings.
+When the measurements below forced a choice, the user picked **`tauri-plugin-localhost`** and **a local
+streaming server** for files.
+
+**Decision:**
+
+1. **A video is a surface, not a track** (`video.rs`, `Player`). The listen is the same listen, the queue the
+   same queue; what changes is who makes the sound — the audio engine (`Surface::Audio`) or the shell's video
+   player (`Surface::Video`), whose reports (`video_report`) are the clock then. `show_video(source, provider,
+   at_ms)` pauses the engine where it is; `show_audio(at_ms)` opens the track again at the video's second
+   (the engine learned to start at a position — the first seek in the project: the container's coarse seek,
+   the slice's `offset_ms` added to the position, not to the time heard). The listen counts the engine's
+   segments, the ones a jump left behind (`carried_ms`) and the video's played time; a jump in the video is
+   not played time. A video that ends ends the track (`video_ended`).
+2. **Sources are a closed set** (`VideoSource`): `local_file` (only the local provider; a plugin's is a
+   contract violation, the line `resolve_source` draws) and `youtube` (an 11-character id, checked before a
+   shell sees it). A kind needs the shells' support and a CSP line, so the set grows with them.
+3. **A track's own video comes first** — a video file is its own; a plugin item with one is its own — whoever
+   is chosen for videos; otherwise the video provider is searched with the song's artist and title, the rows
+   weighed with the identity chain's fuzzy score **without the duration** (a clip is longer than its song) at
+   a floor of 0.82 (measured: 0.72 let the artist's other song in), the duration breaking ties, up to three
+   candidates resolved. `VideoPlan` counts the rows that are not the song and the ones without a video (K9);
+   "no provider shows videos" is an error, "none found" an empty plan.
+4. **Tracks that are videos only:** a provider with `VIDEO` and without `STREAM` (YouTube), and a local file
+   whose sound the core cannot decode (Opus in a `.webm`) — the video is its sound. A shell that cannot show
+   videos (the CLI, the TUI: `Player::set_shows_video(false)`, the default) passes them by, counted
+   (`PlayReport.video_only`); the desktop shows them. Read-ahead skips them.
+5. **Roles** (`Role::{Main, Music, Video}`, `preferences.json`: `play_from` stays the main one's key,
+   `music_from`, `video_from`). Music and video follow the main provider until chosen apart — moving the
+   main one moves them; the video role skips a main provider that shows no videos for the first that does.
+   The play box searches the music role. `headshell provider use <name> --for main|music|video`,
+   `headshell provider follow <role>`, `headshell video "<Artist - Title>" | --file <path>`.
+6. **Plugin api 4 → 5:** `video` is a **required** yes-or-no in the manifest (the D-076/D-078 precedent:
+   "gives none" and "written before videos" must not look the same); `true` requires `resolve_video(id)`.
+   `soundcloud` 0.5.0 and `ytmusic` 0.7.0 say `false`; `youtube` 0.1.0 is new: InnerTube's videos filter
+   (artist and length as fields), the "(Official Video)" labels and the artist prefix taken off the title,
+   the thumbnail as the cover, no yt-dlp.
+7. **YouTube's rules are kept by the window:** the player stays on screen while it plays (never behind
+   another view), nothing lies over it (the video layer is above every layer, menus and notices included),
+   never under 200 × 200. Its own controls are off; the app's play button speaks to it with `postMessage`
+   alone — **the IFrame API's script is not loaded**: every script in the page can reach the app
+   (`withGlobalTauri`), and none may come from another origin.
+8. **Served from `http://localhost:<port>/`** (`localhost.rs`, `tauri-plugin-localhost` pinned to 2.3 — 2.4
+   moved Tauri and 478 lock lines). Measured: from `tauri://localhost` YouTube's player says "Error 153" (a
+   custom scheme sends no `Referer`); from `http://127.0.0.1:<port>/` "Error 150" for every video tried; from
+   `http://localhost:<port>/` it plays. The server listens on 127.0.0.1 only; the port is picked at start.
+   Tauri lets such a page call **no** app command without a grant: the commands became an ACL manifest
+   (`command_names.rs`, read by `build.rs` and `main.rs`), granted to that exact address at startup
+   (`tests/acl_contract.rs` keeps the list and `generate_handler!` the same).
+9. **Local files are served by the shell** (`video_server.rs`, `tiny_http` — already in the tree through the
+   plugin): Tauri's asset protocol answered correctly (206, `video/mp4`) and WebKitGTK's media player still
+   failed with "FormatError" on the custom scheme. Only the file the core shows, under a 128-bit token,
+   ranges supported; showing another replaces it. Playing them needs GStreamer's good plugins (and libav for
+   H.264): recommended by the `.deb`/`.rpm`, optional for the AUR packages.
+10. **The window:** a *music · video* switch beside the track's facts. Video: the arm lifts, the record stops,
+    the lid — tolex, a handle, two latches, hinged at the top, `motion.js`'s new `rotateX` with its own depth —
+    swings down with a little give, and the video appears on its inside. Music: the reverse. A video-only
+    track on *music* shows its video in a corner of the plinth while the record — scaled aside — turns. One
+    player in one fixed layer, laid over a slot each frame (the lid's screen, the plinth's corner, the
+    window's corner), never moved in the page (an iframe moved reloads). Settings → *when you leave a video*:
+    **back to the music** (default; a video-only track pauses) or **small window** (356 × 200, the notices
+    step aside). Sources → *your main source*, then *music* and *videos*, each with *same as your main
+    source*.
+11. **Music videos can be turned off** (the user's follow-up): settings → *music videos*, a window-only
+    choice in `ui.json` (`videos_off`) like the debug mode. Off, the window behaves as if they did not
+    exist — no switch, no video settings, no *videos* source, sources that only show videos left out of the
+    lists — and the player passes a video-only track by as the CLI does (`set_shows_video(false)`, kept
+    for the next launch). Turned off during a video: one with music hands the sound back to it, one that is
+    all its track has is passed by.
+12. **Settings in groups** (the user's follow-up, "for the settings to come"): *listening* (music videos,
+    when you leave a video), *internet* (look things up online), *advanced* (debug mode, still last). One
+    card per group, a row per choice, a hairline between rows — a grouped list, so a new setting joins its
+    group as a row instead of adding a card.
+
+**Testing:** the core: ids' shape, ranking (the song kept, the rest counted, a live take and the artist's
+other song refused), roles following and chosen apart, `video_for` (own first, search, no provider), the
+video-only clock (reports, a jump not counted, the listen), passing videos by without a screen, the plugin
+contract (`resolve_video`: a good id, a bad one, a file, an unknown kind; `video` required), the local
+provider's videos (H.264+AAC, VP9+Opus, an `.mp4` without a picture — `fixtures/video/`), the music going on
+from a video's second on a real device. The CLI: roles, `video` (a file's own, a song through a plugin),
+snapshots. The desktop: the video server (ranges, the token, nothing after hiding), `video.js`'s pure parts in
+QuickJS, the ACL list. The plugins, live, against a local mirror of the catalog: youtube 2/2, ytmusic 7/7,
+soundcloud 6/6.
+
+**Verification:** the §3.9 container (WebKitGTK 2.54.0, Xvfb, PulseAudio): a local song switched to its
+YouTube video (the lid shut, the video playing on it) and back (the lid opening, the music at the video's
+second); a local video file on the lid through the server; leaving the player both ways (back to the music;
+the corner window); a YouTube track on *music* in the plinth's corner, then switched to the lid without the
+player reloading; pausing a video from the player bar; the roles in sources.

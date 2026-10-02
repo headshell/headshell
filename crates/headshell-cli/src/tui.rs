@@ -329,7 +329,10 @@ async fn pick(
         }
     };
     if play {
-        let player = live.session().player_from_items(&registry, items).await?;
+        let player = live
+            .session()
+            .player_from_items(&registry, items, false)
+            .await?;
         live.replace_player(player);
         Ok(Some(format!("playing {what}")))
     } else {
@@ -937,6 +940,7 @@ mod tests {
                 chosen: false,
                 instant: true,
                 missing: None,
+                follows_main: true,
             },
             sections: vec![SuggestSection {
                 provider: ProviderId::new("echo"),

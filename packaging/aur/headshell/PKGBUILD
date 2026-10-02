@@ -78,7 +78,9 @@ check() {
 package_headshell() {
   pkgdesc='Provider-independent music listening layer (desktop app)'
   depends=('webkit2gtk-4.1' 'gtk3' 'alsa-lib' 'hicolor-icon-theme')
-  optdepends=('headshell-cli: command line interface')
+  optdepends=('headshell-cli: command line interface'
+              'gst-plugins-good: local music videos (D-086)'
+              'gst-libav: local music videos in H.264 (D-086)')
 
   cd "$_srcdir"
   install -Dm755 "target/release/headshell-desktop" "$pkgdir/usr/bin/headshell-desktop"

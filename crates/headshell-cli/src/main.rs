@@ -92,6 +92,25 @@ impl Switch {
     }
 }
 
+/// A provider's role (D-086) — a clap ValueEnum; the core says
+/// [`session::Role`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RoleArg {
+    Main,
+    Music,
+    Video,
+}
+
+impl RoleArg {
+    const fn to_role(self) -> session::Role {
+        match self {
+            Self::Main => session::Role::Main,
+            Self::Music => session::Role::Music,
+            Self::Video => session::Role::Video,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Import a data export archive (a zip or an extracted directory).
@@ -214,6 +233,20 @@ enum Command {
         /// The text typed so far.
         query: String,
     },
+    /// The videos for a song, from the provider chosen for videos (D-086).
+    ///
+    /// A file's own video first, when it is one; otherwise the video provider
+    /// is searched with the song's artist and title, and the rows that are
+    /// it are listed, best first — what the desktop's music/video switch
+    /// shows.
+    Video {
+        /// `Artist - Title`.
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        query: Option<String>,
+        /// An audio or video file instead of a query.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
     /// Play a local track.
     Play {
         /// The search text for finding the track to play.
@@ -324,9 +357,22 @@ enum ProviderCommand {
     /// The others are asked only when it finds nothing. The choice is kept
     /// in the data directory; the desktop's providers section makes the same
     /// choice.
+    ///
+    /// Since D-086 this is the **main** provider: music and video follow it
+    /// until each is chosen on its own with `--for`.
     Use {
         /// The provider name (`local`, a server's name, a plugin's name).
         name: String,
+        /// The role to give it: `music` (what the play box searches) or
+        /// `video` (where a song's video is found); `main` when left out.
+        #[arg(long = "for", value_enum, value_name = "ROLE")]
+        role: Option<RoleArg>,
+    },
+    /// Let music or video follow the main provider again (D-086); for
+    /// `main`, forget the choice — the first that can play is used.
+    Follow {
+        #[arg(value_enum)]
+        role: RoleArg,
     },
 }
 
@@ -632,10 +678,22 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                     let report = session.test_provider(&registry, &id).await?;
                     render(cli.json, &report, || output::provider_test(&report))
                 }
-                ProviderCommand::Use { name } => {
+                ProviderCommand::Use { name, role: None } => {
                     let id = ProviderId::new(name.clone());
                     let report = session.set_play_from(&registry, &id)?;
                     render(cli.json, &report, || output::play_from(&report.play_from))
+                }
+                ProviderCommand::Use {
+                    name,
+                    role: Some(role),
+                } => {
+                    let id = ProviderId::new(name.clone());
+                    let report = session.set_role(&registry, role.to_role(), Some(&id))?;
+                    render(cli.json, &report, || output::roles(&report.roles))
+                }
+                ProviderCommand::Follow { role } => {
+                    let report = session.set_role(&registry, role.to_role(), None)?;
+                    render(cli.json, &report, || output::roles(&report.roles))
                 }
                 ProviderCommand::Scan { if_stale } => {
                     let report = if *if_stale {
@@ -760,6 +818,17 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
             let registry = provider::default_registry(session.config())?;
             let report = session.suggest(&registry, query).await?;
             render(cli.json, &report, || output::suggest(&report))
+        }
+        Command::Video { query, file } => {
+            let registry = provider::default_registry(session.config())?;
+            // clap asks for one of the two; an empty query is the core's to
+            // refuse, with its stage.
+            let target = match file {
+                Some(path) => session::VideoTarget::File(path.clone()),
+                None => session::VideoTarget::Query(query.clone().unwrap_or_default()),
+            };
+            let report = session.video_report(&registry, target).await?;
+            render(cli.json, &report, || output::video(&report))
         }
         Command::Play {
             query,

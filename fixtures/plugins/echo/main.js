@@ -1,5 +1,5 @@
 // The test plugin: the smallest example that implements the plugin contract
-// (api 4) **in full**. It never goes online and answers from a fixed catalog.
+// (api 5) **in full**. It never goes online and answers from a fixed catalog.
 //
 // There is no misbehaving-plugin act here — the timeout, throwing, unpermitted
 // network and missing export tests write their own small scripts. This file
@@ -38,11 +38,14 @@ export function health() {
   };
 }
 
+// Every word of the query must be in the artist or the title: "ezhel" finds
+// the artist, "ezhel geceler" the song — the app searches videos that way.
 export function search(query, limit) {
-  const needle = fold(String(query));
-  return CATALOG.filter(
-    (track) => fold(track.artist).includes(needle) || fold(track.title).includes(needle),
-  ).slice(0, limit);
+  const words = fold(String(query)).split(/\s+/).filter((word) => word !== "");
+  return CATALOG.filter((track) => {
+    const text = `${fold(track.artist)} ${fold(track.title)}`;
+    return words.length > 0 && words.every((word) => text.includes(word));
+  }).slice(0, limit);
 }
 
 export function resolve_source(id) {
@@ -84,4 +87,16 @@ export function lyrics(id) {
     synced: "[00:01.00]a made-up first line\n[00:04.50]and a second one",
     attribution: "Source: the echo test plugin",
   };
+}
+
+// api 5: the manifest says `"video": true`, so this export is required. The
+// item's video, as a source the app's own player shows: a YouTube video id
+// (the app embeds YouTube's player and never downloads anything). `null`
+// means "this item has no video". The id is made up — it has the shape, not
+// a video behind it.
+export function resolve_video(id) {
+  if (id !== "track-1") {
+    return null;
+  }
+  return { kind: "youtube", video_id: "echoTrack01" };
 }

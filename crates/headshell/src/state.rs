@@ -66,11 +66,15 @@ impl Core {
     /// the registered server file or `preferences.json` is corrupt,
     /// `HEADSHELL_ONLINE` holds anything but `1` or `0`, or the cover or
     /// lyrics cache cannot be opened.
-    pub fn open(config: Config) -> headshell_core::Result<Self> {
+    pub fn open(config: Config, shows_video: bool) -> headshell_core::Result<Self> {
         let session = Session::open(config)?;
         let lookup = session.online_choice()?.mode;
         let registry = headshell_core::provider::default_registry(session.config())?;
-        let player = Player::new(registry.clone());
+        let mut player = Player::new(registry.clone());
+        // The window shows videos unless they are turned off (D-086); every
+        // player that replaces this one keeps it
+        // (`LiveSession::replace_player`).
+        player.set_shows_video(shows_video);
         let mut live = LiveSession::new(session, player);
         live.start_artwork(lookup)?;
         live.start_lyrics()?;
@@ -148,6 +152,8 @@ pub struct AppState {
     themes: ThemeStore,
     /// The debug mode (D-083) — the interface's own choice, beside the theme.
     debug: DebugSwitch,
+    /// Music videos (D-086): the window's choices and the file server.
+    video: crate::video::VideoDesk,
 }
 
 impl AppState {
@@ -156,12 +162,19 @@ impl AppState {
         jobs: mpsc::UnboundedSender<Job>,
         themes: ThemeStore,
         debug: DebugSwitch,
+        video: crate::video::VideoDesk,
     ) -> Self {
         Self {
             jobs,
             themes,
             debug,
+            video,
         }
+    }
+
+    #[must_use]
+    pub const fn video(&self) -> &crate::video::VideoDesk {
+        &self.video
     }
 
     #[must_use]

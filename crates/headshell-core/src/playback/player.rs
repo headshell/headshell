@@ -13,11 +13,14 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result};
 use crate::ids::{CanonicalId, ProviderId, ProviderTrackId};
 use crate::model::{Listen, ListenSource, PlayRule, TrackRef};
-use crate::provider::{AudioSource, Provider, ProviderRegistry};
+use crate::provider::{AudioSource, Capabilities, Provider, ProviderRegistry};
+use crate::video::{VideoNow, VideoSource};
 
 use super::anchor::{PlayState, PlaybackAnchor};
 use super::prefetch;
@@ -43,8 +46,58 @@ struct NowPlaying {
     #[cfg(feature = "audio")]
     seq: u64,
     /// The address it plays from: kept for "previous" and a replay (D-077).
+    /// `None` for a track that is a video only (D-086): the engine never
+    /// opens it.
     #[cfg(feature = "audio")]
-    source: AudioSource,
+    source: Option<AudioSource>,
+    /// Time heard before the engine's present segment (D-086): a segment
+    /// left behind by a jump, and the video's share. The listen adds it.
+    carried_ms: u64,
+}
+
+/// Who makes the sound of the playing track (D-086).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    /// The core's audio engine.
+    Audio,
+    /// The shell's video player; the engine waits, paused.
+    Video,
+}
+
+/// A video being shown, with the clock its player reports (D-086).
+#[derive(Debug, Clone)]
+struct VideoShown {
+    now: VideoNow,
+    position_ms: u64,
+    state: PlayState,
+    duration_ms: Option<u64>,
+    /// When the last report came, by the monotonic clock: what the position
+    /// is carried forward from, and what tells a jump from playing.
+    reported_at: std::time::Instant,
+    /// Heard while shown, from the reports.
+    played_ms: u64,
+}
+
+/// How far ahead of the wall clock a report may move and still count as
+/// played rather than a jump: the player reports about once a second, and
+/// its clock and ours tick apart.
+const VIDEO_REPORT_SLACK_MS: u64 = 1_500;
+
+/// Taking the sound back from a video, a gap smaller than this is not worth
+/// opening the track again for (D-086): the music goes on from where it
+/// paused.
+#[cfg(feature = "audio")]
+const SEEK_SLACK_MS: u64 = 1_500;
+
+/// The error for a video call while nothing plays.
+fn nothing_plays() -> Error {
+    Error::new(
+        Stage::VideoPlayback,
+        ErrorKind::InvalidInput {
+            detail: "nothing is playing".to_owned(),
+        },
+    )
 }
 
 /// The player.
@@ -82,6 +135,17 @@ pub struct Player {
     /// How each queued track and its artist were listened to, as the
     /// playing session read it from the history (D-077).
     history: std::collections::HashMap<ProviderTrackId, crate::library::ListeningProfile>,
+    /// The video being shown (D-086); `None`: the engine makes the sound.
+    video: Option<VideoShown>,
+    /// The user watches rather than listens (D-086): a track started now
+    /// opens paused, and waits for the shell to show its video.
+    video_mode: bool,
+    /// Can the shell show videos (D-086)? Off: a track that is a video only
+    /// is passed by.
+    shows_video: bool,
+    /// Tracks passed by because they are videos only and nothing here can
+    /// show them — counted, not dropped silently (K9).
+    video_only_skipped: usize,
 }
 
 impl std::fmt::Debug for Player {
@@ -115,6 +179,10 @@ impl Player {
             refreshing: Vec::new(),
             habits: super::prefetch::Habits::default(),
             history: std::collections::HashMap::new(),
+            video: None,
+            video_mode: false,
+            shows_video: false,
+            video_only_skipped: 0,
         }
     }
 
@@ -148,18 +216,39 @@ impl Player {
         let Some(now) = &self.now_playing else {
             return false;
         };
+        self.rule.counts(self.heard_ms(now), self.duration_of(now))
+    }
+
+    /// How long the track was heard: by the engine's present segment, by the
+    /// ones a jump left behind, and by its video (D-086).
+    fn heard_ms(&self, now: &NowPlaying) -> u64 {
         #[cfg(feature = "audio")]
-        let (played, duration) = self.engine.as_ref().map_or((0, None), |engine| {
-            (
-                engine
-                    .played_ms_of(now.seq)
-                    .unwrap_or_else(|| engine.position_ms()),
-                engine.duration_of(now.seq).or(now.item.track.duration_ms),
-            )
-        });
+        let engine = match (&self.engine, &now.source) {
+            (Some(engine), Some(_)) => engine
+                .played_ms_of(now.seq)
+                .unwrap_or_else(|| engine.played_ms_now()),
+            _ => 0,
+        };
         #[cfg(not(feature = "audio"))]
-        let (played, duration) = (0, now.item.track.duration_ms);
-        self.rule.counts(played, duration)
+        let engine = 0;
+        let video = self.video.as_ref().map_or(0, |video| video.played_ms);
+        now.carried_ms.saturating_add(engine).saturating_add(video)
+    }
+
+    /// The track's whole length: the engine's reading of the container
+    /// first — the catalog is fed from tags and may not know it — then the
+    /// video player's, then the catalog's.
+    fn duration_of(&self, now: &NowPlaying) -> Option<u64> {
+        #[cfg(feature = "audio")]
+        let engine = match (&self.engine, &now.source) {
+            (Some(engine), Some(_)) => engine.duration_of(now.seq),
+            _ => None,
+        };
+        #[cfg(not(feature = "audio"))]
+        let engine = None;
+        engine
+            .or_else(|| self.video.as_ref().and_then(|video| video.duration_ms))
+            .or(now.item.track.duration_ms)
     }
 
     /// Reads the queue ahead with `prefetcher` from now on (D-077): a playing
@@ -167,8 +256,10 @@ impl Player {
     /// resolved for one queue is not resolved again for the next.
     #[cfg(feature = "audio")]
     pub(crate) fn attach_prefetcher(&mut self, prefetcher: Prefetcher) {
-        if let Some(now) = &self.now_playing {
-            prefetcher.remember(&now.item.id, &now.source);
+        if let Some(now) = &self.now_playing
+            && let Some(source) = &now.source
+        {
+            prefetcher.remember(&now.item.id, source);
         }
         self.prefetch = Some(prefetcher);
         self.planned = None;
@@ -219,9 +310,12 @@ impl Player {
         &mut self.queue
     }
 
-    /// The current state.
+    /// The current state. While a video is shown, its player's (D-086).
     #[must_use]
     pub fn state(&self) -> PlayState {
+        if let Some(video) = &self.video {
+            return video.state;
+        }
         #[cfg(feature = "audio")]
         {
             if let Some(engine) = &self.engine {
@@ -229,6 +323,28 @@ impl Player {
             }
         }
         PlayState::Stopped
+    }
+
+    /// Who makes the sound now (D-086).
+    #[must_use]
+    pub fn surface(&self) -> Surface {
+        if self.video.is_some() {
+            Surface::Video
+        } else {
+            Surface::Audio
+        }
+    }
+
+    /// The video being shown (D-086).
+    #[must_use]
+    pub fn video_now(&self) -> Option<&VideoNow> {
+        self.video.as_ref().map(|video| &video.now)
+    }
+
+    /// Is the user watching rather than listening (D-086)?
+    #[must_use]
+    pub fn video_mode(&self) -> bool {
+        self.video_mode
     }
 
     /// The single representation of state (D-015). The consumer computes the
@@ -243,6 +359,22 @@ impl Player {
             .map_or((0, None), |e| (e.position_ms(), e.duration_ms()));
         #[cfg(not(feature = "audio"))]
         let (position_ms, duration_ms) = (0, None);
+        // A video's clock is its player's: the last report, carried forward
+        // while it plays (D-086).
+        let (position_ms, duration_ms) = match &self.video {
+            Some(video) => {
+                let since = if video.state.advances() {
+                    u64::try_from(video.reported_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+                } else {
+                    0
+                };
+                (
+                    video.position_ms.saturating_add(since),
+                    video.duration_ms.or(duration_ms),
+                )
+            }
+            None => (position_ms, duration_ms),
+        };
 
         PlaybackAnchor {
             track: self
@@ -319,22 +451,80 @@ impl Player {
 
     /// Plays the current track in the queue.
     ///
+    /// A track that is a video only (D-086) is shown when the shell can show
+    /// videos ([`Self::set_shows_video`]); one that cannot — the CLI, the
+    /// TUI — passes it by, counted in [`Self::video_only_skipped`], and plays
+    /// the next one.
+    ///
     /// # Errors
     /// If the queue is empty, the provider cannot be found or the audio pipeline
-    /// cannot be set up.
+    /// cannot be set up; or every track left is a video only and nothing here
+    /// can show one.
     pub async fn start_current(&mut self) -> Result<()> {
-        let item = self.queue.current().cloned().ok_or_else(|| {
-            Error::new(
-                Stage::PlaybackResolve,
-                ErrorKind::NotFound {
-                    what: "a track to play in the queue".to_owned(),
-                },
-            )
-        })?;
-
         // Close the playing track: the half-finished listen record should be
         // produced.
         self.finish_current_listen();
+        let mut passed = 0;
+        loop {
+            let item = self.queue.current().cloned().ok_or_else(|| {
+                Error::new(
+                    Stage::PlaybackResolve,
+                    ErrorKind::NotFound {
+                        what: "a track to play in the queue".to_owned(),
+                    },
+                )
+            })?;
+            let video_only = self.provider_has(&item.id, Capabilities::VIDEO)
+                && !self.provider_has(&item.id, Capabilities::STREAM);
+            if !video_only || self.shows_video {
+                return self.start_item(item, video_only).await;
+            }
+            self.video_only_skipped += 1;
+            passed += 1;
+            if passed >= self.queue.len() || self.queue.next().is_none() {
+                self.stop();
+                return Err(Error::new(
+                    Stage::PlaybackResolve,
+                    ErrorKind::Unsupported {
+                        provider: item.id.provider.to_string(),
+                        what: "playing a video here — its tracks are videos only, and they play in the app's window".to_owned(),
+                        capabilities: self
+                            .providers
+                            .get(&item.id.provider)
+                            .map(|provider| provider.info().capabilities.describe())
+                            .unwrap_or_default(),
+                    },
+                ));
+            }
+        }
+    }
+
+    /// Videos only passed by because nothing here can show them (D-086).
+    #[must_use]
+    pub fn video_only_skipped(&self) -> usize {
+        self.video_only_skipped
+    }
+
+    /// Can the shell show videos (D-086)? The desktop can; with it off — the
+    /// default — a track that is a video only is passed by, and a sound that
+    /// cannot be decoded is the error it is.
+    pub fn set_shows_video(&mut self, shows: bool) {
+        self.shows_video = shows;
+    }
+
+    /// Can the shell show videos?
+    #[must_use]
+    pub fn shows_video(&self) -> bool {
+        self.shows_video
+    }
+
+    /// Starts one track: its video when that is all there is, its sound
+    /// otherwise.
+    async fn start_item(&mut self, item: QueueItem, video_only: bool) -> Result<()> {
+        // A track that is a video only never opens the engine (D-086).
+        if video_only {
+            return self.start_video_only(item).await;
+        }
 
         // Read ahead (D-077): the track may be ready, or being made ready at
         // this moment — then it is waited for, not resolved a second time.
@@ -361,7 +551,303 @@ impl Player {
         if let Some(prefetch) = &self.prefetch {
             prefetch.remember(&item.id, &source);
         }
-        self.start_source(&source, item)?;
+        match self.start_source(&source, item.clone()) {
+            Ok(()) => Ok(()),
+            // A sound the core cannot decode — Opus in a `.webm` — is not the
+            // end of a video: shown alone, the video is the sound (D-086).
+            // When it has none either, the decoding error is the answer.
+            Err(err)
+                if err.stage() == Stage::PlaybackDecode
+                    && self.shows_video
+                    && self.provider_has(&item.id, Capabilities::VIDEO) =>
+            {
+                match self.start_video_only(item).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            error = %err.chain_text().replace('\n', " "),
+                            "the sound could not be decoded; the video plays alone"
+                        );
+                        Ok(())
+                    }
+                    Err(_) => Err(err),
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Does the provider of `id` have `capability`?
+    fn provider_has(&self, id: &ProviderTrackId, capability: Capabilities) -> bool {
+        self.providers
+            .get(&id.provider)
+            .is_some_and(|provider| provider.info().capabilities.contains(capability))
+    }
+
+    /// Starts a track whose video is all there is (D-086): the engine stays
+    /// shut, the shell's player makes the sound and reports its clock.
+    async fn start_video_only(&mut self, item: QueueItem) -> Result<()> {
+        let provider = self.providers.get(&item.id.provider).ok_or_else(|| {
+            Error::new(
+                Stage::VideoLookup,
+                ErrorKind::NotFound {
+                    what: format!("provider {:?}", item.id.provider.as_str()),
+                },
+            )
+        })?;
+        let source = provider.resolve_video(&item.id).await?.ok_or_else(|| {
+            Error::new(
+                Stage::VideoLookup,
+                ErrorKind::NotFound {
+                    what: format!("a video for {}", item.track.display_name()),
+                },
+            )
+        })?;
+        source.check()?;
+        #[cfg(feature = "audio")]
+        {
+            self.engine = None;
+            self.prefetched = None;
+            self.refreshing.clear();
+        }
+        self.video = Some(VideoShown {
+            now: VideoNow {
+                source,
+                provider: item.id.provider.clone(),
+                only: true,
+            },
+            position_ms: 0,
+            state: PlayState::Buffering,
+            duration_ms: item.track.duration_ms.filter(|ms| *ms > 0),
+            reported_at: std::time::Instant::now(),
+            played_ms: 0,
+        });
+        self.now_playing = Some(NowPlaying {
+            provider: item.id.provider.clone(),
+            canonical_id: None,
+            started_at: jiff::Timestamp::now(),
+            item,
+            #[cfg(feature = "audio")]
+            seq: 0,
+            #[cfg(feature = "audio")]
+            source: None,
+            carried_ms: 0,
+        });
+        Ok(())
+    }
+
+    /// Hands the sound to the shell's video player (D-086): the engine
+    /// pauses where it is, and the video's reports are the clock from now
+    /// on. `at_ms` is where the shell starts the video — the music's
+    /// position, as the anchor said.
+    ///
+    /// # Errors
+    /// If nothing plays, or the source is not one a shell can show.
+    pub fn show_video(
+        &mut self,
+        source: VideoSource,
+        provider: ProviderId,
+        at_ms: u64,
+    ) -> Result<()> {
+        source.check()?;
+        let Some(now) = &self.now_playing else {
+            return Err(nothing_plays());
+        };
+        #[cfg(feature = "audio")]
+        let only = now.source.is_none();
+        #[cfg(not(feature = "audio"))]
+        let only = true;
+        let duration_ms = self
+            .video
+            .as_ref()
+            .and_then(|video| video.duration_ms)
+            .or(now.item.track.duration_ms);
+        #[cfg(feature = "audio")]
+        if let Some(engine) = &self.engine {
+            engine.pause();
+        }
+        // A video shown before for this track (a refusal moved to the next
+        // match) leaves its heard time with the track.
+        if let (Some(old), Some(now)) = (self.video.take(), self.now_playing.as_mut()) {
+            now.carried_ms = now.carried_ms.saturating_add(old.played_ms);
+        }
+        self.video = Some(VideoShown {
+            now: VideoNow {
+                source,
+                provider,
+                only,
+            },
+            position_ms: at_ms,
+            state: PlayState::Buffering,
+            duration_ms,
+            reported_at: std::time::Instant::now(),
+            played_ms: 0,
+        });
+        self.video_mode = true;
+        Ok(())
+    }
+
+    /// The video player's clock (D-086), reported about once a second and
+    /// at every change. What it played counts toward the listen; a jump
+    /// does not.
+    ///
+    /// # Errors
+    /// If no video is shown — a report that came too late, after the track
+    /// moved on — so the shell can drop it.
+    pub fn video_report(
+        &mut self,
+        position_ms: u64,
+        state: PlayState,
+        duration_ms: Option<u64>,
+    ) -> Result<()> {
+        let Some(video) = self.video.as_mut() else {
+            return Err(Error::new(
+                Stage::VideoPlayback,
+                ErrorKind::InvalidInput {
+                    detail: "no video is shown; the report is late".to_owned(),
+                },
+            ));
+        };
+        if video.state.advances() {
+            let wall = u64::try_from(video.reported_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let moved = position_ms.saturating_sub(video.position_ms);
+            if position_ms >= video.position_ms
+                && moved <= wall.saturating_add(VIDEO_REPORT_SLACK_MS)
+            {
+                video.played_ms = video.played_ms.saturating_add(moved);
+            }
+        }
+        video.position_ms = position_ms;
+        video.state = state;
+        if let Some(duration) = duration_ms.filter(|ms| *ms > 0) {
+            video.duration_ms = Some(duration);
+        }
+        video.reported_at = std::time::Instant::now();
+        Ok(())
+    }
+
+    /// Takes the sound back from the video (D-086): the music goes on from
+    /// `at_ms` — where the video was. With no video shown, a track that
+    /// waited for one (watching, D-086) just starts.
+    ///
+    /// # Errors
+    /// If nothing plays, or the track has no sound of its own here — its
+    /// video is all there is.
+    pub fn show_audio(&mut self, at_ms: u64) -> Result<()> {
+        let Some(now) = &self.now_playing else {
+            return Err(nothing_plays());
+        };
+        #[cfg(feature = "audio")]
+        let only = now.source.is_none();
+        #[cfg(not(feature = "audio"))]
+        let only = true;
+        if only {
+            return Err(Error::new(
+                Stage::VideoPlayback,
+                ErrorKind::Unsupported {
+                    provider: now.provider.to_string(),
+                    what: format!(
+                        "playing {} as music — its video is all there is",
+                        now.item.track.display_name()
+                    ),
+                    capabilities: self
+                        .providers
+                        .get(&now.provider)
+                        .map(|provider| provider.info().capabilities.describe())
+                        .unwrap_or_default(),
+                },
+            ));
+        }
+        if let (Some(old), Some(now)) = (self.video.take(), self.now_playing.as_mut()) {
+            now.carried_ms = now.carried_ms.saturating_add(old.played_ms);
+        }
+        self.video_mode = false;
+        #[cfg(feature = "audio")]
+        {
+            let here = self
+                .engine
+                .as_ref()
+                .map_or(0, super::engine::AudioEngine::position_ms);
+            if here.abs_diff(at_ms) > SEEK_SLACK_MS
+                && let Err(err) = self.seek(at_ms)
+            {
+                // The music goes on from where it paused rather than not at
+                // all; the jump's failure is said (K9).
+                tracing::warn!(
+                    at_ms,
+                    error = %err.chain_text().replace('\n', " "),
+                    "the music could not move to the video's position; it goes on from where it paused"
+                );
+            }
+            if let Some(engine) = &self.engine {
+                engine.resume();
+            }
+        }
+        #[cfg(not(feature = "audio"))]
+        let _ = at_ms;
+        Ok(())
+    }
+
+    /// The video ran to its end (D-086): the track ended, as if its sound
+    /// had, and the queue moves on. `false`: the queue is over.
+    ///
+    /// A report with no video shown (late, after the track moved on) is
+    /// ignored: `Ok(true)`, nothing changes.
+    ///
+    /// # Errors
+    /// If the next track cannot be played.
+    pub async fn video_ended(&mut self) -> Result<bool> {
+        if self.video.is_none() {
+            return Ok(true);
+        }
+        self.habits.finished += 1;
+        self.finish_current_listen();
+        if self.queue.advance_after_finish().is_some() {
+            self.start_current().await?;
+            return Ok(true);
+        }
+        self.stop();
+        Ok(false)
+    }
+
+    /// Moves the playing music to `at_ms` (D-086): the track is opened again
+    /// there; what was heard before the jump stays with the listen.
+    ///
+    /// # Errors
+    /// If nothing plays from the engine, or the source cannot be opened or
+    /// moved.
+    #[cfg(feature = "audio")]
+    pub fn seek(&mut self, at_ms: u64) -> Result<()> {
+        let Some(now) = &self.now_playing else {
+            return Err(nothing_plays());
+        };
+        let Some(source) = now.source.clone() else {
+            return Err(Error::new(
+                Stage::PlaybackResolve,
+                ErrorKind::InvalidInput {
+                    detail: "the track is a video only; its player moves it".to_owned(),
+                },
+            ));
+        };
+        let (heard, paused) = self.engine.as_ref().map_or((0, false), |engine| {
+            (
+                engine
+                    .played_ms_of(now.seq)
+                    .unwrap_or_else(|| engine.played_ms_now()),
+                engine.state() == PlayState::Paused,
+            )
+        });
+        let engine = super::engine::AudioEngine::open()?;
+        let seq = engine.play_source_at(&source, None, at_ms)?;
+        if paused {
+            engine.pause();
+        }
+        self.engine = Some(engine);
+        self.prefetched = None;
+        self.refreshing.clear();
+        if let Some(now) = self.now_playing.as_mut() {
+            now.carried_ms = now.carried_ms.saturating_add(heard);
+            now.seq = seq;
+        }
         Ok(())
     }
 
@@ -415,9 +901,14 @@ impl Player {
         // playing read-ahead audio would mean playing the wrong track.
         let engine = super::engine::AudioEngine::open()?;
         let seq = engine.play_source_from(&prepared.source, prepared.head.as_deref())?;
+        // Watching (D-086): the track waits, paused, for its video.
+        if self.video_mode {
+            engine.pause();
+        }
         self.engine = Some(engine);
         self.prefetched = None;
         self.refreshing.clear();
+        self.video = None;
 
         self.now_playing = Some(NowPlaying {
             provider: item.id.provider.clone(),
@@ -425,23 +916,29 @@ impl Player {
             started_at: jiff::Timestamp::now(),
             item,
             seq,
-            source: prepared.source.clone(),
+            source: Some(prepared.source.clone()),
+            carried_ms: 0,
         });
         Ok(())
     }
 
-    /// Pauses.
+    /// Pauses. While a video is shown it is the shell's player that pauses
+    /// (D-086); the engine is paused already, and its report says so.
     pub fn pause(&self) {
         #[cfg(feature = "audio")]
-        if let Some(engine) = &self.engine {
+        if self.video.is_none()
+            && let Some(engine) = &self.engine
+        {
             engine.pause();
         }
     }
 
-    /// Resumes.
+    /// Resumes. While a video is shown the shell's player resumes (D-086).
     pub fn resume(&self) {
         #[cfg(feature = "audio")]
-        if let Some(engine) = &self.engine {
+        if self.video.is_none()
+            && let Some(engine) = &self.engine
+        {
             engine.resume();
         }
     }
@@ -449,6 +946,7 @@ impl Player {
     /// Stops playing and closes the listen record.
     pub fn stop(&mut self) {
         self.finish_current_listen();
+        self.video = None;
         #[cfg(feature = "audio")]
         {
             self.engine = None;
@@ -552,7 +1050,8 @@ impl Player {
                     started_at: jiff::Timestamp::now(),
                     item,
                     seq,
-                    source,
+                    source: Some(source),
+                    carried_ms: 0,
                 });
                 self.prefetched = None;
             }
@@ -640,6 +1139,9 @@ impl Player {
                     });
                 }
             }
+            // A track that is a video only has no stream to read ahead
+            // (D-086).
+            plan.retain(|planned| self.provider_has(&planned.item.id, Capabilities::STREAM));
             plan.truncate(prefetch::PLAN_DEPTH);
         }
         let stamp = (
@@ -653,8 +1155,10 @@ impl Player {
             return;
         }
         let prefetch = self.prefetch.get_or_insert_with(Prefetcher::new);
-        if let Some(now) = &self.now_playing {
-            prefetch.remember(&now.item.id, &now.source);
+        if let Some(now) = &self.now_playing
+            && let Some(source) = &now.source
+        {
+            prefetch.remember(&now.item.id, source);
         }
         prefetch.plan(plan, self.providers.clone());
         self.planned = Some(stamp);
@@ -738,15 +1242,10 @@ impl Player {
 
         // The segment's own duration: if a transition happened, the output
         // is already on the next track and `position_ms()` shows that. The
-        // scrobble of the finished track must ask for its own segment (D-024).
-        #[cfg(feature = "audio")]
-        let ms_played = self.engine.as_ref().map_or(0, |engine| {
-            engine
-                .played_ms_of(now_playing.seq)
-                .unwrap_or_else(|| engine.position_ms())
-        });
-        #[cfg(not(feature = "audio"))]
-        let ms_played = 0u64;
+        // scrobble of the finished track must ask for its own segment
+        // (D-024). What a jump left behind, and what its video played, is
+        // heard time too (D-086).
+        let ms_played = self.heard_ms(&now_playing);
 
         // We ask the **engine** for the duration first: the catalog is fed
         // from tags and stays `None` for an untagged file. With the duration
@@ -754,14 +1253,9 @@ impl Player {
         // falls back to the 30 s threshold, and a short track listened to
         // from start to end produced no scrobble (D-008's rule did not
         // change; the data given to it was fixed).
-        #[cfg(feature = "audio")]
-        let duration_ms = self
-            .engine
-            .as_ref()
-            .and_then(|engine| engine.duration_of(now_playing.seq))
-            .or(now_playing.item.track.duration_ms);
-        #[cfg(not(feature = "audio"))]
-        let duration_ms = now_playing.item.track.duration_ms;
+        let duration_ms = self.duration_of(&now_playing);
+        // The video belonged to this track.
+        self.video = None;
 
         if !self.rule.counts(ms_played, duration_ms) {
             tracing::debug!(
@@ -848,6 +1342,162 @@ mod tests {
             id: ProviderTrackId::new(ProviderId::new(provider), id),
             track: TrackRef::new("Artist", "Track"),
         }
+    }
+
+    /// A video service (D-086): it shows videos and plays no sound of its
+    /// own — every track is a video only.
+    struct VideoOnlyProvider;
+
+    impl Provider for VideoOnlyProvider {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: ProviderId::new("tube"),
+                display_name: "Tube".to_owned(),
+                capabilities: Capabilities::SEARCH | Capabilities::VIDEO,
+            }
+        }
+        fn health<'a>(&'a self) -> ProviderFuture<'a, ProviderHealth> {
+            Box::pin(async move {
+                Ok(ProviderHealth {
+                    id: ProviderId::new("tube"),
+                    reachable: true,
+                    track_count: None,
+                    detail: None,
+                })
+            })
+        }
+        fn search<'a>(
+            &'a self,
+            _query: &'a str,
+            _limit: usize,
+        ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn resolve_source<'a>(
+            &'a self,
+            _id: &'a ProviderTrackId,
+        ) -> ProviderFuture<'a, Option<AudioSource>> {
+            Box::pin(async move { Ok(None) })
+        }
+        fn resolve_video<'a>(
+            &'a self,
+            id: &'a ProviderTrackId,
+        ) -> ProviderFuture<'a, Option<VideoSource>> {
+            Box::pin(async move {
+                Ok(Some(VideoSource::Youtube {
+                    video_id: id.id.clone(),
+                }))
+            })
+        }
+    }
+
+    /// A track that is a video only plays without the engine: the video's
+    /// reports are its clock, what they played is its listen, and a jump is
+    /// not played time (D-086).
+    #[tokio::test]
+    async fn a_video_only_track_is_heard_through_its_reports() {
+        let mut player = with_provider(Arc::new(VideoOnlyProvider));
+        player.set_shows_video(true);
+        player
+            .play_items(vec![
+                item("tube", "CCHdMIEGaaM"),
+                item("tube", "5NV6Rdv1a3I"),
+            ])
+            .await
+            .expect("a video-only track starts");
+        assert_eq!(player.surface(), Surface::Video);
+        let now = player.video_now().expect("the video is shown").clone();
+        assert!(now.only, "the video is all the sound there is");
+        assert_eq!(
+            now.source,
+            VideoSource::Youtube {
+                video_id: "CCHdMIEGaaM".to_owned()
+            }
+        );
+        assert_eq!(player.state(), PlayState::Buffering);
+
+        player
+            .video_report(0, PlayState::Playing, Some(3_000))
+            .unwrap();
+        player
+            .video_report(1_000, PlayState::Playing, None)
+            .unwrap();
+        // Played up to the pause: 2.5 s so far.
+        player.video_report(2_500, PlayState::Paused, None).unwrap();
+        // A jump while paused is not time played…
+        player
+            .video_report(40_000, PlayState::Playing, None)
+            .unwrap();
+        // …the playing after it is.
+        player
+            .video_report(41_000, PlayState::Playing, None)
+            .unwrap();
+        let anchor = player.anchor();
+        assert_eq!(anchor.state, PlayState::Playing);
+        assert!(anchor.position_ms >= 41_000, "{anchor:?}");
+        assert_eq!(anchor.duration_ms, Some(3_000));
+
+        // Music cannot take over: there is none.
+        let err = player.show_audio(41_000).unwrap_err();
+        assert_eq!(err.stage(), Stage::VideoPlayback);
+
+        assert!(player.video_ended().await.unwrap(), "the next one starts");
+        let listens = player.take_listens();
+        assert_eq!(listens.len(), 1, "3.5 s heard of a 3 s video pass the rule");
+        assert_eq!(listens[0].ms_played, 3_500);
+        assert_eq!(
+            player.video_now().map(|now| now.source.clone()),
+            Some(VideoSource::Youtube {
+                video_id: "5NV6Rdv1a3I".to_owned()
+            })
+        );
+
+        // The last one ends the queue; a report that comes after is late.
+        assert!(!player.video_ended().await.unwrap());
+        assert_eq!(player.surface(), Surface::Audio);
+        assert!(
+            player
+                .video_report(1_000, PlayState::Playing, None)
+                .is_err()
+        );
+    }
+
+    /// Where no video can be shown — the CLI, the TUI — a video-only track is
+    /// passed by and counted; when nothing else is left, that is the error.
+    #[tokio::test]
+    async fn without_a_screen_a_video_only_track_is_passed_by() {
+        let mut player = with_provider(Arc::new(VideoOnlyProvider));
+        let err = player
+            .play_items(vec![
+                item("tube", "CCHdMIEGaaM"),
+                item("tube", "5NV6Rdv1a3I"),
+            ])
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::PlaybackResolve);
+        assert!(
+            err.chain_text().contains("play in the app's window"),
+            "{}",
+            err.chain_text()
+        );
+        assert_eq!(player.video_only_skipped(), 2);
+        assert_eq!(player.surface(), Surface::Audio);
+    }
+
+    /// A video for a track nothing plays is refused, not kept.
+    #[test]
+    fn a_video_needs_a_playing_track() {
+        let mut player = Player::new(ProviderRegistry::new());
+        let err = player
+            .show_video(
+                VideoSource::Youtube {
+                    video_id: "CCHdMIEGaaM".to_owned(),
+                },
+                ProviderId::new("tube"),
+                0,
+            )
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::VideoPlayback);
     }
 
     #[tokio::test]
@@ -954,9 +1604,10 @@ mod tests {
             #[cfg(feature = "audio")]
             seq: 0,
             #[cfg(feature = "audio")]
-            source: AudioSource::LocalFile {
+            source: Some(AudioSource::LocalFile {
                 path: std::path::PathBuf::from("x"),
-            },
+            }),
+            carried_ms: 0,
         });
         player.finish_current_listen();
         assert!(

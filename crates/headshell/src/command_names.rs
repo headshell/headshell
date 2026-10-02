@@ -1,0 +1,91 @@
+// The names of the window's commands (D-086), in one list for two readers:
+// `build.rs` turns each into an `allow-<name>` permission (the app's ACL
+// manifest), and `main.rs` grants them to the window's page at startup.
+//
+// Why a list at all: the page is served from `http://localhost:<port>/`
+// (`localhost.rs`), and Tauri lets a page that is not the app's own scheme
+// call **no** app command unless a capability grants it — "remote content
+// can never reach custom commands unless an explicit `remote` capability has
+// been configured for them". The grant names the page's exact address, so no
+// other page on the machine gets it.
+//
+// `tests/acl_contract.rs` checks this list against `generate_handler!` in
+// `main.rs`: a command registered but missing here would be refused at the
+// first call, with only the webview's console to say why.
+
+pub const COMMANDS: &[&str] = &[
+    "search",
+    "stats",
+    "sleeve",
+    "sleeve_svg",
+    "import",
+    "resolve",
+    "providers",
+    "provider_use",
+    "provider_test",
+    "provider_scan",
+    "music_dirs",
+    "music_dirs_add",
+    "music_dirs_remove",
+    "servers_list",
+    "server_add",
+    "server_remove",
+    "play",
+    "suggest",
+    "play_items",
+    "queue_add",
+    "queue_add_search",
+    "toggle_pause",
+    "stop",
+    "next",
+    "previous",
+    "jump_to",
+    "set_shuffle",
+    "set_repeat",
+    "provider_roles",
+    "provider_role_set",
+    "video_find",
+    "video_show",
+    "video_media",
+    "video_report",
+    "video_ended",
+    "video_audio",
+    "video_away",
+    "video_away_set",
+    "videos_enabled",
+    "videos_set",
+    "artwork",
+    "artwork_queue",
+    "artwork_shown",
+    "artwork_images",
+    "lyrics",
+    "lyrics_now",
+    "lyrics_view",
+    "lyrics_shift",
+    "prefetch",
+    "prefetch_queue",
+    "plugins",
+    "plugin_approve",
+    "plugin_disable",
+    "plugin_enable",
+    "plugin_forget",
+    "plugin_install",
+    "plugin_catalog",
+    "plugin_update",
+    "plugin_remove",
+    "secrets",
+    "secret_set",
+    "secret_remove",
+    "themes_list",
+    "theme_active",
+    "theme_select",
+    "anchor",
+    "queue",
+    "diag",
+    "diag_text",
+    "environment",
+    "online",
+    "online_set",
+    "debug_mode",
+    "debug_set",
+];

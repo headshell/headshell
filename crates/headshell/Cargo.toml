@@ -36,6 +36,13 @@ headshell-core = { workspace = true, features = ["render-png", "artwork-resize",
 # is limited to `open`/`save`: the dialog **returns** a path, and the side that
 # reads and writes the file is still the core.
 tauri-plugin-dialog = "2"
+# D-086: the page is served from `http://localhost:<port>/`. YouTube's player
+# refuses a page from a custom scheme (it sends no `Referer`: "Error 153").
+# Pinned to 2.3: 2.4 asks for a newer Tauri, and the lock moved 478 lines.
+tauri-plugin-localhost = "~2.3"
+# D-086: serves the local video being shown — WebKitGTK cannot stream media
+# from a custom scheme. Not a new crate: `tauri-plugin-localhost` brings it.
+tiny_http = "0.12"
 
 [dev-dependencies]
 # D-070: `tests/anchor_parity_js.rs` used to run the webview's anchor formula

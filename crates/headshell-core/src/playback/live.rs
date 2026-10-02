@@ -66,6 +66,20 @@ pub struct TickReport {
     /// when no lyrics worker runs (the TUI).
     #[serde(default)]
     pub lyrics_ready: bool,
+    /// Who makes the sound (D-086).
+    #[serde(default = "audio_surface")]
+    pub surface: super::Surface,
+    /// The video being shown, if any (D-086).
+    #[serde(default)]
+    pub video: Option<crate::video::VideoNow>,
+    /// The user watches (D-086): a track that has just started waits,
+    /// paused, for the shell to show its video.
+    #[serde(default)]
+    pub video_mode: bool,
+}
+
+const fn audio_surface() -> super::Surface {
+    super::Surface::Audio
 }
 
 /// The playing session.
@@ -372,8 +386,12 @@ impl LiveSession {
         self.player.stop();
         self.pending.extend(self.player.take_listens());
         let habits = self.player.habits();
+        // Whether the shell can show videos is the shell's, not the queue's
+        // (D-086): a new search keeps it.
+        let shows_video = self.player.shows_video();
         self.player = player;
         self.player.adopt_habits(habits);
+        self.player.set_shows_video(shows_video);
         self.history_seen = None;
         #[cfg(feature = "audio")]
         self.player.attach_prefetcher(self.prefetch.clone());
@@ -445,7 +463,27 @@ impl LiveSession {
             finished,
             artwork_ready,
             lyrics_ready,
+            surface: self.player.surface(),
+            video: self.player.video_now().cloned(),
+            video_mode: self.player.video_mode(),
         })
+    }
+
+    /// The videos for the playing track (D-086), from the video role's
+    /// provider.
+    ///
+    /// # Errors
+    /// If nothing plays, or as [`Session::video_for`].
+    pub async fn video_for_current(&self) -> Result<crate::video::VideoPlan> {
+        let item = self.player.current_item().cloned().ok_or_else(|| {
+            crate::Error::new(
+                crate::diag::Stage::VideoLookup,
+                crate::ErrorKind::NotFound {
+                    what: "a playing track to find a video for".to_owned(),
+                },
+            )
+        })?;
+        self.session.video_for(self.player.providers(), &item).await
     }
 
     /// Closes the session: stops the audio, writes every remaining listen.

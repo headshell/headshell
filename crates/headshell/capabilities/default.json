@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: listening to events, drag and drop, and the file dialog that picks a path. No file system, shell or network permission — the dialog returns a path, and the side that reads and writes that path is the core.",
+  "description": "The main window: listening to events, drag and drop, and the file dialog that picks a path. No file system, shell or network permission — the dialog returns a path, and the side that reads and writes that path is the core. Since D-086 the page is served from a loopback address chosen at startup; `main.rs` grants it these same permissions, and the app's own commands, for that address only (`command_names.rs`).",
   "windows": ["main"],
   "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
 }

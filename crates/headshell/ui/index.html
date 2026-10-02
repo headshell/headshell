@@ -418,19 +418,34 @@
             </div>
           </header>
 
-          <!-- Where the play box searches first (D-080); the others are asked
-               only when it finds nothing. -->
+          <!-- Where the play box searches first (D-080) — the main source since
+               D-086: music and videos come from it too, unless each is picked
+               apart below. The others are asked only when it finds nothing. -->
           <div class="card play-from">
-            <h2 class="section-title">search here first</h2>
+            <h2 class="section-title">your main source</h2>
             <p class="hint">
               When you search, we look here first — and only check your other sources if nothing
-              turns up.
+              turns up. Music and videos come from here too, unless you pick something else below.
             </p>
-            <p class="hint debug-only">The play box and its suggestions search here first; the others are asked only when nothing is found here, and their results are named (D-080).</p>
-            <div id="playFromList" class="play-from-list" role="radiogroup" aria-label="search here first">
+            <p class="hint debug-only">The main role (D-080, D-086): the play box and its suggestions search the music role's provider first; music and video follow the main one until each is chosen apart.</p>
+            <div id="playFromList" class="play-from-list" role="radiogroup" aria-label="your main source">
               <span id="playFromPill" class="play-from-pill" aria-hidden="true" hidden></span>
             </div>
             <p id="playFromMissing" class="warn-note" hidden></p>
+
+            <div class="role-pick">
+              <h3 class="role-title">music</h3>
+              <div id="musicFromList" class="play-from-list" role="radiogroup" aria-label="music from">
+                <span id="musicFromPill" class="play-from-pill" aria-hidden="true" hidden></span>
+              </div>
+            </div>
+            <div class="role-pick video-ui">
+              <h3 class="role-title">videos</h3>
+              <div id="videoFromList" class="play-from-list" role="radiogroup" aria-label="videos from">
+                <span id="videoFromPill" class="play-from-pill" aria-hidden="true" hidden></span>
+              </div>
+              <p id="videoFromNote" class="warn-note" hidden></p>
+            </div>
           </div>
 
           <!-- The music folders (D-085): chosen here, kept by the core; adding or
@@ -669,57 +684,142 @@
             <p class="hint debug-only">Choices this app keeps in its data directory (D-082, D-083). The CLI makes its own, run by run, with flags.</p>
           </header>
 
-          <div class="card setting">
-            <div class="setting-row">
-              <div class="setting-text">
-                <h2 id="onlineTitle" class="setting-title">look things up online</h2>
-                <p id="onlineHint" class="hint">
-                  Find missing album covers and song details on the internet.
-                </p>
-                <p class="hint debug-only">
-                  Covers and canonical identities from MusicBrainz and the Cover Art Archive. Off,
-                  neither is asked: covers come only from where the tracks live.
-                </p>
-              </div>
-              <button
-                id="onlineSwitch"
-                type="button"
-                class="switch"
-                role="switch"
-                aria-checked="false"
-                aria-labelledby="onlineTitle"
-                aria-describedby="onlineHint onlineNote"
-              >
-                <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
-              </button>
-            </div>
-            <p id="onlineNote" class="hint setting-note"></p>
-          </div>
+          <!-- The choices come in groups (D-086 addendum): one card per group,
+               a row per choice, a hairline between rows — the shape a new
+               setting joins without the page growing a card each time. A
+               group is a `settings-group`; a choice is a `setting` with its
+               `setting-row`. -->
 
-          <!-- The debug mode (D-083), at the very bottom: the developer's details —
-               diagnostics, raw data, internal identifiers — only while it is on. -->
-          <div class="card setting">
-            <div class="setting-row">
-              <div class="setting-text">
-                <h2 id="debugTitle" class="setting-title">debug mode</h2>
-                <p id="debugHint" class="hint">
-                  Show the technical details — handy when something isn't working right.
-                </p>
+          <!-- Listening: what plays and how (D-086). -->
+          <section class="settings-group" aria-labelledby="groupListening">
+            <h2 id="groupListening" class="settings-group-title">listening</h2>
+            <div class="card settings-list">
+              <!-- Music videos on or off. Off, the window behaves as if they
+                   did not exist: no switch on the turntable, none of the video
+                   settings, and a track that is a video only is passed by. -->
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="videosTitle" class="setting-title">music videos</h3>
+                    <p id="videosHint" class="hint">
+                      Switch a song to its video under the record. Turn this off and headshell stays
+                      a record player.
+                    </p>
+                    <p class="hint debug-only">
+                      D-086, the window's own choice (ui.json). Off: no music/video switch, no video
+                      settings or video source; the player passes video-only tracks by, as the CLI
+                      does.
+                    </p>
+                  </div>
+                  <button
+                    id="videosSwitch"
+                    type="button"
+                    class="switch"
+                    role="switch"
+                    aria-checked="true"
+                    aria-labelledby="videosTitle"
+                    aria-describedby="videosHint"
+                  >
+                    <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
+                  </button>
+                </div>
               </div>
-              <button
-                id="debugSwitch"
-                type="button"
-                class="switch"
-                role="switch"
-                aria-checked="false"
-                aria-labelledby="debugTitle"
-                aria-describedby="debugHint debugNote"
-              >
-                <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
-              </button>
+
+              <!-- What a video does when the player is left. YouTube does not
+                   let a video play where it can't be seen, so it either hands
+                   the sound back to the music or stays on screen, small. -->
+              <div class="setting video-ui">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="videoAwayTitle" class="setting-title">when you leave a video</h3>
+                    <p id="videoAwayHint" class="hint">
+                      Go back to the music where the video was, or keep watching in a small window in
+                      the corner.
+                    </p>
+                    <p class="hint debug-only">
+                      D-086: YouTube's player must stay visible while it plays. "Back to the music"
+                      hands the sound to the audio engine at the video's second; a track that is a
+                      video only pauses. "Small window" moves the player to a 356 × 200 corner slot.
+                    </p>
+                  </div>
+                  <div
+                    id="videoAwaySwitch"
+                    class="segmented"
+                    role="radiogroup"
+                    aria-labelledby="videoAwayTitle"
+                    aria-describedby="videoAwayHint"
+                  >
+                    <span class="segmented-thumb" aria-hidden="true"></span>
+                    <button type="button" role="radio" class="segment" aria-checked="true" data-away="music">back to the music</button>
+                    <button type="button" role="radio" class="segment" aria-checked="false" data-away="corner">small window</button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <p id="debugNote" class="hint setting-note" hidden></p>
-          </div>
+          </section>
+
+          <!-- The internet: what headshell asks online on its own (D-082). -->
+          <section class="settings-group" aria-labelledby="groupOnline">
+            <h2 id="groupOnline" class="settings-group-title">internet</h2>
+            <div class="card settings-list">
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="onlineTitle" class="setting-title">look things up online</h3>
+                    <p id="onlineHint" class="hint">
+                      Find missing album covers and song details on the internet.
+                    </p>
+                    <p class="hint debug-only">
+                      Covers and canonical identities from MusicBrainz and the Cover Art Archive.
+                      Off, neither is asked: covers come only from where the tracks live.
+                    </p>
+                  </div>
+                  <button
+                    id="onlineSwitch"
+                    type="button"
+                    class="switch"
+                    role="switch"
+                    aria-checked="false"
+                    aria-labelledby="onlineTitle"
+                    aria-describedby="onlineHint onlineNote"
+                  >
+                    <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
+                  </button>
+                </div>
+                <p id="onlineNote" class="hint setting-note"></p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Advanced, at the very bottom: the debug mode (D-083) — the
+               developer's details, only while it is on. -->
+          <section class="settings-group" aria-labelledby="groupAdvanced">
+            <h2 id="groupAdvanced" class="settings-group-title">advanced</h2>
+            <div class="card settings-list">
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="debugTitle" class="setting-title">debug mode</h3>
+                    <p id="debugHint" class="hint">
+                      Show the technical details — handy when something isn't working right.
+                    </p>
+                  </div>
+                  <button
+                    id="debugSwitch"
+                    type="button"
+                    class="switch"
+                    role="switch"
+                    aria-checked="false"
+                    aria-labelledby="debugTitle"
+                    aria-describedby="debugHint debugNote"
+                  >
+                    <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
+                  </button>
+                </div>
+                <p id="debugNote" class="hint setting-note" hidden></p>
+              </div>
+            </div>
+          </section>
         </section>
       </main>
 
@@ -745,7 +845,10 @@
                    is one, is the record's label (D-076): a larger round label
                    that turns with the record. Without one the plain label
                    stays. -->
-              <div class="turntable" aria-hidden="true">
+              <div id="nowTurntable" class="turntable" aria-hidden="true">
+                <!-- The record and the arm move together when a video takes a
+                     corner of the plinth (D-086): one body for the spring. -->
+                <span id="nowDeck" class="deck">
                 <span class="platter"></span>
                 <span class="record">
                   <svg viewBox="0 0 100 100">
@@ -791,15 +894,41 @@
                     <circle class="arm-pivot" cx="84" cy="16" r="2.4" />
                   </svg>
                 </span>
+                </span>
+                <!-- Where a video that is all the track has shows while the
+                     record stays up (D-086): a corner of the plinth, never
+                     smaller than YouTube's 200 × 200. The video layer is laid
+                     over it; nothing is drawn on top. -->
+                <span id="deckScreen" class="deck-screen" hidden></span>
+                <!-- The suitcase lid (D-086): hinged at the top, it swings
+                     down over the record when the video takes over, and the
+                     video plays on its inside — the screen. -->
+                <span id="nowLid" class="lid" hidden>
+                  <span class="lid-handle"></span>
+                  <span id="lidScreen" class="lid-screen"></span>
+                  <span class="lid-latch left"></span>
+                  <span class="lid-latch right"></span>
+                </span>
               </div>
               <div class="now-meta">
                 <p id="nowCardState" class="kicker"></p>
                 <h2 id="nowCardTitle" class="now-card-title">—</h2>
                 <p id="nowCardArtist" class="now-card-artist"></p>
-                <p class="facts">
-                  <span id="nowCardSource" class="chip"></span>
-                  <span id="nowCardDuration"></span>
-                </p>
+                <!-- Music or its video (D-086), beside the facts: a long
+                     title takes two lines, and the switch must stay in
+                     sight at the window's smallest height. -->
+                <div class="media-row">
+                  <p class="facts">
+                    <span id="nowCardSource" class="chip"></span>
+                    <span id="nowCardDuration"></span>
+                  </p>
+                  <div id="mediaSwitch" class="segmented media-switch video-ui" role="radiogroup" aria-label="music or video">
+                    <span class="segmented-thumb" aria-hidden="true"></span>
+                    <button type="button" role="radio" class="segment" aria-checked="true" data-mode="music">music</button>
+                    <button type="button" role="radio" class="segment" aria-checked="false" data-mode="video">video</button>
+                  </div>
+                </div>
+                <p id="mediaNote" class="media-note video-ui" hidden></p>
               </div>
             </div>
           </div>
@@ -979,6 +1108,25 @@
     </div>
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <!-- The video layer (D-086): one player, laid over a slot — the closed
+         lid's screen, the corner of the plinth, or the corner of the window.
+         It is never moved in the page (an iframe moved reloads), only placed;
+         and nothing is laid over it, notices included (YouTube's rules). -->
+    <div id="videoCorner" class="video-corner" aria-hidden="true" hidden></div>
+    <div id="videoLayer" class="video-layer" hidden>
+      <div id="videoScreen" class="video-screen">
+        <iframe
+          id="videoFrame"
+          class="video-frame"
+          title="video"
+          allow="autoplay; encrypted-media; picture-in-picture"
+          referrerpolicy="strict-origin-when-cross-origin"
+          hidden
+        ></iframe>
+        <video id="videoFile" class="video-file" playsinline preload="auto" hidden></video>
+      </div>
+    </div>
 
     <!-- The context menu (D-079): one element, filled with what the element
          under the pointer offers (`menu.js`). It lies over everything,

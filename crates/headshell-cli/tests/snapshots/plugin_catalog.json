@@ -27,7 +27,7 @@
   "platform": "<variable>",
   "plugins": [
     {
-      "api": 4,
+      "api": 5,
       "capabilities": [
         "search",
         "stream"
@@ -37,13 +37,13 @@
       "files": [
         {
           "path": "<variable>",
-          "sha256": "2b2e262ea2b52bac9382435d694c085a9a28fb6a85c298bc81adefee6836889a",
-          "url": "http://127.0.0.1:<port>/echo/plugin.json?version=0.2.0"
+          "sha256": "a79127f2b62652d2eba109f91555a4a5e640cc73dd1b4cabab400292e55c0595",
+          "url": "http://127.0.0.1:<port>/echo/plugin.json?version=0.3.0"
         },
         {
           "path": "<variable>",
-          "sha256": "799cb055eabcd835f0bad435a39d0d005dcea33203a38a18489db1cc190c60ce",
-          "url": "http://127.0.0.1:<port>/echo/main.js?version=0.2.0"
+          "sha256": "f3bcc7ec2eee6adae09f7768b3fcfac4eb271cd51f94d2e3477788bdad81399a",
+          "url": "http://127.0.0.1:<port>/echo/main.js?version=0.3.0"
         }
       ],
       "installed": {
@@ -57,7 +57,7 @@
       },
       "problem": null,
       "requires": [],
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ],
   "summary": {

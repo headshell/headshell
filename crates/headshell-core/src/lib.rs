@@ -30,5 +30,6 @@ mod store;
 pub mod suggest;
 #[cfg(test)]
 mod test_support;
+pub mod video;
 
 pub use error::{Error, ErrorKind, Result};

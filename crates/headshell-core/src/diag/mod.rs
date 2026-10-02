@@ -101,6 +101,12 @@ pub enum Stage {
     LyricsLookup,
     /// The lyrics cache and the user's shifts in the data directory (D-078).
     LyricsStore,
+    /// Finding a track's video (D-086): asking the video provider for the
+    /// track's own video or searching it for one, and checking what it gave.
+    VideoLookup,
+    /// The video being shown: handing the sound between the audio engine and
+    /// the shell's video player, and the player's reports (D-086).
+    VideoPlayback,
 }
 
 impl Stage {
@@ -133,6 +139,8 @@ impl Stage {
             Self::LyricsRead => "LYRICS_READ",
             Self::LyricsLookup => "LYRICS_LOOKUP",
             Self::LyricsStore => "LYRICS_STORE",
+            Self::VideoLookup => "VIDEO_LOOKUP",
+            Self::VideoPlayback => "VIDEO_PLAYBACK",
         }
     }
 }

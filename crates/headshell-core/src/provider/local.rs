@@ -33,6 +33,15 @@ use super::{
 /// postpones the question "why won't it play?" from scan time to play time.
 pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "oga", "m4a", "mp4", "aac", "wav"];
 
+/// The recognised video file extensions (D-086).
+///
+/// A video is scanned like a song — its tags, or its file name — and plays
+/// as one when the core can decode its sound; the shell shows its picture.
+/// One whose sound the core cannot decode (Opus in a `.webm`) is still taken:
+/// it plays as a video only. `.mp4` is on both lists; what is inside it
+/// decides, not the name.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm"];
+
 /// The result of a scan — how many files were seen, how many were taken, how
 /// many were skipped and why.
 ///
@@ -43,7 +52,7 @@ pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "ogg", "oga", "m4a", "mp4
 pub struct ScanSummary {
     /// The number of files visited (directories excluded).
     pub files_seen: usize,
-    /// Those carrying an audio extension.
+    /// Those carrying an audio or a video extension (D-086).
     pub audio_files: usize,
     /// The number of tracks that went into the index.
     pub indexed: usize,
@@ -444,7 +453,36 @@ fn has_audio_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(str::to_lowercase)
-        .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.as_str()))
+        .is_some_and(|ext| {
+            AUDIO_EXTENSIONS.contains(&ext.as_str()) || VIDEO_EXTENSIONS.contains(&ext.as_str())
+        })
+}
+
+/// Might the file carry a picture? Only a video extension can.
+fn has_video_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// Does the file hold a video track (D-086)? The extension only says it
+/// might; the container's tracks decide (an `.mp4` is often audio alone).
+///
+/// Without the `audio` feature the container cannot be opened, and the
+/// extension is all there is to go by.
+pub(crate) fn has_video(path: &Path) -> Result<bool> {
+    if !has_video_extension(path) {
+        return Ok(false);
+    }
+    #[cfg(feature = "audio")]
+    {
+        tags::has_video(path)
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        Ok(true)
+    }
 }
 
 /// Reads a track's metadata from the file.
@@ -583,6 +621,33 @@ mod tags {
                 .with_isrc(isrc),
         ))
     }
+
+    /// Does the container hold a video track (D-086)?
+    pub(super) fn has_video(path: &Path) -> Result<bool> {
+        let file = std::fs::File::open(path)
+            .map_err(|source| crate::error::io_err(Stage::VideoLookup, path, source))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        let reader = symphonia::default::get_probe()
+            .probe(&hint, mss, Default::default(), MetadataOptions::default())
+            .map_err(|source| {
+                Error::new(
+                    Stage::VideoLookup,
+                    ErrorKind::Audio {
+                        detail: format!("could not open {}: {source}", path.display()),
+                    },
+                )
+            })?;
+        Ok(reader.tracks().iter().any(|track| {
+            matches!(
+                track.codec_params,
+                Some(symphonia::core::codecs::CodecParameters::Video(_))
+            )
+        }))
+    }
 }
 
 impl Provider for LocalProvider {
@@ -593,12 +658,13 @@ impl Provider for LocalProvider {
             // No CONTROL: the local disk is not remote-controlled. ARTWORK: the
             // picture in a file's tags, or an image in its folder (D-076).
             // LYRICS: a `.lrc` beside the file, or the lyrics in its tags
-            // (D-078).
+            // (D-078). VIDEO: a video file is its own video (D-086).
             capabilities: Capabilities::SEARCH
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
                 | Capabilities::ARTWORK
-                | Capabilities::LYRICS,
+                | Capabilities::LYRICS
+                | Capabilities::VIDEO,
         }
     }
 
@@ -717,6 +783,33 @@ impl Provider for LocalProvider {
         })
     }
 
+    /// A video file is its own video (D-086); an audio file has none. The
+    /// same root check as `resolve_source`: the shell is handed a path to
+    /// serve, and only the music folders' files may be one.
+    fn resolve_video<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+    ) -> ProviderFuture<'a, Option<crate::video::VideoSource>> {
+        Box::pin(async move {
+            if id.provider != self.id {
+                return Ok(None);
+            }
+            let path = PathBuf::from(&id.id);
+            if !self.is_within_roots(&path) {
+                return Ok(None);
+            }
+            if !path.is_file() {
+                return Err(Error::new(
+                    Stage::VideoLookup,
+                    ErrorKind::NotFound {
+                        what: format!("{} (deleted since it was indexed)", path.display()),
+                    },
+                ));
+            }
+            Ok(has_video(&path)?.then_some(crate::video::VideoSource::LocalFile { path }))
+        })
+    }
+
     /// The picture in the file's tags, then an image in its folder (D-076).
     /// `size` is ignored: a file has the size it has, the core resizes.
     ///
@@ -788,6 +881,54 @@ mod tests {
         }
         std::fs::copy(audio_fixtures().join(name), &target)
             .unwrap_or_else(|e| panic!("{name} must be copied: {e}"));
+    }
+
+    /// The synthetic video fixtures (D-086).
+    #[cfg(feature = "audio")]
+    fn video_fixtures() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/video"))
+    }
+
+    /// A video file is scanned like a song and is its own video; an `.mp4`
+    /// without a picture and a song are not (D-086).
+    #[cfg(feature = "audio")]
+    #[tokio::test]
+    async fn a_video_file_is_its_own_video() {
+        let dir = temp_dir("video");
+        for name in [
+            "Video Artist - Clip.mp4",
+            "Webm Artist - Opus Clip.webm",
+            "Audio Artist - Plain.mp4",
+        ] {
+            std::fs::copy(video_fixtures().join(name), dir.join(name)).expect("fixture");
+        }
+        copy_fixture(&dir, "tagged.flac", "tagged.flac");
+
+        let provider = LocalProvider::new(vec![dir.to_path_buf()]);
+        let summary = provider.rescan_now().expect("scan");
+        assert_eq!(summary.indexed, 4, "{summary:?}");
+
+        let video = |name: &str| {
+            let id = provider.track_id(&dir.join(name));
+            let provider = &provider;
+            async move { provider.resolve_video(&id).await.expect("resolve_video") }
+        };
+        assert_eq!(
+            video("Video Artist - Clip.mp4").await,
+            Some(crate::video::VideoSource::LocalFile {
+                path: dir.join("Video Artist - Clip.mp4")
+            })
+        );
+        assert!(video("Webm Artist - Opus Clip.webm").await.is_some());
+        assert_eq!(video("Audio Artist - Plain.mp4").await, None);
+        assert_eq!(video("tagged.flac").await, None);
+
+        // A path outside the music folders is never handed to the shell.
+        let outside = ProviderTrackId::new(provider.id.clone(), "/etc/passwd");
+        assert_eq!(
+            provider.resolve_video(&outside).await.expect("outside"),
+            None
+        );
     }
 
     fn write(dir: &Path, name: &str, body: &[u8]) {

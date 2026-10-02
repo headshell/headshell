@@ -19,6 +19,14 @@ pub struct UiSettings {
     /// Whether the developer's details are shown (D-083).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug: bool,
+    /// What a video does when the player is left (D-086); `None`: back to
+    /// the music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_away: Option<crate::video::VideoAway>,
+    /// Music videos turned off (D-086): the window behaves as if they did
+    /// not exist. Off is the choice written; on is the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub videos_off: bool,
 }
 
 /// Reads the file; a missing file is nothing chosen yet.
@@ -103,6 +111,28 @@ mod tests {
             read(&path).expect("read back").debug,
             "the theme's write kept the debug mode"
         );
+    }
+
+    /// Music videos (D-086): on with no file and in a file from before;
+    /// turned off, kept; turned back on, the field leaves the file.
+    #[test]
+    fn music_videos_are_on_until_turned_off() {
+        let dir = temp_dir("videos");
+        let desk = crate::video::VideoDesk::new(&dir.0);
+        assert!(desk.enabled().unwrap());
+        fs::write(dir.0.join("ui.json"), r#"{ "theme": "contrast" }"#).unwrap();
+        assert!(desk.enabled().unwrap());
+
+        assert!(!desk.set_enabled(false).unwrap());
+        assert!(!desk.enabled().unwrap());
+        assert_eq!(
+            read(&dir.0.join("ui.json")).unwrap().theme.as_deref(),
+            Some("contrast")
+        );
+
+        assert!(desk.set_enabled(true).unwrap());
+        let text = fs::read_to_string(dir.0.join("ui.json")).unwrap();
+        assert!(!text.contains("videos_off"), "{text}");
     }
 
     /// A file from before D-083 — only a theme — reads with the debug mode off.

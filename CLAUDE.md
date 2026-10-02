@@ -102,13 +102,14 @@ headshell/
 │   │   │   ├── playback/       # symphonia + cpal, reading the queue ahead
 │   │   │   ├── net/            # HTTP trait + ureq client + fake
 │   │   │   ├── diag/           # diagnostics, see below
+│   │   │   ├── video.rs        # music videos: sources, matching (D-086)
 │   │   │   └── session.rs      # the outward command surface (Session)
 │   │   ├── examples/           # probes run by hand (fingerprint, mb, playback)
 │   │   └── tests/              # integration tests over fixtures/
 │   ├── headshell-cli/               # thin shell (binary name: `headshell`)
 │   │   └── tests/snapshots/    # snapshots of the --json output
 │   └── headshell/                   # Tauri desktop shell (binary name: `headshell-desktop`)
-│       ├── src/                # main + env + state + core_thread + commands
+│       ├── src/                # main + env + state + core_thread + commands + localhost + video_server
 │       ├── ui/                 # plain static webview — no bundler, no npm
 │       ├── icons/              # icon.svg is the source, the others are generated (icons/README.md)
 │       └── themes/             # two reference themes (contrast, daylight)
@@ -182,7 +183,8 @@ headshell lyrics "<query>" [--all] | --file <audio> [--print] [--shift MS]
 headshell prefetch "<query>" [--all]
 headshell library search <query> [--limit N] [--min-ms MS]
 headshell sleeve [--year N] [--out <file>] [--format square|story]
-headshell provider list | test <name> | scan [--if-stale] | use <name>
+headshell provider list | test <name> | scan [--if-stale] | use <name> [--for main|music|video]
+headshell provider follow <main|music|video>     # music/video follow the main provider again (D-086)
 headshell provider add <kind> --url U --user K [--name NAME] [--api-key A] [--verify]
 headshell provider remove <name> | servers
 headshell plugin list | approve <name> | install <name> | disable <name> | enable <name> | forget <name>
@@ -190,6 +192,7 @@ headshell plugin catalog | update [<name>] | remove <name>
 headshell plugin index <catalog-repo> [--url-template T] [--check]
 headshell secret list | set <namespace> <key> | remove <namespace> <key>
 headshell suggest "<query>"                       # what the play box offers while typed in
+headshell video "<artist> - <title>" | --file <path>   # the song's video, from the video provider (D-086)
 headshell online [on|off]                        # the desktop's online choice (not the CLI's)
 headshell music-dirs [add <dir> | remove <dir>]  # the local music folders (HEADSHELL_MUSIC_DIRS overrides)
 headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues

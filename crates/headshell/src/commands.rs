@@ -27,23 +27,27 @@ use headshell_core::diag::Stage;
 use headshell_core::ids::ProviderId;
 use headshell_core::lyrics::{LyricsItem, LyricsKey, LyricsReport};
 use headshell_core::model::PlayRule;
-use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueItem, QueueView, RepeatMode};
+use headshell_core::playback::{
+    PlayState, PlaybackAnchor, PrefetchReport, QueueItem, QueueView, RepeatMode,
+};
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::session::{
     self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, MusicFoldersReport,
     OnlineReport, PlayFromReport, PlayOptions, PluginCatalogReport, PluginConsentReport,
     PluginInstallReport, PluginListReport, PluginRemoveReport, PluginUpdateReport,
-    ProviderListReport, ProviderTestReport, ResolveReport, ScanReport, SearchReport,
-    SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport,
-    SleeveResponse, StatsResponse,
+    ProviderListReport, ProviderRoles, ProviderTestReport, ResolveReport, RolesReport, ScanReport,
+    SearchReport, SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport,
+    ServerRemoveReport, SleeveResponse, StatsResponse,
 };
 use headshell_core::sleeve::CardPreset;
 use headshell_core::stats::StatsQuery;
 use headshell_core::suggest::SuggestReport;
+use headshell_core::video::{VideoPlan, VideoSource};
 
 use crate::debug::DebugMode;
 use crate::state::{AppState, CommandError, CommandResult};
 use crate::theme::{ActiveTheme, ThemeList};
+use crate::video::VideoAway;
 
 /// Tells the webview that a long job started/ended.
 ///
@@ -442,6 +446,9 @@ pub async fn play(
                 let options = PlayOptions {
                     all,
                     shuffle,
+                    // The window shows videos unless they are off (D-086):
+                    // the playing player knows.
+                    shows_video: core.live.player().shows_video(),
                     ..PlayOptions::new(query)
                 };
                 let task = core
@@ -486,7 +493,11 @@ pub async fn play_items(
     state
         .run_on_core(move |core| {
             Box::pin(async move {
-                let task = core.live.session().player_from_items(&core.registry, items);
+                let task = core.live.session().player_from_items(
+                    &core.registry,
+                    items,
+                    core.live.player().shows_video(),
+                );
                 let player = busy(&app, "starting the track", task).await?;
                 // The old player's accumulated listens are **taken**, not thrown away.
                 core.live.replace_player(player);
@@ -624,6 +635,206 @@ pub async fn set_repeat(state: State<'_, AppState>, mode: RepeatMode) -> Command
             })
         })
         .await
+}
+
+// ————————————————————————————————————— Music videos (D-086)
+
+/// Who plays each role — the roles part of `headshell provider list`.
+#[tauri::command]
+pub async fn provider_roles(state: State<'_, AppState>) -> CommandResult<ProviderRoles> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.session().roles(&core.registry) }))
+        .await
+}
+
+/// Chooses who plays a role — `headshell provider use <name> --for <role>`;
+/// without a name, `headshell provider follow <role>`.
+#[tauri::command]
+pub async fn provider_role_set(
+    state: State<'_, AppState>,
+    role: String,
+    name: Option<String>,
+) -> CommandResult<RolesReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let role = session::Role::parse(&role)?;
+                let id = name.map(ProviderId::new);
+                core.live
+                    .session()
+                    .set_role(&core.registry, role, id.as_ref())
+            })
+        })
+        .await
+}
+
+/// The videos for the playing track — `headshell video`. It can search a
+/// video service, so it says it is busy.
+#[tauri::command]
+pub async fn video_find(app: AppHandle, state: State<'_, AppState>) -> CommandResult<VideoPlan> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(
+                async move { busy(&app, "finding the video", core.live.video_for_current()).await },
+            )
+        })
+        .await
+}
+
+/// What the page needs to show a video: the anchor, and for a file, the
+/// address it plays from.
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoShown {
+    pub anchor: PlaybackAnchor,
+    /// The address of the file being shown; `None` for a player that fetches
+    /// its own video (YouTube).
+    pub media_url: Option<String>,
+}
+
+/// Hands the sound to the page's video player at `at_ms`.
+#[tauri::command]
+pub async fn video_show(
+    state: State<'_, AppState>,
+    source: VideoSource,
+    provider: String,
+    at_ms: u64,
+) -> CommandResult<VideoShown> {
+    let anchor = state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live
+                    .player_mut()
+                    .show_video(source, ProviderId::new(provider), at_ms)?;
+                Ok(core.live.anchor())
+            })
+        })
+        .await?;
+    let media_url = video_media(state).await?;
+    Ok(VideoShown { anchor, media_url })
+}
+
+/// The address the page plays the shown video from, when it is a file —
+/// for a video the core started on its own (a track that is a video only).
+/// Only the file the core shows is ever served.
+#[tauri::command]
+pub async fn video_media(state: State<'_, AppState>) -> CommandResult<Option<String>> {
+    let shown = state
+        .run_on_core(move |core| {
+            Box::pin(
+                async move { Ok(core.live.player().video_now().map(|now| now.source.clone())) },
+            )
+        })
+        .await?;
+    match shown {
+        Some(VideoSource::LocalFile { path }) => state
+            .video()
+            .serve(&path)
+            .map(Some)
+            .map_err(|text| CommandError::new(Stage::VideoPlayback, &text)),
+        _ => {
+            state.video().stop_serving();
+            Ok(None)
+        }
+    }
+}
+
+/// The page's video player reports its clock: about once a second, and at
+/// every change. A late one — the track moved on — is refused, and the page
+/// drops it.
+#[tauri::command]
+pub async fn video_report(
+    state: State<'_, AppState>,
+    position_ms: u64,
+    playing: PlayState,
+    duration_ms: Option<u64>,
+) -> CommandResult<()> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live
+                    .player_mut()
+                    .video_report(position_ms, playing, duration_ms)
+            })
+        })
+        .await
+}
+
+/// The video ran to its end: the queue moves on.
+#[tauri::command]
+pub async fn video_ended(state: State<'_, AppState>) -> CommandResult<QueueView> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().video_ended().await?;
+                Ok(core.live.player().queue().view())
+            })
+        })
+        .await
+}
+
+/// The music takes the sound back at `at_ms` — where the video was.
+#[tauri::command]
+pub async fn video_audio(state: State<'_, AppState>, at_ms: u64) -> CommandResult<PlaybackAnchor> {
+    let anchor = state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().show_audio(at_ms)?;
+                Ok(core.live.anchor())
+            })
+        })
+        .await?;
+    state.video().stop_serving();
+    Ok(anchor)
+}
+
+/// What a video does when the player is left.
+#[tauri::command]
+pub async fn video_away(state: State<'_, AppState>) -> CommandResult<VideoAway> {
+    state
+        .video()
+        .away()
+        .map_err(|text| CommandError::new(Stage::ConfigLoad, &text))
+}
+
+/// Are music videos on? A window-only choice, as the debug mode is.
+#[tauri::command]
+pub async fn videos_enabled(state: State<'_, AppState>) -> CommandResult<bool> {
+    state
+        .video()
+        .enabled()
+        .map_err(|text| CommandError::new(Stage::ConfigLoad, &text))
+}
+
+/// Turns music videos on or off: saved, and the playing player told at once
+/// — off, a track that is a video only is passed by, as the CLI passes it.
+/// The page hands a video being shown back to the music before this.
+#[tauri::command]
+pub async fn videos_set(state: State<'_, AppState>, on: bool) -> CommandResult<bool> {
+    let on = state
+        .video()
+        .set_enabled(on)
+        .map_err(|text| CommandError::new(Stage::ConfigLoad, &text))?;
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().set_shows_video(on);
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(on)
+}
+
+/// Saves what a video does when the player is left.
+#[tauri::command]
+pub async fn video_away_set(
+    state: State<'_, AppState>,
+    away: VideoAway,
+) -> CommandResult<VideoAway> {
+    state
+        .video()
+        .set_away(away)
+        .map_err(|text| CommandError::new(Stage::ConfigLoad, &text))
 }
 
 // ————————————————————————————————————— Covers (D-076)

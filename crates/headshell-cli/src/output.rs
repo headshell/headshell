@@ -12,13 +12,14 @@ use headshell_core::plugin::catalog::UpdateOutcome;
 use headshell_core::session::{
     ImportReport, LookupMode, MusicFoldersReport, OnlineReport, OnlineSource, PlayFrom, PlayReport,
     PluginCatalogReport, PluginConsentReport, PluginIndexReport, PluginInstallReport,
-    PluginListReport, PluginRemoveReport, PluginUpdateReport, ProviderListReport,
+    PluginListReport, PluginRemoveReport, PluginUpdateReport, ProviderListReport, ProviderRoles,
     ProviderTestReport, ResolveReport, ScanReport, SearchReport, SecretListReport,
     SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport, SleeveResponse,
-    StatsResponse,
+    StatsResponse, VideoReport,
 };
 use headshell_core::stats::StatsReport;
 use headshell_core::suggest::SuggestReport;
+use headshell_core::video::VideoSource;
 
 /// Turns milliseconds into a readable duration like `12h 3m`.
 fn duration(ms: u64) -> String {
@@ -537,6 +538,83 @@ pub fn provider_list(report: &ProviderListReport) -> String {
         );
     }
     out.push_str(&play_from(&report.play_from));
+    if !report.roles.music.follows_main {
+        out.push_str(&role_line("main", &report.roles.main));
+    }
+    out.push_str(&role_line("video", &report.roles.video));
+    out
+}
+
+/// Who plays each role (D-086): `provider use --for` and `provider follow`.
+pub fn roles(roles: &ProviderRoles) -> String {
+    let mut out = String::new();
+    out.push_str(&role_line("main", &roles.main));
+    out.push_str(&role_line("music", &roles.music));
+    out.push_str(&role_line("video", &roles.video));
+    out
+}
+
+/// One role's line: who, and why it is that one.
+fn role_line(role: &str, from: &PlayFrom) -> String {
+    let mut out = match (&from.provider, from.follows_main, from.chosen) {
+        (None, _, _) if role == "video" => {
+            "video from: none — no registered provider shows videos\n".to_owned()
+        }
+        (None, _, _) => format!("{role} from: none — no registered provider can play\n"),
+        (Some(id), false, true) => format!("{role} from: {id} (chosen)\n"),
+        (Some(id), false, false) => format!(
+            "{role} from: {id} (nothing chosen yet: the first that can play — `headshell provider use <name>`)\n"
+        ),
+        (Some(id), true, _) => format!(
+            "{role} from: {id} (follows the main one — `headshell provider use <name> --for {role}` to choose apart)\n"
+        ),
+    };
+    if let Some(missing) = &from.missing {
+        out.push_str(&format!(
+            "  the chosen {missing} is not registered or cannot do this now — the one above instead\n"
+        ));
+    }
+    out
+}
+
+/// The videos found for a track (D-086).
+pub fn video(report: &VideoReport) -> String {
+    use std::fmt::Write as _;
+    let plan = &report.plan;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} — video from {}{}",
+        plan.track.display_name(),
+        plan.provider,
+        if plan.own { " (the track's own)" } else { "" }
+    );
+    if plan.candidates.is_empty() {
+        let _ = writeln!(out, "  no video found");
+    }
+    for (index, candidate) in plan.candidates.iter().enumerate() {
+        let source = match &candidate.source {
+            VideoSource::Youtube { video_id } => format!("youtube {video_id}"),
+            VideoSource::LocalFile { path } => format!("file {}", path.display()),
+        };
+        let _ = writeln!(
+            out,
+            "  {}. {} — {source} ({:.2})",
+            index + 1,
+            truncate(&candidate.track.display_name(), 48),
+            candidate.score
+        );
+    }
+    if plan.refused > 0 {
+        let _ = writeln!(out, "  {} not this song", count(plan.refused, "row"));
+    }
+    if plan.without_video > 0 {
+        let _ = writeln!(
+            out,
+            "  {} without a video",
+            count(plan.without_video, "row")
+        );
+    }
     out
 }
 
@@ -1281,6 +1359,18 @@ pub fn play(report: &PlayReport) -> String {
             out,
             "  … and {} more",
             count(report.queued.len() - 10, "track")
+        );
+    }
+    if report.video_only > 0 {
+        let _ = writeln!(
+            out,
+            "{} only a video: {} in the app's window, not here",
+            count(report.video_only, "track"),
+            if report.played {
+                "passed by — it plays"
+            } else {
+                "it plays"
+            }
         );
     }
     if report.played {

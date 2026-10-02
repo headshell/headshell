@@ -134,6 +134,9 @@ struct Span {
     /// How many frames were written. `None` while decoding is under way.
     frames: Option<u64>,
     duration_ms: Option<u64>,
+    /// Where in the track its first frame is (D-086): a track opened at a
+    /// position starts there. The position adds it; the time heard does not.
+    offset_ms: u64,
 }
 
 /// A job for the decoder.
@@ -162,6 +165,10 @@ struct PreparedTrack {
     source_rate: u32,
     source_channels: usize,
     duration_ms: Option<u64>,
+    /// The track's time base: what turns a seek's answer into milliseconds.
+    time_base: Option<symphonia::core::units::TimeBase>,
+    /// Where decoding starts in the track (D-086); `0` from the start.
+    offset_ms: u64,
     /// A stream started from a head: through this it asks for a new address
     /// (D-077).
     #[cfg(feature = "http-client")]
@@ -295,10 +302,27 @@ impl Shared {
         self.frames_to_ms(clamped)
     }
 
-    /// The position of the playing track within itself (ms).
+    /// The position of the playing track within itself (ms): where it was
+    /// opened (D-086) plus what was played since.
+    ///
+    /// Before the first frame of a track opened at a position is played,
+    /// that position is where it is — not 0: the music taken back from a
+    /// video is at the video's second from the moment it is asked for, as
+    /// [`Self::display_duration_ms`] gives the waiting track's length.
     fn position_ms(&self) -> u64 {
-        self.current_span()
-            .map_or(0, |span| self.played_ms_of(&span))
+        if let Some(span) = self.current_span() {
+            return span.offset_ms.saturating_add(self.played_ms_of(&span));
+        }
+        self.spans
+            .lock()
+            .ok()
+            .and_then(|spans| {
+                spans
+                    .iter()
+                    .find(|span| span.start_frame.is_none())
+                    .map(|span| span.offset_ms)
+            })
+            .unwrap_or(0)
     }
 
     /// Records the slice (not started yet). Refreshes its duration if there is
@@ -314,7 +338,17 @@ impl Shared {
                 start_frame: None,
                 frames: None,
                 duration_ms,
+                offset_ms: 0,
             });
+        }
+    }
+
+    /// Where in the track the slice starts (D-086).
+    fn set_offset(&self, seq: u64, offset_ms: u64) {
+        if let Ok(mut spans) = self.spans.lock()
+            && let Some(span) = spans.iter_mut().find(|span| span.seq == seq)
+        {
+            span.offset_ms = offset_ms;
         }
     }
 
@@ -478,6 +512,27 @@ impl AudioEngine {
         Ok(self.play_prepared(open_source(source, head)?))
     }
 
+    /// [`Self::play_source`] from a position in the track (D-086): the
+    /// music picks up where its video was.
+    ///
+    /// The seek is the container's coarse one — it lands on a packet near
+    /// `start_ms`, and the position reports where it landed.
+    ///
+    /// # Errors
+    /// If the source cannot be opened, decoded, or moved to the position.
+    pub(crate) fn play_source_at(
+        &self,
+        source: &AudioSource,
+        head: Option<&StreamHead>,
+        start_ms: u64,
+    ) -> Result<u64> {
+        let mut prepared = open_source(source, head)?;
+        if start_ms > 0 {
+            seek_prepared(&mut prepared, start_ms)?;
+        }
+        Ok(self.play_prepared(prepared))
+    }
+
     /// Queues an opened track and returns its slice number.
     fn play_prepared(&self, mut prepared: PreparedTrack) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
@@ -487,6 +542,9 @@ impl AudioEngine {
         // caller can ask for `duration_ms()` as soon as it has set up the engine.
         // Where it will start becomes known when the decoding thread gets there.
         self.shared.declare_span(seq, prepared.duration_ms);
+        if prepared.offset_ms > 0 {
+            self.shared.set_offset(seq, prepared.offset_ms);
+        }
         // We are not idle **as soon as the job is sent**. Leaving this to the
         // decoding thread let the callback say "buffer empty + idle = done" and
         // set Stopped until that thread woke up; the user would see a track
@@ -785,6 +843,15 @@ impl AudioEngine {
         self.shared.position_ms()
     }
 
+    /// The time heard of the playing track — what was played since it was
+    /// opened, without where it was opened (D-086).
+    #[must_use]
+    pub fn played_ms_now(&self) -> u64 {
+        self.shared
+            .current_span()
+            .map_or(0, |span| self.shared.played_ms_of(&span))
+    }
+
     /// The duration of the playing track (if read from the container).
     #[must_use]
     pub fn duration_ms(&self) -> Option<u64> {
@@ -917,6 +984,7 @@ fn prepare(source: Box<dyn MediaSource>, hint: Hint, label: &str) -> Result<Prep
         .default_track(TrackType::Audio)
         .ok_or_else(|| audio_err(Stage::PlaybackDecode, format!("no audio track in {label}")))?;
     let track_id = track.id;
+    let time_base = track.time_base;
 
     let duration_ms = track
         .time_base
@@ -959,9 +1027,43 @@ fn prepare(source: Box<dyn MediaSource>, hint: Hint, label: &str) -> Result<Prep
         source_rate,
         source_channels,
         duration_ms,
+        time_base,
+        offset_ms: 0,
         #[cfg(feature = "http-client")]
         stream: None,
     })
+}
+
+/// Moves an opened track to `start_ms` before its first packet is decoded
+/// (D-086), and notes where it landed.
+fn seek_prepared(prepared: &mut PreparedTrack, start_ms: u64) -> Result<()> {
+    use symphonia::core::formats::{SeekMode, SeekTo};
+    use symphonia::core::units::Time;
+
+    let seeked = prepared
+        .format
+        .seek(
+            SeekMode::Coarse,
+            SeekTo::Time {
+                time: Time::from_millis_u64(start_ms),
+                track_id: Some(prepared.track_id),
+            },
+        )
+        .map_err(|err| {
+            audio_err(
+                Stage::PlaybackDecode,
+                format!("could not move to {start_ms} ms in the track: {err}"),
+            )
+        })?;
+    // The decoder's state belongs to where it was; after a jump it starts
+    // over.
+    prepared.decoder.reset();
+    prepared.offset_ms = prepared
+        .time_base
+        .and_then(|base| base.calc_time(seeked.actual_ts))
+        .and_then(|time| u64::try_from(time.as_millis()).ok())
+        .unwrap_or(start_ms);
+    Ok(())
 }
 
 /// Decodes a single track to the end and writes it into the buffer.

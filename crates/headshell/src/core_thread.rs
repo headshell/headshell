@@ -133,6 +133,11 @@ struct Notable {
     state: headshell_core::playback::PlayState,
     rate: f64,
     duration_ms: Option<u64>,
+    /// Who makes the sound, and what video is shown (D-086): the
+    /// interface moves the player when they change.
+    surface: headshell_core::playback::Surface,
+    video: Option<headshell_core::video::VideoNow>,
+    video_mode: bool,
 }
 
 impl Notable {
@@ -142,6 +147,18 @@ impl Notable {
             state: anchor.state,
             rate: anchor.rate,
             duration_ms: anchor.duration_ms,
+            surface: headshell_core::playback::Surface::Audio,
+            video: None,
+            video_mode: false,
+        }
+    }
+
+    fn of_report(report: &TickReport) -> Self {
+        Self {
+            surface: report.surface,
+            video: report.video.clone(),
+            video_mode: report.video_mode,
+            ..Self::of(&report.anchor)
         }
     }
 }
@@ -160,7 +177,7 @@ fn worth_sending(last: &Notable, report: &TickReport) -> bool {
         || report.finished
         || !report.artwork_ready.is_empty()
         || report.lyrics_ready
-        || Notable::of(&report.anchor) != *last
+        || Notable::of_report(report) != *last
 }
 
 /// One round: advance the core, report only what is notable.
@@ -168,7 +185,7 @@ async fn run_tick(core: &mut Core, app: &AppHandle, last: &mut Notable) {
     match core.live.tick().await {
         Ok(report) => {
             if worth_sending(last, &report) {
-                *last = Notable::of(&report.anchor);
+                *last = Notable::of_report(&report);
                 let _ = app.emit(TICK_EVENT, &report);
             }
         }
@@ -211,6 +228,9 @@ mod tests {
             finished: false,
             artwork_ready: Vec::new(),
             lyrics_ready: false,
+            surface: headshell_core::playback::Surface::Audio,
+            video: None,
+            video_mode: false,
         }
     }
 

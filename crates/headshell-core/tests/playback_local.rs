@@ -349,3 +349,59 @@ fn a_missing_file_names_the_path() {
         err.chain_text()
     );
 }
+
+/// D-086: the music hands its sound to a video and takes it back where the
+/// video was — the track is opened again at that second, and the anchor
+/// says so.
+#[tokio::test]
+async fn the_music_goes_on_from_where_its_video_was() {
+    if !has_output_device() {
+        eprintln!("no audio output — skipping the video hand-over test (this is not a failure)");
+        return;
+    }
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(LocalProvider::new(vec![fixture("")])));
+    let item = QueueItem {
+        id: ProviderTrackId::new(
+            ProviderId::new("local"),
+            fixture("fingerprint_sample.flac").to_string_lossy(),
+        ),
+        track: TrackRef::new("Artist", "Chords"),
+    };
+    let mut player = Player::new(registry);
+    if let Err(err) = player.play_items(vec![item]).await {
+        eprintln!(
+            "could not open the audio device, skipping the test:\n{}",
+            err.chain_text()
+        );
+        return;
+    }
+
+    player
+        .show_video(
+            headshell_core::video::VideoSource::Youtube {
+                video_id: "CCHdMIEGaaM".to_owned(),
+            },
+            ProviderId::new("tube"),
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(player.surface(), headshell_core::playback::Surface::Video);
+    assert!(
+        !player.video_now().unwrap().only,
+        "the track has its own sound"
+    );
+    player
+        .video_report(1_000, PlayState::Playing, None)
+        .unwrap();
+
+    player.show_audio(9_000).unwrap();
+    assert_eq!(player.surface(), headshell_core::playback::Surface::Audio);
+    let position = player.anchor().position_ms;
+    // A coarse seek lands on a packet near the second: FLAC frames here are
+    // a fraction of a second long.
+    assert!(
+        (8_000..=10_500).contains(&position),
+        "the music should pick up near 9 s, it is at {position} ms"
+    );
+}

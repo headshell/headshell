@@ -38,6 +38,7 @@ import {
   verticalDrag,
   watchMotionPreference,
 } from "./motion.js";
+import { createVideoLayer } from "./video.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -161,6 +162,8 @@ const STAGE_TEXT = {
   LYRICS_READ: "The lyrics couldn't be read",
   LYRICS_LOOKUP: "The lyrics couldn't be found",
   LYRICS_STORE: "The lyrics couldn't be saved",
+  VIDEO_LOOKUP: "The video couldn't be found",
+  VIDEO_PLAYBACK: "The video couldn't be played",
 };
 
 /// What the listener can do about it (D-084), where there is something to
@@ -427,7 +430,10 @@ const ON_OPEN = {
   settings: () => {
     onlineSwitch.placeThumb(true);
     debugSwitch.placeThumb(true);
+    videoAwaySwitch.placeThumb(true);
+    videosSwitch.placeThumb(true);
     refreshOnline();
+    refreshVideoAway();
   },
 };
 
@@ -747,6 +753,29 @@ function paintDebug(mode) {
 let anchor = null;
 let queue = { items: [], position: 0, repeat: "off", shuffle: false };
 
+/// Music videos (D-086): see "music videos" below. Declared here, with the
+/// player's other state, because drawing the record reads it.
+const video = {
+  /// What the switch says: listening or watching.
+  mode: "music",
+  /// The core's video being shown (`TickReport.video`), or `null`.
+  now: null,
+  /// The videos found for the playing track, and which one is shown.
+  plan: null,
+  index: 0,
+  /// The lid: open (`false`) or shut (`true`) — where it is going.
+  shut: false,
+  /// The record moved aside for a corner screen.
+  decked: false,
+  /// Asking the core for the video — the switch waits.
+  looking: false,
+  /// What the window does when the player is left.
+  away: "music",
+  /// Music videos are on (settings): off, the window behaves as if they
+  /// did not exist.
+  enabled: true,
+};
+
 // The user-facing name of the repeat mode (D-036). The keys are wire values;
 // if an unknown mode arrives, the raw value is shown — silently saying "off"
 // would show a wrong state as right (K9).
@@ -935,7 +964,9 @@ let armAngle = null;
 let armSwinging = false;
 
 function moveArm() {
-  const onRecord = (anchor?.state ?? "stopped") !== "stopped" && queue.items.length > 0;
+  // A shut lid lifts the arm off the record (D-086).
+  const lidShut = video.shut;
+  const onRecord = !lidShut && (anchor?.state ?? "stopped") !== "stopped" && queue.items.length > 0;
   const angle = onRecord ? ARM_LEAD_IN + (ARM_RUN_OUT - ARM_LEAD_IN) * playedRatio : ARM_REST;
   if (armAngle !== null && Math.abs(angle - armAngle) < 0.05) return;
   const jump = armAngle === null ? 0 : Math.abs(angle - armAngle);
@@ -956,6 +987,11 @@ async function togglePause() {
   // With an empty queue there is nothing to play: the button shows what to do.
   if (queue.items.length === 0) {
     $("playQuery").focus();
+    return;
+  }
+  // A video makes the sound: its player pauses, and reports it (D-086).
+  if (video.now) {
+    videoLayer.toggle();
     return;
   }
   renderAnchor(await call("toggle_pause"));
@@ -1690,9 +1726,11 @@ function setNowOpen(open, { instant = false, velocity } = {}) {
   }
   if (open) {
     nowTabs.placeThumb(true);
+    mediaSwitch.placeThumb(true);
     revealCurrentRow();
   }
   updateLyricsView();
+  videoAwayChanged(open);
 }
 
 /// Keeps the playing row in sight in the queue. Not `scrollIntoView`: it would
@@ -2708,6 +2746,9 @@ const CAPABILITY_NAMES = {
 
 const STREAM = 1 << 2;
 let playFrom = null;
+/// The main source (D-086): the one music and videos follow until each is
+/// picked apart. `playFrom` is the music role — where the play box searches.
+let mainSource = null;
 const providerNames = new Map();
 
 /// The providers list's answer: the names, for the play box and the
@@ -2716,6 +2757,7 @@ function takeProviders(list) {
   providerNames.clear();
   for (const info of list.providers) providerNames.set(info.id, info.display_name);
   playFrom = list.play_from;
+  mainSource = list.roles?.main ?? list.play_from;
   updatePlayPlaceholder();
 }
 
@@ -2730,19 +2772,19 @@ function updatePlayPlaceholder() {
 }
 
 function renderPlayFrom(list) {
-  const rows = list.providers.filter((info) => (info.capabilities & STREAM) !== 0).map(playFromRow);
+  const rows = list.providers.filter((info) => fitsRole("main", info.capabilities)).map(playFromRow);
   $("playFromList").replaceChildren($("playFromPill"), ...rows);
   const missing = $("playFromMissing");
-  missing.hidden = !playFrom.missing;
-  missing.textContent = playFrom.missing
-    ? `${providerName(playFrom.missing)} isn't available right now, so we'll look in ` +
-      `${providerName(playFrom.provider)} first.`
+  missing.hidden = !mainSource.missing;
+  missing.textContent = mainSource.missing
+    ? `${providerName(mainSource.missing)} isn't available right now, so we'll look in ` +
+      `${providerName(mainSource.provider)} first.`
     : "";
   placePlayFromPill(true);
 }
 
 function playFromRow(info) {
-  const chosen = info.id === playFrom?.provider;
+  const chosen = info.id === mainSource?.provider;
   const row = h(
     "button",
     {
@@ -2804,13 +2846,13 @@ function placePlayFromPill(instant) {
 }
 
 async function choosePlayFrom(id) {
-  if (playFrom?.provider === id && playFrom.chosen) return;
+  if (mainSource?.provider === id && mainSource.chosen) return;
   markPlayFrom(id);
   const report = await call("provider_use", { name: id });
-  if (!report) {
-    refreshProviders();
-    return;
-  }
+  // Music and videos that follow the main source moved with it: the lists
+  // are drawn again from what the core says now.
+  refreshProviders();
+  if (!report) return;
   playFrom = report.play_from;
   updatePlayPlaceholder();
   $("playFromMissing").hidden = true;
@@ -2825,6 +2867,7 @@ async function refreshProviders() {
   if (list) {
     takeProviders(list);
     renderPlayFrom(list);
+    renderRoles(list);
     $("providerTable")
       .querySelector("tbody")
       .replaceChildren(...list.providers.map(providerRow));
@@ -4227,6 +4270,7 @@ contextMenus({ root: $("contextMenu"), find: findMenu, checkMark: () => icon("ch
 listen("headshell://tick", async (event) => {
   const report = event.payload;
   renderAnchor(report.anchor);
+  followCoreVideo(report);
   if (report.track_changed || report.finished) {
     renderQueue(await call("queue"));
   } else if (report.artwork_ready?.length > 0) {
@@ -4265,6 +4309,471 @@ listen("headshell://busy", (event) => {
   field.hidden = !label;
 });
 
+// ————————————————————————————————————— music videos (D-086)
+//
+// Music or its video. The switch under the record asks the core for the
+// song's video (`video_find`) and hands it the sound (`video_show`); the lid
+// of a suitcase record player swings down over the record, and the video
+// plays on its inside from the second the music was at. Back to music, the
+// lid swings up and the music goes on from the second the video was at
+// (`video_audio`). Every choice — which video, whose clock, what the listen
+// is — is the core's; this draws it.
+//
+// A track that is a video only (a YouTube item) shows its video either way:
+// with the lid shut, or — on "music" — in a corner of the plinth while the
+// record turns beside it. YouTube's rules hold everywhere: the player stays
+// on screen while it plays, nothing lies over it, never under 200 × 200.
+
+const nowLid = $("nowLid");
+const nowDeck = $("nowDeck");
+const lidScreen = $("lidScreen");
+const deckScreen = $("deckScreen");
+const videoCornerSlot = $("videoCorner");
+const videoScreen = $("videoScreen");
+
+/// How far the lid stands open: past a right angle, its back to the viewer.
+const LID_OPEN = -104;
+
+
+const videoLayer = createVideoLayer(
+  { layer: $("videoLayer"), frame: $("videoFrame"), file: $("videoFile") },
+  {
+    report(state, positionMs, durationMs) {
+      // A late report — the track moved on — is refused by the core; it is
+      // dropped here, not shown: nothing went wrong.
+      // The core's anchor follows; the tick brings it back.
+      invoke("video_report", { positionMs, playing: state, durationMs }).catch(() => {});
+    },
+    ended: videoEnded,
+    refused: videoRefused,
+  },
+);
+
+const mediaSwitch = segmented($("mediaSwitch"), (segment) => setMediaMode(segment.dataset.mode));
+
+function selectMedia(mode) {
+  const segment = $("mediaSwitch").querySelector(`[data-mode="${mode}"]`);
+  for (const each of $("mediaSwitch").querySelectorAll(".segment")) {
+    const on = each === segment;
+    each.setAttribute("aria-checked", String(on));
+    each.tabIndex = on ? 0 : -1;
+  }
+  mediaSwitch.placeThumb();
+}
+
+function mediaNote(text) {
+  const note = $("mediaNote");
+  note.textContent = text ?? "";
+  note.hidden = !text;
+}
+
+/// The lid's swing: down over the record, or up and back. A swing caught
+/// halfway turns around from where it is (`motion.js`).
+function swingLid(shut, onShut) {
+  if (video.shut === shut && !nowLid.hidden === shut) {
+    if (shut) onShut?.();
+    return;
+  }
+  video.shut = shut;
+  $("nowCard").classList.toggle("lidded", shut);
+  moveArm();
+  if (shut) {
+    if (nowLid.hidden) {
+      nowLid.hidden = false;
+      place(nowLid, { rotateX: LID_OPEN });
+    }
+    // A little give as it lands: a lid has weight.
+    animate(nowLid, { rotateX: 0 }, { dampingRatio: 0.78, responseScale: 1.5, onRest: onShut });
+  } else {
+    animate(
+      nowLid,
+      { rotateX: LID_OPEN },
+      {
+        responseScale: 1.4,
+        onRest: () => {
+          if (!video.shut) nowLid.hidden = true;
+        },
+      },
+    );
+  }
+}
+
+/// The record steps aside for a corner screen, or comes back.
+function deckFor(screen) {
+  const decked = screen;
+  if (video.decked === decked) return;
+  video.decked = decked;
+  deckScreen.hidden = !decked;
+  const width = $("nowTurntable").offsetWidth || 1;
+  if (decked) animate(nowDeck, { scale: 0.62, x: width * 0.02, y: width * 0.03 });
+  else animate(nowDeck, { scale: 1, x: 0, y: 0 });
+}
+
+/// Where the video is shown now: the closed lid's screen, the plinth's
+/// corner, the window's corner — or nowhere (it is not playing then).
+function placeVideo() {
+  const watching = video.mode === "video" && video.shut;
+  let slot = null;
+  if (video.now) {
+    if (nowSheet.hidden || !nowOpen) slot = video.away === "corner" ? videoCornerSlot : null;
+    else if (watching) slot = lidScreen;
+    else if (video.now.only) slot = deckScreen;
+  }
+  deckFor(Boolean(video.now?.only) && !watching && nowOpen);
+  videoCornerSlot.hidden = slot !== videoCornerSlot;
+  document.body.classList.toggle("video-cornered", slot === videoCornerSlot);
+  if (slot === videoLayer.slot()) return;
+  if (slot) {
+    videoLayer.attach(slot);
+    animate(videoScreen, { opacity: 1, scale: 1 }, { from: { opacity: 0, scale: 0.96 } });
+  } else {
+    videoLayer.attach(null);
+  }
+}
+
+/// Loads a source into the player, from `atMs`.
+function loadVideo(source, mediaUrl, atMs) {
+  if (source.kind === "youtube") {
+    videoLayer.load({ kind: "youtube", videoId: source.video_id, startMs: atMs });
+  } else if (mediaUrl) {
+    videoLayer.load({ kind: "file", url: mediaUrl, startMs: atMs });
+  }
+}
+
+/// The switch: music or video.
+async function setMediaMode(mode) {
+  if (!video.enabled) return;
+  if (mode === video.mode && !video.looking) return;
+  if (!queue.items[queue.position]) {
+    selectMedia("music");
+    return;
+  }
+  video.mode = mode;
+  mediaNote(null);
+  if (mode === "video") {
+    if (video.now) {
+      // A video that is all the track has is already playing in the corner
+      // of the plinth: the lid comes down over it.
+      swingLid(true, placeVideo);
+      placeVideo();
+      return;
+    }
+    await watch(anchor ? positionAt(anchor, Date.now()) : 0);
+  } else {
+    await backToMusic();
+  }
+}
+
+/// Finds the playing track's video and hands it the sound at `atMs`.
+async function watch(atMs) {
+  await changing(async () => {
+    mediaNote("Looking for the video…");
+    // The record stops and the arm lifts as the lid comes down; the video
+    // is found meanwhile.
+    swingLid(true, placeVideo);
+    const plan = await call("video_find");
+    if (video.mode !== "video") return;
+    if (!plan || plan.candidates.length === 0) {
+      await giveUpOnVideo(plan ? "We couldn't find a video for this song." : null);
+      return;
+    }
+    video.plan = plan;
+    video.index = 0;
+    await showCandidate(atMs);
+  });
+}
+
+/// A change of our own on its way to the core: the rounds that come
+/// meanwhile were counted before it, and are not followed (`followCoreVideo`).
+async function changing(work) {
+  const was = video.looking;
+  video.looking = true;
+  try {
+    await work();
+  } finally {
+    video.looking = was;
+  }
+}
+
+/// Shows the plan's current candidate from `atMs`.
+async function showCandidate(atMs) {
+  const candidate = video.plan?.candidates[video.index];
+  if (!candidate) return;
+  const shown = await call("video_show", {
+    source: candidate.source,
+    provider: video.plan.provider,
+    atMs: Math.round(atMs),
+  });
+  if (!shown) {
+    giveUpOnVideo(null);
+    return;
+  }
+  video.now = { source: candidate.source, provider: video.plan.provider, only: false };
+  mediaNote(null);
+  loadVideo(candidate.source, shown.media_url, atMs);
+  renderAnchor(shown.anchor);
+  placeVideo();
+}
+
+/// No video after all: back to the music, and why.
+async function giveUpOnVideo(why) {
+  video.mode = "music";
+  selectMedia("music");
+  mediaNote(why);
+  await backToMusic();
+}
+
+/// Back to the music, from the second the video was at.
+async function backToMusic() {
+  await changing(handBack);
+}
+
+async function handBack() {
+  const now = video.now;
+  if (now?.only) {
+    // The video is all the track has: the record comes up, the video goes
+    // on in the corner of the plinth.
+    swingLid(false);
+    placeVideo();
+    return;
+  }
+  const atMs = now ? videoLayer.positionMs() : anchor ? positionAt(anchor, Date.now()) : 0;
+  video.now = null;
+  video.plan = null;
+  animate(videoScreen, { opacity: 0, scale: 0.96 }, { onRest: () => (video.now ? null : videoLayer.clear()) });
+  swingLid(false);
+  const next = await call("video_audio", { atMs: Math.round(atMs) });
+  if (next) renderAnchor(next);
+  placeVideo();
+}
+
+/// The video ran to its end: the queue moves on; the next track's video is
+/// found when the core says it started (the tick).
+async function videoEnded() {
+  const view = await call("video_ended");
+  if (view) renderQueue(view);
+}
+
+/// The player refused the video (its owner keeps it off other sites): the
+/// next match, or — none left — the music.
+async function videoRefused() {
+  if (video.plan && video.index + 1 < video.plan.candidates.length) {
+    video.index += 1;
+    await changing(() => showCandidate(videoLayer.positionMs()));
+    return;
+  }
+  if (video.now?.only) {
+    toast({ stage: "VIDEO_PLAYBACK", chain: "STEP: VIDEO_PLAYBACK\n  → the player refused this video" });
+    await videoEnded();
+    return;
+  }
+  await giveUpOnVideo("This video can't be played here — back to the music.");
+}
+/// The core's word on the video, each round it changes (the tick): a track
+/// that is a video only starts showing; a video whose track is over goes; a
+/// new track while watching gets its video looked up. Not while a change of
+/// our own is on its way — a round counted before it would undo it.
+async function followCoreVideo(report) {
+  if (video.looking || !video.enabled) return;
+  const coreVideo = report.video ?? null;
+  const same =
+    coreVideo && video.now && JSON.stringify(coreVideo.source) === JSON.stringify(video.now.source);
+  if (coreVideo && !same) {
+    // The core started a video on its own: a track that is a video only.
+    video.now = coreVideo;
+    video.plan = null;
+    const url = coreVideo.source.kind === "local_file" ? await call("video_media") : null;
+    loadVideo(coreVideo.source, url, 0);
+    if (video.mode === "video") swingLid(true, placeVideo);
+    else swingLid(false);
+    placeVideo();
+    return;
+  }
+  if (!coreVideo && video.now) {
+    // The track the video belonged to is over.
+    video.now = null;
+    video.plan = null;
+    videoLayer.clear();
+    placeVideo();
+  }
+  if (coreVideo || video.mode !== "video") return;
+  if (report.video_mode && report.anchor.state !== "stopped") {
+    // Watching: the new track waits, paused, for its video.
+    await watch(0);
+  } else {
+    video.mode = "music";
+    selectMedia("music");
+    swingLid(false);
+  }
+}
+/// Leaving the player while a video plays — or coming back to it.
+function videoAwayChanged(open) {
+  if (!video.now) return;
+  if (!open && video.away === "music") {
+    if (video.now.only) videoLayer.pause();
+    else {
+      video.mode = "music";
+      selectMedia("music");
+      backToMusic();
+      return;
+    }
+  }
+  placeVideo();
+}
+
+// — music videos on or off
+
+const videosSwitch = toggleSwitch($("videosSwitch"), (on) => setVideosOn(on));
+
+/// Turns music videos on or off. Off, a video being shown goes first: one
+/// with music hands the sound back to it, one that is all its track has is
+/// passed by — and the window is the record player it was.
+async function setVideosOn(on) {
+  if (!on && video.now && !video.now.only) await backToMusic();
+  const saved = await call("videos_set", { on });
+  if (saved === undefined) {
+    paintVideosOn(video.enabled);
+    return;
+  }
+  if (!saved && video.now) {
+    video.now = null;
+    video.plan = null;
+    videoLayer.clear();
+    placeVideo();
+    // The player passes videos by now: the queue moves to the next song.
+    await videoEnded();
+  }
+  paintVideosOn(saved);
+}
+
+function paintVideosOn(on) {
+  video.enabled = on;
+  document.body.classList.toggle("videos-off", !on);
+  videosSwitch.set(on, { instant: !$("videosSwitch").offsetWidth });
+  if (!on) {
+    video.mode = "music";
+    selectMedia("music");
+    mediaNote(null);
+    swingLid(false);
+    placeVideo();
+  } else {
+    mediaSwitch.placeThumb(true);
+  }
+}
+
+// — the window's choice
+
+const videoAwaySwitch = segmented($("videoAwaySwitch"), async (segment) => {
+  const away = await call("video_away_set", { away: segment.dataset.away });
+  paintVideoAway(away ?? video.away);
+});
+
+function paintVideoAway(away) {
+  video.away = away === "corner" ? "corner" : "music";
+  for (const each of $("videoAwaySwitch").querySelectorAll(".segment")) {
+    const on = each.dataset.away === video.away;
+    each.setAttribute("aria-checked", String(on));
+    each.tabIndex = on ? 0 : -1;
+  }
+  videoAwaySwitch.placeThumb(true);
+}
+
+async function refreshVideoAway() {
+  const away = await call("video_away");
+  if (away) paintVideoAway(away);
+}
+
+// — who plays each role (D-086)
+
+const SEARCH = 1 << 0;
+const VIDEO = 1 << 6;
+let roles = null;
+
+/// Can a provider with these capabilities play the role? The core's
+/// `Role::fits` decides when one is chosen; this only keeps the lists short.
+function fitsRole(role, capabilities) {
+  if ((capabilities & SEARCH) === 0) return false;
+  // Videos off: a source that only shows videos is not offered at all.
+  if (!video.enabled) return role !== "video" && (capabilities & STREAM) !== 0;
+  if (role === "video") return (capabilities & VIDEO) !== 0;
+  return (capabilities & (STREAM | VIDEO)) !== 0;
+}
+
+function renderRoles(list) {
+  roles = list.roles;
+  for (const role of ["music", "video"]) {
+    const box = $(`${role}FromList`);
+    const pill = $(`${role}FromPill`);
+    const choice = roles[role];
+    const rows = [
+      roleRow(role, null, `same as your main source`, choice.follows_main),
+      ...list.providers
+        .filter((info) => fitsRole(role, info.capabilities))
+        .map((info) => roleRow(role, info.id, info.display_name, !choice.follows_main && choice.provider === info.id)),
+    ];
+    box.replaceChildren(pill, ...rows);
+    placeRolePill(role, true);
+  }
+  const note = $("videoFromNote");
+  note.hidden = roles.video.provider !== null;
+  note.textContent = roles.video.provider ? "" : "None of your sources has videos yet.";
+}
+
+function roleRow(role, id, name, chosen) {
+  const row = h(
+    "button",
+    {
+      type: "button",
+      role: "radio",
+      class: "play-from-row",
+      "aria-checked": String(chosen),
+      tabindex: chosen ? "0" : "-1",
+      dataset: { provider: id ?? "" },
+    },
+    h("span", { class: "play-from-name", text: name }),
+    id ? h("span", { class: "play-from-id debug-only", text: id }) : null,
+  );
+  row.addEventListener("pointerdown", (event) => {
+    if (event.button === 0 && event.pointerType !== "touch") chooseRole(role, id);
+  });
+  row.addEventListener("click", () => chooseRole(role, id));
+  return row;
+}
+
+function placeRolePill(role, instant) {
+  const pill = $(`${role}FromPill`);
+  const row = [...$(`${role}FromList`).querySelectorAll(".play-from-row")].find(
+    (each) => each.getAttribute("aria-checked") === "true",
+  );
+  if (!row?.offsetHeight) {
+    pill.hidden = true;
+    return;
+  }
+  pill.style.height = `${row.offsetHeight}px`;
+  if (instant || pill.hidden) {
+    place(pill, { y: row.offsetTop });
+    pill.hidden = false;
+  } else {
+    animate(pill, { y: row.offsetTop });
+  }
+}
+
+async function chooseRole(role, id) {
+  for (const row of $(`${role}FromList`).querySelectorAll(".play-from-row")) {
+    const chosen = row.dataset.provider === (id ?? "");
+    row.setAttribute("aria-checked", String(chosen));
+    row.tabIndex = chosen ? 0 : -1;
+  }
+  placeRolePill(role, false);
+  const report = await call("provider_role_set", { role, name: id });
+  // The main source's list and the play box follow what the core says now.
+  refreshProviders();
+  if (report && role === "music") {
+    playFrom = report.roles.music;
+    updatePlayPlaceholder();
+  }
+}
+
 // ————————————————————————————————————— startup
 
 (async function boot() {
@@ -4291,6 +4800,12 @@ listen("headshell://busy", (event) => {
   renderQueue(await call("queue"));
   renderAnchor(await call("anchor"));
   refreshLyrics();
+  // What a video does when the player is left (D-086): known before the
+  // first video is left, not only once settings open. Whether videos are on
+  // at all, before the card is drawn without its switch.
+  refreshVideoAway();
+  const videosOn = await call("videos_enabled");
+  if (videosOn !== undefined) paintVideosOn(videosOn);
 
   // Where the play box searches first, and the providers' names — for its
   // placeholder and its suggestions (D-080). Read from disk; nothing goes

@@ -1,4 +1,5 @@
-//! The user's choices: the provider the play box searches first (D-080),
+//! The user's choices: the provider the play box searches first (D-080) —
+//! since D-086 the main provider, with music and video chosen apart from it —
 //! whether the desktop goes online (D-082), and the music folders (D-085).
 //!
 //! A file of its own, `preferences.json`, not the database: a choice is not
@@ -21,8 +22,20 @@ use crate::session::LookupMode;
 pub struct Preferences {
     /// The provider the play box and its suggestions ask first; `None`:
     /// nothing chosen, the registry's first one that can play (local files).
+    ///
+    /// Since D-086 this is the **main** provider: music and video follow it
+    /// until each is chosen on its own. The key keeps its name, so a file
+    /// written before keeps its choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_from: Option<ProviderId>,
+    /// The provider the play box searches, when it is not the main one
+    /// (D-086); `None`: it follows the main provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_from: Option<ProviderId>,
+    /// The provider a song's video is found at, when it is not the main one
+    /// (D-086); `None`: it follows the main provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_from: Option<ProviderId>,
     /// Whether the desktop asks MusicBrainz and the Cover Art Archive
     /// (D-082); `None`: nothing chosen — offline. The CLI does not read it:
     /// every run there chooses with `--online`.
@@ -86,6 +99,8 @@ mod tests {
 
         let chosen = Preferences {
             play_from: Some(ProviderId::new("ytmusic")),
+            music_from: None,
+            video_from: Some(ProviderId::new("youtube")),
             lookup: Some(LookupMode::Online),
             music_dirs: Some(vec![PathBuf::from("/music")]),
         };

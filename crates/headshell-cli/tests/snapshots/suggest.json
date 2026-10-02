@@ -2,6 +2,7 @@
   "failures": [],
   "play_from": {
     "chosen": false,
+    "follows_main": true,
     "instant": true,
     "missing": null,
     "provider": "local"

@@ -264,7 +264,8 @@ async fn a_hanging_plugin_times_out_instead_of_freezing_the_core() {
          export function search() { return []; }\n\
          export function resolve_source() { return null; }\n\
          export function artwork() { return null; }\n\
-         export function lyrics() { return null; }\n",
+         export function lyrics() { return null; }\n\
+         export function resolve_video() { return null; }\n",
     )
     .unwrap();
 

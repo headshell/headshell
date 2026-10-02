@@ -713,6 +713,9 @@ Q4 — Test path (1.3 can't count as "done" before this is answered)
 ### 1.4 The playback pipeline — DONE
 `symphonia` (decoding) + `cpal` (output). Pure Rust, no external dependency.
 Video is out of scope — if needed, it is discussed as a separate provider.
+**Discussed in D-086 (§3.20):** a video is not a separate track but another
+surface of the same one — the engine pauses, the shell's player makes the
+sound, and the listen is the same listen.
 
 **Applied (D-016).** Decoding runs on a background thread, output in the cpal
 callback; there is a ring buffer between them, and **the audio callback never
@@ -2427,6 +2430,27 @@ checking for new music at once.
 to end through a scan, the container — a folder added through the dialog and
 taken off.
 
+### 3.20 Music videos — DONE (D-086)
+
+**The problem:** a song's video was out of scope (§1.4), and the only way to
+play YouTube was yt-dlp — the gray route.
+
+**Done:** a *music · video* switch on the turntable: the suitcase lid swings
+down and the video plays on its inside from the second the music was at, and
+back. Videos come from the track itself (a local video file, a plugin item)
+or from the provider chosen for videos — searched for the song. Roles: main,
+music, video (`provider use --for`, `provider follow`). Plugin api 5:
+`video` required, `resolve_video(id)`. The `youtube` plugin plays through
+YouTube's official player; the page is served from `http://localhost:<port>/`
+for it, local video files from a shell server. `headshell video`. Settings →
+*music videos* turns all of it off: the window is the record player it was.
+The settings are grouped — listening, internet, advanced.
+
+**Testing / verification:** the core's clock, listens, roles, matching and
+contract; the CLI end to end; the shell's server and ACL list; the plugins
+live against a mirror; the container — the lid both ways, YouTube and a local
+file, the plinth's corner, the window's corner.
+
 ---
 
 # PHASE 4 — Rooms (the backend starts here)
@@ -2555,6 +2579,7 @@ For platforms with DRM two ways remain: driving the platform's **own** player
 | **SoundCloud** | `SEARCH BROWSE STREAM` | No DRM. There is an official API, but key applications have been closed/intermittent for years; the practical way is yt-dlp. §2 K5's reference plugin is this one anyway. Some tracks (Go+, private) can't be accessed — the plugin **counts and reports** them, it doesn't silently skip them (K9). |
 | **Qobuz** | `SEARCH BROWSE STREAM` | No DRM; FLAC downloads to the subscriber unencrypted. No official public API; it is known through reverse engineering. A subscription is required. The cleanest source for a hi-res catalog. |
 | **YouTube Music** | `SEARCH BROWSE STREAM` | No DRM; the way is yt-dlp. **The highest maintenance cost:** YouTube actively makes it harder (nsig, PO tokens). That is exactly why it is a plugin — when it breaks, the core stays up. |
+| **YouTube** (videos) | `SEARCH VIDEO` | **The official route** (D-086): YouTube's own player, the IFrame embed — nothing downloaded, no stream resolved, YouTube's ads and counting kept. Its rules are the window's to keep: visible while it plays, nothing over it, never under 200 × 200. Search through InnerTube (the one gray part, the user's choice). Needs the page served over `http(s)` — a custom scheme sends no `Referer` ("Error 153"). |
 | **Tidal** | `SEARCH BROWSE` | The official developer API gives catalog/search. Full streaming depends on the partner program; the high-quality tiers have DRM. Tidal Connect is a certified-device programme, not open to everyone. |
 | **Apple Music** | `SEARCH BROWSE` | MusicKit is **official and legitimate** — with a developer token + a user token the catalog and the user's library are fetched. But playing needs the MusicKit runtime: it isn't on Linux, and WebKitGTK has no FairPlay. `STREAM` could be opened in Phase 6's iOS/macOS versions. |
 | **Deezer** | `SEARCH BROWSE` | The public API is official and good for metadata. The stream is encrypted with Blowfish → a protection measure → the other side of the line. |
@@ -2613,3 +2638,5 @@ identity from.** The product was the second — CLAUDE.md's first sentence.
 | **anchor** | `{track, wall_time, position, rate, state}` — the single primitive of room sync |
 | **resolve** | Matching a track to a canonical ID, and from there to a provider ID |
 | **accuracy set** | `fixtures/identity/cases.json` — hand-labelled matching tests |
+| **role** | The part a provider plays (D-086): **main** (the play box's first, what the others follow), **music**, **video** |
+| **surface** | Who makes the playing track's sound (D-086): the audio engine, or the shell's video player |

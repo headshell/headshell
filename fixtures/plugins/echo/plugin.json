@@ -1,10 +1,11 @@
 {
   "name": "echo",
   "display_name": "Echo (test)",
-  "version": "0.2.0",
-  "api": 4,
+  "version": "0.3.0",
+  "api": 5,
   "artwork": true,
   "lyrics": true,
+  "video": true,
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {

@@ -175,13 +175,27 @@ export function watchMotionPreference() {
 
 // ————————————————————————————————————— element springs
 //
-// Each element's on-screen values are kept here (`x`, `y`, `rotate` in
-// degrees, `scaleX`, `scaleY`, `opacity`), and a single
+// Each element's on-screen values are kept here (`x`, `y`, `rotate` and
+// `rotateX` in degrees, `scaleX`, `scaleY`, `opacity`), and a single
 // `requestAnimationFrame` loop advances all the running springs. A new target
 // **takes over** the spring on the same property (rule 2).
 
-const RESTING = { x: 0, y: 0, rotate: 0, scaleX: 1, scaleY: 1, opacity: 1 };
-const PRECISION = { x: 0.1, y: 0.1, rotate: 0.02, scaleX: 0.0005, scaleY: 0.0005, opacity: 0.002 };
+const RESTING = { x: 0, y: 0, rotate: 0, rotateX: 0, scaleX: 1, scaleY: 1, opacity: 1 };
+const PRECISION = {
+  x: 0.1,
+  y: 0.1,
+  rotate: 0.02,
+  rotateX: 0.02,
+  scaleX: 0.0005,
+  scaleY: 0.0005,
+  opacity: 0.002,
+};
+
+/// The depth a tilt (`rotateX`) is seen from, in px: a lid swinging shut
+/// (D-086) foreshortens as a real one does from a step away. It is part of
+/// the transform, not the parent's `perspective`, so an element carries its
+/// own depth wherever it sits.
+const PERSPECTIVE_PX = 1100;
 
 const bodies = new WeakMap();
 const active = new Set();
@@ -194,7 +208,7 @@ function bodyOf(el) {
     body = {
       el,
       values: { ...RESTING },
-      velocities: { x: 0, y: 0, rotate: 0, scaleX: 0, scaleY: 0, opacity: 0 },
+      velocities: { x: 0, y: 0, rotate: 0, rotateX: 0, scaleX: 0, scaleY: 0, opacity: 0 },
       springs: new Map(),
     };
     bodies.set(el, body);
@@ -217,17 +231,19 @@ function expand(values) {
 }
 
 function write(body) {
-  const { x, y, rotate, scaleX, scaleY, opacity } = body.values;
+  const { x, y, rotate, rotateX, scaleX, scaleY, opacity } = body.values;
   // An element at rest carries no transform: a permanent layer blurs text in
   // some engines. That is why an element driven by springs **must not have a
   // `transform` of its own in the stylesheet** — an element settling on the
   // identity transform drops its inline value and falls back to the
   // stylesheet's (a bar reaching full width went back to `scaleX(0)` and
   // disappeared). The starting state is given with `from`.
-  const still = x === 0 && y === 0 && rotate === 0 && scaleX === 1 && scaleY === 1;
+  const still =
+    x === 0 && y === 0 && rotate === 0 && rotateX === 0 && scaleX === 1 && scaleY === 1;
+  const tilt = rotateX === 0 ? "" : `perspective(${PERSPECTIVE_PX}px) rotateX(${rotateX}deg) `;
   body.el.style.transform = still
     ? ""
-    : `translate3d(${x}px, ${y}px, 0) rotate(${rotate}deg) scale(${scaleX}, ${scaleY})`;
+    : `${tilt}translate3d(${x}px, ${y}px, 0) rotate(${rotate}deg) scale(${scaleX}, ${scaleY})`;
   body.el.style.opacity = opacity === 1 ? "" : String(Math.min(1, Math.max(0, opacity)));
 }
 

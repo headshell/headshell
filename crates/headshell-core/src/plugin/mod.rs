@@ -126,6 +126,10 @@ pub struct PluginEntry {
     /// `None` when the manifest could not be read.
     #[serde(default)]
     pub lyrics: Option<bool>,
+    /// Does it give videos (api 5, D-086) — what its manifest declares.
+    /// `None` when the manifest could not be read.
+    #[serde(default)]
+    pub video: Option<bool>,
     /// Why it cannot load, if it cannot — one line, copyable.
     pub problem: Option<String>,
 }
@@ -338,6 +342,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
                 requires: Vec::new(),
                 artwork: None,
                 lyrics: None,
+                video: None,
                 problem: Some(problem),
             };
         }
@@ -362,6 +367,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
         requires,
         artwork: Some(manifest.artwork),
         lyrics: Some(manifest.lyrics),
+        video: Some(manifest.video),
         problem,
     }
 }
@@ -592,8 +598,8 @@ impl PluginProvider {
                 "`browse`/`control` do not map to a function in api 3; the declaration only shows in the list"
             );
         }
-        // Covers and lyrics are not capability names but required
-        // yes-or-noes (api 3, D-076; api 4, D-078).
+        // Covers, lyrics and videos are not capability names but required
+        // yes-or-noes (api 3, D-076; api 4, D-078; api 5, D-086).
         let capabilities = if manifest.artwork {
             capabilities | Capabilities::ARTWORK
         } else {
@@ -601,6 +607,11 @@ impl PluginProvider {
         };
         let capabilities = if manifest.lyrics {
             capabilities | Capabilities::LYRICS
+        } else {
+            capabilities
+        };
+        let capabilities = if manifest.video {
+            capabilities | Capabilities::VIDEO
         } else {
             capabilities
         };
@@ -974,6 +985,46 @@ impl PluginProvider {
             source: crate::lyrics::LyricsSource::Provider,
         }))
     }
+
+    /// The plugin's video for an item (api 5, D-086): a source the app's
+    /// own player shows. A plugin cannot hand over a file — the same line
+    /// `resolve_source` draws — and a YouTube id must have its shape.
+    fn video_now(&self, id: &ProviderTrackId) -> Result<Option<crate::video::VideoSource>> {
+        if !self.capabilities.contains(Capabilities::VIDEO) {
+            return Err(self.unsupported("videos"));
+        }
+        if id.provider != self.id {
+            return Err(Error::new(
+                Stage::VideoLookup,
+                ErrorKind::InvalidInput {
+                    detail: format!(
+                        "a {} id cannot be asked of the {} plugin",
+                        id.provider, self.id
+                    ),
+                },
+            ));
+        }
+        let value = self.call(export::RESOLVE_VIDEO, vec![serde_json::json!(id.id)])?;
+        let source: Option<crate::video::VideoSource> =
+            serde_json::from_value(value).map_err(|err| {
+                self.contract(
+                    export::RESOLVE_VIDEO,
+                    format!("expected `{{ kind: \"youtube\", video_id }}` or `null`: {err}"),
+                )
+            })?;
+        match &source {
+            Some(crate::video::VideoSource::LocalFile { .. }) => Err(self.contract(
+                export::RESOLVE_VIDEO,
+                "a plugin cannot hand over a file — only the local provider gives `local_file`"
+                    .to_owned(),
+            )),
+            Some(source) => match source.check() {
+                Ok(()) => Ok(Some(source.clone())),
+                Err(err) => Err(self.contract(export::RESOLVE_VIDEO, err.chain_text())),
+            },
+            None => Ok(None),
+        }
+    }
 }
 
 impl Provider for PluginProvider {
@@ -1029,6 +1080,13 @@ impl Provider for PluginProvider {
 
     fn lyrics<'a>(&'a self, id: &'a ProviderTrackId) -> ProviderFuture<'a, Option<ProviderLyrics>> {
         Box::pin(std::future::ready(self.lyrics_now(id)))
+    }
+
+    fn resolve_video<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+    ) -> ProviderFuture<'a, Option<crate::video::VideoSource>> {
+        Box::pin(std::future::ready(self.video_now(id)))
     }
 
     /// A plugin's tracks come from the internet anyway: their lyrics are

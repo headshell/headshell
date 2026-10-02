@@ -62,6 +62,10 @@ impl Capabilities {
     pub const ARTWORK: Self = Self(1 << 4);
     /// Can hand over a track's lyrics (D-078).
     pub const LYRICS: Self = Self(1 << 5);
+    /// Can hand over a track's video (D-086): a file to show, or a video for
+    /// a player the shell embeds. Without `STREAM` a provider's tracks are
+    /// video only — the video is all the sound there is.
+    pub const VIDEO: Self = Self(1 << 6);
 
     /// No capability at all.
     pub const NONE: Self = Self(0);
@@ -98,6 +102,7 @@ impl Capabilities {
             (Self::CONTROL, "CONTROL"),
             (Self::ARTWORK, "ARTWORK"),
             (Self::LYRICS, "LYRICS"),
+            (Self::VIDEO, "VIDEO"),
         ];
         let names: Vec<&str> = all
             .iter()
@@ -338,6 +343,28 @@ pub trait Provider: Send + Sync {
             crate::error::ErrorKind::Unsupported {
                 provider: info.id.as_str().to_owned(),
                 what: "lyrics".to_owned(),
+                capabilities: info.capabilities.describe(),
+            },
+        ))))
+    }
+
+    /// The track's video (D-086). Needs the `VIDEO` flag.
+    ///
+    /// `Ok(None)`: this provider has no video for the track — "I looked,
+    /// there is none" (a local audio file, a plugin item without a video).
+    /// Without the flag the default returns `Unsupported`, because "I can't"
+    /// is a different answer (K9).
+    fn resolve_video<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+    ) -> ProviderFuture<'a, Option<crate::video::VideoSource>> {
+        let _ = id;
+        let info = self.info();
+        Box::pin(std::future::ready(Err(crate::Error::new(
+            crate::diag::Stage::VideoLookup,
+            crate::error::ErrorKind::Unsupported {
+                provider: info.id.as_str().to_owned(),
+                what: "videos".to_owned(),
                 capabilities: info.capabilities.describe(),
             },
         ))))

@@ -96,19 +96,24 @@ pub struct WrittenCard {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderListReport {
     pub providers: Vec<ProviderInfo>,
-    /// Which of them the play box asks first (D-080).
+    /// Which of them the play box asks first (D-080) — the music role.
     pub play_from: PlayFrom,
+    /// Who plays each role (D-086).
+    pub roles: ProviderRoles,
     pub diag: DiagReport,
 }
 
 /// Where the play box and its suggestions search first (D-080). The others
 /// are asked only when this one finds nothing.
+///
+/// Since D-086 the same shape says who plays any [`Role`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayFrom {
     /// The provider asked first; `None` when no registered provider can play.
     pub provider: Option<ProviderId>,
-    /// The user chose it; `false`: nothing chosen yet, so the registry's
-    /// first one that can play — local files.
+    /// The user chose it — for this role, or for the main role this one
+    /// follows; `false`: nothing chosen yet, so the registry's first one
+    /// that can play — local files.
     pub chosen: bool,
     /// Its answers come from the scanned catalog: at once, without the
     /// network. Otherwise it is asked over its own connection, and the
@@ -118,6 +123,100 @@ pub struct PlayFrom {
     /// or can no longer play (a server removed, a plugin disabled). Said, not
     /// dropped (K9).
     pub missing: Option<ProviderId>,
+    /// Music or video with no choice of its own: the main provider's — or,
+    /// when the main one cannot play this role, the registry's first that
+    /// can (D-086). Always `false` for the main role.
+    #[serde(default)]
+    pub follows_main: bool,
+}
+
+/// A part a provider plays (D-086).
+///
+/// The play box searches the **music** provider; a song's video is found at
+/// the **video** provider; both follow the **main** provider until the user
+/// picks them apart, and changing the main one moves those that follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Main,
+    Music,
+    Video,
+}
+
+impl Role {
+    /// The name the CLI and the JSON use.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Music => "music",
+            Self::Video => "video",
+        }
+    }
+
+    /// Reads a role's name.
+    ///
+    /// # Errors
+    /// If it is not one of `main`, `music`, `video`.
+    pub fn parse(text: &str) -> Result<Self> {
+        match text.trim() {
+            "main" => Ok(Self::Main),
+            "music" => Ok(Self::Music),
+            "video" => Ok(Self::Video),
+            other => Err(Error::new(
+                Stage::ConfigLoad,
+                ErrorKind::InvalidInput {
+                    detail: format!("{other:?} is not a role — it is main, music or video"),
+                },
+            )),
+        }
+    }
+
+    /// Can a provider with these capabilities play this role? Every role
+    /// searches; music and the main role play — sound, or a video for the
+    /// sound — and the video role shows videos.
+    #[must_use]
+    pub fn fits(self, capabilities: crate::provider::Capabilities) -> bool {
+        use crate::provider::Capabilities as C;
+        capabilities.contains(C::SEARCH)
+            && match self {
+                Self::Main | Self::Music => {
+                    capabilities.contains(C::STREAM) || capabilities.contains(C::VIDEO)
+                }
+                Self::Video => capabilities.contains(C::VIDEO),
+            }
+    }
+}
+
+/// Who plays each role (D-086).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRoles {
+    pub main: PlayFrom,
+    pub music: PlayFrom,
+    pub video: PlayFrom,
+}
+
+/// What `headshell provider use --for <role>` and `provider follow` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RolesReport {
+    pub roles: ProviderRoles,
+    pub diag: DiagReport,
+}
+
+/// What `headshell video` looks a video up for (D-086).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoTarget {
+    /// `Artist - Title`.
+    Query(String),
+    /// A file: its own video first, when the local provider shows videos.
+    File(PathBuf),
+}
+
+/// What `headshell video` answers: the videos found for a track (D-086).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoReport {
+    pub plan: crate::video::VideoPlan,
+    pub diag: DiagReport,
 }
 
 /// What `headshell provider use` answers.
@@ -454,6 +553,9 @@ pub struct PlayOptions {
     pub dry_run: bool,
     /// The maximum number of search results to take.
     pub limit: usize,
+    /// The shell shows videos (D-086): a track that is a video only plays
+    /// as one; without, it is passed by and counted.
+    pub shows_video: bool,
 }
 
 impl PlayOptions {
@@ -466,6 +568,7 @@ impl PlayOptions {
             shuffle: false,
             dry_run: false,
             limit: 100,
+            shows_video: false,
         }
     }
 }
@@ -511,6 +614,11 @@ pub struct PlayReport {
     pub listens_recorded: usize,
     /// Did it actually play (false with `--dry-run`).
     pub played: bool,
+    /// Queued tracks that are videos only and were passed by: they play in
+    /// the app's window, not here (D-086). With `--dry-run`, the ones that
+    /// would be.
+    #[serde(default)]
+    pub video_only: usize,
     pub diag: DiagReport,
 }
 
@@ -891,30 +999,51 @@ impl Session {
             "provider.count",
             i64::try_from(registry.len()).unwrap_or(i64::MAX),
         );
-        let result = self
-            .play_from(registry)
-            .map(|play_from| (registry.list(), play_from));
-        self.finish(rec, result, |(providers, play_from), diag| {
-            ProviderListReport {
-                providers,
-                play_from,
-                diag,
-            }
+        let result = self.roles(registry).map(|roles| (registry.list(), roles));
+        self.finish(rec, result, |(providers, roles), diag| ProviderListReport {
+            providers,
+            play_from: roles.music.clone(),
+            roles,
+            diag,
         })
     }
 
-    /// Where the play box searches first (D-080): the user's choice while
-    /// that provider is registered and can play; otherwise the registry's
-    /// first one that can — local files — and a choice that could not be
-    /// kept is named in `missing`.
+    /// Where the play box searches first (D-080): the music role's provider
+    /// (D-086) — the main one unless music was chosen on its own. A choice
+    /// that could not be kept is named in `missing`.
     ///
     /// # Errors
     /// If `preferences.json` cannot be read, or the catalog cannot say
     /// whether the provider was scanned.
     pub fn play_from(&self, registry: &ProviderRegistry) -> Result<PlayFrom> {
-        let saved = crate::preferences::load(&self.config.preferences_path())?.play_from;
-        let (provider, chosen, missing) = match saved {
-            Some(id) if can_play(registry, &id) => (Some(id), true, None),
+        Ok(self.roles(registry)?.music)
+    }
+
+    /// Who plays each role (D-086).
+    ///
+    /// - **main:** the user's choice while that provider is registered and
+    ///   can play; otherwise the registry's first one that can play sound —
+    ///   local files.
+    /// - **music:** its own choice; otherwise the main provider.
+    /// - **video:** its own choice; otherwise the main provider when it can
+    ///   show videos, and the registry's first one that can when it cannot.
+    ///
+    /// A choice that cannot be kept — the provider gone, or no longer fit
+    /// for the role — falls back the same way and is named in `missing`.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read, or the catalog cannot say
+    /// whether a provider was scanned.
+    pub fn roles(&self, registry: &ProviderRegistry) -> Result<ProviderRoles> {
+        let saved = crate::preferences::load(&self.config.preferences_path())?;
+        let fits = |id: &ProviderId, role: Role| {
+            registry
+                .get(id)
+                .is_some_and(|provider| role.fits(provider.info().capabilities))
+        };
+
+        let (main, main_chosen, main_missing) = match saved.play_from {
+            Some(id) if fits(&id, Role::Main) => (Some(id), true, None),
             saved => (
                 registry
                     .with_capability(crate::provider::Capabilities::STREAM)
@@ -924,22 +1053,66 @@ impl Session {
                 saved,
             ),
         };
-        let instant = match &provider {
-            Some(id) => self.library.last_scanned_at_ms(id)?.is_some(),
-            None => false,
+
+        // Following the main provider, music carries its lost choice too: the
+        // play box searches where the main one fell back to, and says why.
+        let (music, music_chosen, music_follows, music_missing) = match saved.music_from {
+            Some(id) if fits(&id, Role::Music) => (Some(id), true, false, None),
+            saved => (
+                main.clone(),
+                main_chosen,
+                true,
+                saved.or(main_missing.clone()),
+            ),
         };
-        Ok(PlayFrom {
-            provider,
-            chosen,
-            instant,
-            missing,
+
+        let (video, video_chosen, video_follows, video_missing) = match saved.video_from {
+            Some(id) if fits(&id, Role::Video) => (Some(id), true, false, None),
+            saved => match main.clone().filter(|id| fits(id, Role::Video)) {
+                Some(id) => (Some(id), main_chosen, true, saved),
+                None => (
+                    registry
+                        .all()
+                        .iter()
+                        .map(|provider| provider.info())
+                        .find(|info| Role::Video.fits(info.capabilities))
+                        .map(|info| info.id),
+                    false,
+                    true,
+                    saved,
+                ),
+            },
+        };
+
+        let entry = |provider: Option<ProviderId>,
+                     chosen: bool,
+                     follows_main: bool,
+                     missing: Option<ProviderId>|
+         -> Result<PlayFrom> {
+            let instant = match &provider {
+                Some(id) => self.library.last_scanned_at_ms(id)?.is_some(),
+                None => false,
+            };
+            Ok(PlayFrom {
+                provider,
+                chosen,
+                instant,
+                missing,
+                follows_main,
+            })
+        };
+        Ok(ProviderRoles {
+            main: entry(main, main_chosen, false, main_missing)?,
+            music: entry(music, music_chosen, music_follows, music_missing)?,
+            video: entry(video, video_chosen, video_follows, video_missing)?,
         })
     }
 
-    /// Chooses where the play box searches first (D-080). Only a registered
-    /// provider that can play can be chosen; the choice is kept in
-    /// `preferences.json`, and the CLI's `play` follows it as the desktop's
-    /// play box does.
+    /// Chooses where the play box searches first (D-080): the **main**
+    /// provider since D-086 — music and video move with it unless each was
+    /// chosen on its own. Only a registered provider that can play can be
+    /// chosen; the choice is kept in `preferences.json`, and the CLI's
+    /// `play` follows it as the desktop's play box does.
     ///
     /// # Errors
     /// If no such provider is registered, it cannot play, or the choice
@@ -953,7 +1126,45 @@ impl Session {
             format!("provider use {id}"),
             Some(self.config.data_dir().to_path_buf()),
         );
-        let result = (|| {
+        let result = self
+            .store_role(registry, Role::Main, Some(id))
+            .map(|roles| roles.music);
+        self.finish(rec, result, |play_from, diag| PlayFromReport {
+            play_from,
+            diag,
+        })
+    }
+
+    /// Chooses who plays a role (D-086); `None` lets music or video follow
+    /// the main provider again, and lets the main one fall back to the
+    /// registry's first that can play.
+    ///
+    /// # Errors
+    /// If no such provider is registered, it cannot play the role, or the
+    /// choice cannot be written.
+    pub fn set_role(
+        &self,
+        registry: &ProviderRegistry,
+        role: Role,
+        id: Option<&ProviderId>,
+    ) -> Result<RolesReport> {
+        let command = match id {
+            Some(id) => format!("provider use {id} --for {}", role.as_str()),
+            None => format!("provider follow {}", role.as_str()),
+        };
+        let rec = Recorder::start(command, Some(self.config.data_dir().to_path_buf()));
+        let result = self.store_role(registry, role, id);
+        self.finish(rec, result, |roles, diag| RolesReport { roles, diag })
+    }
+
+    /// Checks a role's new provider and writes the choice.
+    fn store_role(
+        &self,
+        registry: &ProviderRegistry,
+        role: Role,
+        id: Option<&ProviderId>,
+    ) -> Result<ProviderRoles> {
+        if let Some(id) = id {
             let Some(provider) = registry.get(id) else {
                 let known: Vec<String> = registry
                     .list()
@@ -972,29 +1183,193 @@ impl Session {
                 ));
             };
             let info = provider.info();
-            if !info
-                .capabilities
-                .contains(crate::provider::Capabilities::STREAM)
-            {
+            if !role.fits(info.capabilities) {
+                let what = match role {
+                    Role::Main => "playing — so it cannot be the one played from",
+                    Role::Music => "playing — so it cannot be the one music is played from",
+                    Role::Video => "showing videos — so it cannot be the one videos come from",
+                };
                 return Err(Error::new(
                     Stage::ProviderCall,
                     ErrorKind::Unsupported {
                         provider: info.id.to_string(),
-                        what: "playing — so it cannot be the one played from".to_owned(),
+                        what: what.to_owned(),
                         capabilities: info.capabilities.describe(),
                     },
                 ));
             }
-            let path = self.config.preferences_path();
-            let mut preferences = crate::preferences::load(&path)?;
-            preferences.play_from = Some(id.clone());
-            crate::preferences::save(&path, &preferences)?;
-            self.play_from(registry)
-        })();
-        self.finish(rec, result, |play_from, diag| PlayFromReport {
-            play_from,
-            diag,
+        }
+        let path = self.config.preferences_path();
+        let mut preferences = crate::preferences::load(&path)?;
+        let slot = match role {
+            Role::Main => &mut preferences.play_from,
+            Role::Music => &mut preferences.music_from,
+            Role::Video => &mut preferences.video_from,
+        };
+        *slot = id.cloned();
+        crate::preferences::save(&path, &preferences)?;
+        self.roles(registry)
+    }
+
+    /// The videos for a track (D-086). Its own video comes first, whoever is
+    /// chosen for videos: a video file is its own video, and so is a plugin
+    /// item that has one. Otherwise the video role's provider is searched for
+    /// the song.
+    ///
+    /// # Errors
+    /// If the track has no video of its own and no provider can show videos
+    /// — "I could not look" — or the video provider's search fails. Finding
+    /// nothing is not an error: the plan's candidates are empty and its
+    /// counts say why (K9).
+    pub async fn video_for(
+        &self,
+        registry: &ProviderRegistry,
+        item: &QueueItem,
+    ) -> Result<crate::video::VideoPlan> {
+        // The track's own video: the same file, the same plugin item.
+        if let Some(own) = registry.get(&item.id.provider)
+            && own
+                .info()
+                .capabilities
+                .contains(crate::provider::Capabilities::VIDEO)
+            && let Some(source) = own.resolve_video(&item.id).await?
+        {
+            source.check()?;
+            return Ok(crate::video::VideoPlan {
+                track: item.track.clone(),
+                provider: item.id.provider.clone(),
+                own: true,
+                candidates: vec![crate::video::VideoCandidate {
+                    id: item.id.clone(),
+                    track: item.track.clone(),
+                    score: 1.0,
+                    source,
+                }],
+                refused: 0,
+                without_video: 0,
+            });
+        }
+
+        let roles = self.roles(registry)?;
+        let Some(provider) = roles
+            .video
+            .provider
+            .as_ref()
+            .and_then(|id| registry.get(id))
+        else {
+            return Err(Error::new(
+                Stage::VideoLookup,
+                ErrorKind::NotFound {
+                    what: "a provider that can show videos (choose one: `headshell provider use <name> --for video`)".to_owned(),
+                },
+            ));
+        };
+        let video_provider = provider.info().id;
+
+        let query = crate::video::query_for(&item.track);
+        let catalog = self
+            .library
+            .search_catalog(&query, crate::video::SEARCH_ROWS)?;
+        let rows = self
+            .hits_from(&provider, &query, crate::video::SEARCH_ROWS, &catalog)
+            .await?
+            .into_iter()
+            .filter(|row| row.id != item.id)
+            .map(|row| crate::provider::ProviderTrack {
+                id: row.id,
+                track: row.track,
+            })
+            .collect();
+        let (ranked, refused) = crate::video::rank(&item.track, rows);
+
+        let mut candidates = Vec::new();
+        let mut without_video = 0;
+        for (row, score) in ranked {
+            if candidates.len() >= crate::video::MAX_CANDIDATES {
+                break;
+            }
+            match provider.resolve_video(&row.id).await {
+                Ok(Some(source)) if source.check().is_ok() => {
+                    candidates.push(crate::video::VideoCandidate {
+                        id: row.id,
+                        track: row.track,
+                        score,
+                        source,
+                    });
+                }
+                Ok(Some(_) | None) => without_video += 1,
+                // One row that cannot be asked does not hide the others; it
+                // is counted with them and said in the log (K9).
+                Err(err) => {
+                    tracing::warn!(
+                        provider = %video_provider,
+                        row = %row.id,
+                        error = %err.chain_text().replace('\n', " "),
+                        "a video match could not be asked for its video"
+                    );
+                    without_video += 1;
+                }
+            }
+        }
+        Ok(crate::video::VideoPlan {
+            track: item.track.clone(),
+            provider: video_provider,
+            own: false,
+            candidates,
+            refused,
+            without_video,
         })
+    }
+
+    /// `headshell video`: the videos for a track the user names — a file
+    /// (its own video first) or `Artist - Title`.
+    ///
+    /// # Errors
+    /// As [`Session::video_for`]; and if the text is not `Artist - Title`.
+    pub async fn video_report(
+        &self,
+        registry: &ProviderRegistry,
+        target: VideoTarget,
+    ) -> Result<VideoReport> {
+        let label = match &target {
+            VideoTarget::Query(query) => format!("video {query:?}"),
+            VideoTarget::File(path) => format!("video --file {}", path.display()),
+        };
+        let mut rec = Recorder::start(label, Some(self.config.data_dir().to_path_buf()));
+        let result = async {
+            let item = match target {
+                VideoTarget::Query(query) => QueueItem {
+                    id: ProviderTrackId::new(ProviderId::new("query"), query.clone()),
+                    track: TrackRef::parse_query(&query)?,
+                },
+                VideoTarget::File(path) => {
+                    let path = std::fs::canonicalize(&path)
+                        .map_err(|err| crate::error::io_err(Stage::VideoLookup, &path, err))?;
+                    let (track, _) = crate::provider::local::read_track(&path)?;
+                    QueueItem {
+                        id: ProviderTrackId::new(ProviderId::new("local"), path.to_string_lossy()),
+                        track,
+                    }
+                }
+            };
+            self.video_for(registry, &item).await
+        }
+        .await;
+        if let Ok(plan) = &result {
+            rec.set(
+                "video.candidates",
+                i64::try_from(plan.candidates.len()).unwrap_or(i64::MAX),
+            );
+            rec.set(
+                "video.refused",
+                i64::try_from(plan.refused).unwrap_or(i64::MAX),
+            );
+            rec.set(
+                "video.without_video",
+                i64::try_from(plan.without_video).unwrap_or(i64::MAX),
+            );
+        }
+        self.finish(rec, result, |plan, diag| VideoReport { plan, diag })
     }
 
     /// Whether the desktop goes online (D-082): [`ONLINE_ENV`] when it is
@@ -1718,8 +2093,10 @@ impl Session {
         &self,
         registry: &ProviderRegistry,
         items: Vec<QueueItem>,
+        shows_video: bool,
     ) -> Result<crate::playback::Player> {
         let mut player = crate::playback::Player::new(registry.clone());
+        player.set_shows_video(shows_video);
         player.play_items(items).await?;
         Ok(player)
     }
@@ -1755,8 +2132,12 @@ impl Session {
             }
 
             if options.dry_run {
+                let video_only = items
+                    .iter()
+                    .filter(|item| video_only_provider(registry, &item.id.provider))
+                    .count();
                 player.queue_mut().replace(items.clone());
-                return Ok((items, Vec::new(), false));
+                return Ok((items, Vec::new(), false, video_only));
             }
 
             player.play_items(items.clone()).await?;
@@ -1779,12 +2160,12 @@ impl Session {
             player.stop();
 
             let listens = player.take_listens();
-            Ok((items, listens, true))
+            Ok((items, listens, true, player.video_only_skipped()))
         }
         .await;
 
         let report = match result {
-            Ok((items, listens, played)) => {
+            Ok((items, listens, played, video_only)) => {
                 // Scrobbles are written here: into the same table as imported data
                 // (§1.6).
                 let written = self.record_listens(&listens)?;
@@ -1796,7 +2177,11 @@ impl Session {
                     "play.listens_recorded",
                     i64::try_from(written.inserted).unwrap_or(i64::MAX),
                 );
-                Ok((items, written.inserted, played))
+                rec.set(
+                    "play.video_only",
+                    i64::try_from(video_only).unwrap_or(i64::MAX),
+                );
+                Ok((items, written.inserted, played, video_only))
             }
             Err(err) => Err(err),
         };
@@ -1805,11 +2190,12 @@ impl Session {
         self.finish(
             rec,
             report,
-            move |(queued, listens_recorded, played), diag| PlayReport {
+            move |(queued, listens_recorded, played, video_only), diag| PlayReport {
                 query,
                 queued,
                 listens_recorded,
                 played,
+                video_only,
                 diag,
             },
         )
@@ -1833,6 +2219,7 @@ impl Session {
             .await?;
 
         let mut player = crate::playback::Player::new(registry.clone());
+        player.set_shows_video(options.shows_video);
         if options.shuffle {
             player.queue_mut().set_shuffle(true);
         }
@@ -3092,31 +3479,38 @@ fn lookup_variable_of(raw: Option<&str>) -> Result<Option<LookupMode>> {
 /// `crate::suggest` offers after duplicates are folded.
 const SUGGEST_CATALOG_ROWS: usize = 60;
 
-/// Is `id` registered, and can it play?
-fn can_play(registry: &ProviderRegistry, id: &ProviderId) -> bool {
+/// Are `id`'s tracks videos only — it shows videos and plays no sound of
+/// its own (D-086)?
+fn video_only_provider(registry: &ProviderRegistry, id: &ProviderId) -> bool {
+    use crate::provider::Capabilities as C;
     registry.get(id).is_some_and(|provider| {
-        provider
-            .info()
-            .capabilities
-            .contains(crate::provider::Capabilities::STREAM)
+        let caps = provider.info().capabilities;
+        caps.contains(C::VIDEO) && !caps.contains(C::STREAM)
     })
 }
 
 /// Who is asked for a text, in order (D-080): `first` — the provider chosen
-/// to play from — then every other one that can play, in the registry's
-/// order (local files, servers, plugins).
+/// to play from — then every other one that can play sound, in the
+/// registry's order (local files, servers, plugins).
+///
+/// A provider whose tracks are videos only (D-086) is asked only when it is
+/// the one chosen: a search typed for songs does not turn into a list of
+/// videos unasked.
 fn search_order(
     registry: &ProviderRegistry,
     first: Option<&ProviderId>,
 ) -> Vec<Arc<dyn crate::provider::Provider>> {
     let mut order = registry.with_capability(crate::provider::Capabilities::STREAM);
-    if let Some(first) = first
-        && let Some(at) = order
+    if let Some(first) = first {
+        if let Some(at) = order
             .iter()
             .position(|provider| &provider.info().id == first)
-    {
-        let chosen = order.remove(at);
-        order.insert(0, chosen);
+        {
+            let chosen = order.remove(at);
+            order.insert(0, chosen);
+        } else if let Some(chosen) = registry.get(first) {
+            order.insert(0, chosen);
+        }
     }
     order
 }
@@ -3331,7 +3725,7 @@ mod tests {
             &crate::preferences::Preferences {
                 play_from: Some(ProviderId::new("ytmusic")),
                 lookup: None,
-                music_dirs: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3608,7 +4002,7 @@ mod tests {
             &crate::preferences::Preferences {
                 play_from: Some(ProviderId::new("local")),
                 lookup: None,
-                music_dirs: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3625,6 +4019,219 @@ mod tests {
         assert_eq!(
             session.online().unwrap().online.saved,
             Some(LookupMode::Offline)
+        );
+    }
+
+    /// A video service for the tests (D-086): it searches loosely — every
+    /// row comes back, as a real video search's do — and each row is a
+    /// YouTube video whose id is made from its title.
+    struct Videos {
+        tracks: Vec<(&'static str, &'static str)>,
+    }
+
+    impl Videos {
+        fn new(tracks: Vec<(&'static str, &'static str)>) -> Arc<Self> {
+            Arc::new(Self { tracks })
+        }
+
+        fn video_id(title: &str) -> String {
+            let mut id: String = title
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .take(11)
+                .collect();
+            while id.len() < 11 {
+                id.push('-');
+            }
+            id
+        }
+    }
+
+    impl Provider for Videos {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: ProviderId::new("tube"),
+                display_name: "Tube".to_owned(),
+                capabilities: Capabilities::SEARCH | Capabilities::VIDEO,
+            }
+        }
+        fn health<'a>(&'a self) -> ProviderFuture<'a, ProviderHealth> {
+            Box::pin(async move {
+                Ok(ProviderHealth {
+                    id: ProviderId::new("tube"),
+                    reachable: true,
+                    track_count: None,
+                    detail: None,
+                })
+            })
+        }
+        fn search<'a>(
+            &'a self,
+            _query: &'a str,
+            _limit: usize,
+        ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+            Box::pin(async move {
+                Ok(self
+                    .tracks
+                    .iter()
+                    .map(|(artist, title)| ProviderTrack {
+                        id: ProviderTrackId::new(ProviderId::new("tube"), *title),
+                        track: TrackRef::new(*artist, *title),
+                    })
+                    .collect())
+            })
+        }
+        fn resolve_source<'a>(
+            &'a self,
+            _id: &'a ProviderTrackId,
+        ) -> ProviderFuture<'a, Option<AudioSource>> {
+            Box::pin(async move { Ok(None) })
+        }
+        fn resolve_video<'a>(
+            &'a self,
+            id: &'a ProviderTrackId,
+        ) -> ProviderFuture<'a, Option<crate::video::VideoSource>> {
+            Box::pin(async move {
+                // "No video" rows exist too: the plan counts them.
+                if id.id.contains("audio only") {
+                    return Ok(None);
+                }
+                Ok(Some(crate::video::VideoSource::Youtube {
+                    video_id: Self::video_id(&id.id),
+                }))
+            })
+        }
+    }
+
+    fn with_videos(registry: &mut ProviderRegistry, videos: &Arc<Videos>) {
+        registry.register(Arc::clone(videos) as Arc<dyn Provider>);
+    }
+
+    /// Music and video follow the main provider until each is chosen on its
+    /// own; the video role skips a main provider that shows no videos
+    /// (D-086).
+    #[test]
+    fn roles_follow_the_main_provider_until_chosen_apart() {
+        let dir = TempDir::new("roles");
+        let server = Listed::new("server", Vec::new());
+        let (session, mut registry) = session_with(&dir, &[], &[Arc::clone(&server)]);
+        with_videos(&mut registry, &Videos::new(Vec::new()));
+        let id = |name: &str| Some(ProviderId::new(name));
+
+        let roles = session.roles(&registry).unwrap();
+        assert_eq!(roles.main.provider, id("local"));
+        assert!(!roles.main.chosen);
+        assert_eq!(roles.music.provider, id("local"));
+        assert!(roles.music.follows_main);
+        // The main provider shows no videos: the first that does.
+        assert_eq!(roles.video.provider, id("tube"));
+        assert!(roles.video.follows_main);
+
+        // The main one moves: the music follows it.
+        let roles = session
+            .set_role(&registry, Role::Main, Some(&ProviderId::new("server")))
+            .unwrap()
+            .roles;
+        assert_eq!(roles.main.provider, id("server"));
+        assert!(roles.main.chosen);
+        assert_eq!(roles.music.provider, id("server"));
+        assert!(roles.music.follows_main && roles.music.chosen);
+        assert_eq!(roles.video.provider, id("tube"));
+
+        // Chosen apart, a role stays where it was put…
+        session
+            .set_role(&registry, Role::Music, Some(&ProviderId::new("tube")))
+            .unwrap();
+        let roles = session
+            .set_role(&registry, Role::Main, Some(&ProviderId::new("local")))
+            .unwrap()
+            .roles;
+        assert_eq!(roles.music.provider, id("tube"));
+        assert!(!roles.music.follows_main);
+        // …and the play box searches it.
+        assert_eq!(session.play_from(&registry).unwrap().provider, id("tube"));
+
+        // …until it follows again.
+        let roles = session
+            .set_role(&registry, Role::Music, None)
+            .unwrap()
+            .roles;
+        assert_eq!(roles.music.provider, id("local"));
+        assert!(roles.music.follows_main);
+
+        // A provider that shows no videos cannot be the video one.
+        let err = session
+            .set_role(&registry, Role::Video, Some(&ProviderId::new("server")))
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::ProviderCall);
+        assert!(
+            err.chain_text().contains("showing videos"),
+            "{}",
+            err.chain_text()
+        );
+    }
+
+    /// The song's video is found by searching the video provider; the rows
+    /// that are other songs, and the ones without a video, are counted.
+    #[tokio::test]
+    async fn the_video_is_the_songs_and_the_rest_are_counted() {
+        let dir = TempDir::new("video-for");
+        let (session, mut registry) = session_with(&dir, &[], &[]);
+        with_videos(
+            &mut registry,
+            &Videos::new(vec![
+                ("Music EDM", "Greatest Hits of the Year"),
+                ("Daft Punk", "Get Lucky audio only"),
+                ("Daft Punk", "Get Lucky"),
+            ]),
+        );
+        let item = QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("local"), "/music/Get Lucky.flac"),
+            track: TrackRef::new("Daft Punk", "Get Lucky"),
+        };
+
+        let plan = session.video_for(&registry, &item).await.unwrap();
+        assert_eq!(plan.provider, ProviderId::new("tube"));
+        assert!(!plan.own);
+        let ids: Vec<&str> = plan.candidates.iter().map(|c| c.id.id.as_str()).collect();
+        assert_eq!(ids, ["Get Lucky"]);
+        assert_eq!(
+            plan.candidates[0].source,
+            crate::video::VideoSource::Youtube {
+                video_id: "Get_Lucky--".to_owned()
+            }
+        );
+        assert_eq!(plan.refused, 1, "the greatest-hits video is not the song");
+        // "Get Lucky audio only" scored as the song (the title is close), but
+        // had no video when asked.
+        assert_eq!(plan.without_video, 1);
+
+        // A track of the video provider's own is its own video: no search.
+        let own = QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("tube"), "Get Lucky"),
+            track: TrackRef::new("Daft Punk", "Get Lucky"),
+        };
+        let plan = session.video_for(&registry, &own).await.unwrap();
+        assert!(plan.own);
+        assert_eq!(plan.candidates.len(), 1);
+    }
+
+    /// No provider shows videos: "I could not look", not "there is none"
+    /// (K9).
+    #[tokio::test]
+    async fn no_video_provider_is_an_error_that_says_what_to_do() {
+        let dir = TempDir::new("video-none");
+        let (session, registry) = session_with(&dir, &[], &[]);
+        let item = QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("local"), "/music/x.flac"),
+            track: TrackRef::new("A", "B"),
+        };
+        let err = session.video_for(&registry, &item).await.unwrap_err();
+        assert_eq!(err.stage(), Stage::VideoLookup);
+        assert!(
+            err.chain_text().contains("--for video"),
+            "{}",
+            err.chain_text()
         );
     }
 }
