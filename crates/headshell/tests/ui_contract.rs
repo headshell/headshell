@@ -42,6 +42,8 @@ const INDEX_HTML: &str = include_str!("../ui/index.html");
 const STYLE_CSS: &str = include_str!("../ui/style.css");
 const STARTUP_ERROR_HTML: &str = include_str!("../ui/startup-error.html");
 const STARTUP_ERROR_JS: &str = include_str!("../ui/startup-error.js");
+/// The core's stages: a notice names its stage in plain words (D-083).
+const DIAG_RS: &str = include_str!("../../headshell-core/src/diag/mod.rs");
 
 /// The class names `api: 1` promises.
 ///
@@ -419,4 +421,59 @@ fn every_script_the_page_loads_parses() {
             }
         }
     });
+}
+
+/// Every stage the core can fail in has plain words in the interface
+/// (D-083): a notice's headline is its stage, and a stage added to the core
+/// without words would fall to "Something went wrong" — saying no stage at
+/// all, which K9 forbids.
+#[test]
+fn every_core_stage_has_plain_words_in_the_notices() {
+    let names = DIAG_RS
+        .split_once("pub const fn as_str(self)")
+        .expect("no Stage::as_str in diag/mod.rs")
+        .1
+        .split_once("\n}\n")
+        .expect("Stage::as_str does not close")
+        .0;
+    let stages: Vec<String> = collect_between(names, "=> \"", '"');
+    assert!(
+        stages.len() >= 20,
+        "the stage names were not found: {stages:?}"
+    );
+
+    let words = APP_JS
+        .split_once("const STAGE_TEXT = {")
+        .expect("no STAGE_TEXT in app.js")
+        .1
+        .split_once("};")
+        .expect("STAGE_TEXT does not close")
+        .0;
+    let missing: Vec<&String> = stages
+        .iter()
+        .filter(|stage| !words.contains(&format!("{stage}:")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "stages without plain words in STAGE_TEXT: {missing:?}"
+    );
+}
+
+/// What the debug mode hides is hidden by one rule (D-083), and the rule
+/// outranks the layout's: a `.debug-only` row with `display: flex` of its own
+/// must not show without the mode.
+#[test]
+fn the_debug_mode_hides_its_details_with_one_rule() {
+    let rule = STYLE_CSS
+        .split_once(":root:not([data-debug]) .debug-only")
+        .expect("no debug-only rule in style.css")
+        .1
+        .split_once('}')
+        .expect("the rule does not close")
+        .0;
+    assert!(rule.contains("display: none !important"), "{rule}");
+    assert!(
+        INDEX_HTML.contains("class=\"nav debug-only\" data-panel=\"diag\""),
+        "diagnostics' row must be the debug mode's"
+    );
 }

@@ -1066,6 +1066,183 @@ fn the_provider_to_play_from_is_chosen_kept_and_listed() {
     assert!(stdout.contains("play from: local (chosen)"), "{stdout}");
 }
 
+/// D-082: whether the desktop goes online is a choice kept in the data
+/// directory; `HEADSHELL_ONLINE` decides one launch over it, and the answer
+/// says who decided. The CLI itself is not bound by it.
+#[test]
+fn the_desktops_online_choice_is_kept_and_who_decided_is_said() {
+    let dir = temp_dir("online");
+    let online = |args: &[&str], variable: Option<&str>| {
+        let mut command = cli_command();
+        command
+            .arg("--data-dir")
+            .arg(&*dir)
+            .args(args)
+            .env("HEADSHELL_MUSIC_DIRS", "/nonexistent/dir/headshell-test");
+        match variable {
+            Some(value) => command.env("HEADSHELL_ONLINE", value),
+            // The developer's own variable must not leak into the test.
+            None => command.env_remove("HEADSHELL_ONLINE"),
+        };
+        let output = command.output().expect("the headshell binary must run");
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.success(),
+        )
+    };
+
+    let (stdout, stderr, ok) = online(&["online", "--json"], None);
+    assert!(ok, "{stderr}");
+    let fresh = json(&stdout);
+    assert_eq!(fresh["online"]["mode"], "offline");
+    assert_eq!(fresh["online"]["source"], "default", "nothing chosen yet");
+
+    let (stdout, stderr, ok) = online(&["online", "on", "--json"], None);
+    assert!(ok, "{stderr}");
+    assert_snapshot("online", &stdout);
+    let on = json(&stdout);
+    assert_eq!(on["online"]["mode"], "online");
+    assert_eq!(on["online"]["source"], "saved");
+    let kept = std::fs::read_to_string(dir.join("preferences.json")).unwrap();
+    assert!(kept.contains(r#""lookup": "online""#), "{kept}");
+
+    // The variable decides one launch, over the saved choice — and says so.
+    let (stdout, stderr, ok) = online(&["online", "--json"], Some("0"));
+    assert!(ok, "{stderr}");
+    let held = json(&stdout);
+    assert_eq!(held["online"]["mode"], "offline");
+    assert_eq!(held["online"]["source"], "variable");
+    assert_eq!(held["online"]["saved"], "online");
+    let (stdout, _, ok) = online(&["online"], Some("0"));
+    assert!(ok);
+    assert!(
+        stdout.contains("desktop : online off (HEADSHELL_ONLINE in this shell decides"),
+        "{stdout}"
+    );
+
+    // A value it does not take is said with its stage, not read as offline.
+    let (_, stderr, ok) = online(&["online"], Some("yes"));
+    assert!(!ok);
+    assert!(
+        stderr.contains("CONFIG_LOAD") && stderr.contains("HEADSHELL_ONLINE is `yes`"),
+        "{stderr}"
+    );
+
+    // The CLI is not bound by it: with the desktop online, a command run
+    // without `--online` stays offline — the identity chain asks no one.
+    let (stdout, stderr, ok) = online(&["resolve", "Radiohead - Creep", "--json"], None);
+    assert!(ok, "{stderr}");
+    let resolution = &json(&stdout)["resolution"];
+    assert_eq!(resolution["method"], "local_key");
+    assert_eq!(
+        resolution["tied_candidates"], 1,
+        "online, MusicBrainz would have tied dozens of candidates"
+    );
+}
+
+/// D-085: the music folders are chosen with `music-dirs`, kept in the data
+/// directory, and read by the next scan — a folder taken off leaves the
+/// catalog with its songs.
+#[test]
+fn music_folders_are_chosen_kept_and_read_by_the_scan() {
+    let dir = temp_dir("musicdirs");
+    let home = dir.join("home");
+    let extra = dir.join("extra");
+    std::fs::create_dir_all(home.join("Music")).unwrap();
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::copy(
+        audio_fixtures().join("tagged.flac"),
+        extra.join("tagged.flac"),
+    )
+    .unwrap();
+    let data = dir.join("data");
+    let run_here = |args: &[&str]| {
+        let mut command = cli_command();
+        command
+            .arg("--data-dir")
+            .arg(&data)
+            .args(args)
+            // The developer's own folders must not leak into the test; the
+            // system's music folder is the temporary home's.
+            .env_remove("HEADSHELL_MUSIC_DIRS")
+            .env_remove("XDG_MUSIC_DIR")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home);
+        let output = command.output().expect("the headshell binary must run");
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.success(),
+        )
+    };
+    // Paths depend on the machine; their last part tells the folders apart.
+    let names = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .expect("a list of folders")
+            .iter()
+            .map(|path| {
+                Path::new(path.as_str().expect("a path"))
+                    .file_name()
+                    .expect("a folder name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    };
+
+    let (stdout, stderr, ok) = run_here(&["music-dirs", "--json"]);
+    assert!(ok, "{stderr}");
+    let fresh = json(&stdout);
+    assert_eq!(fresh["folders"]["source"], "default");
+    assert_eq!(names(&fresh["folders"]["dirs"]), ["Music"]);
+
+    let extra_arg = extra.to_str().unwrap();
+    let (stdout, stderr, ok) = run_here(&["music-dirs", "add", extra_arg, "--json"]);
+    assert!(ok, "{stderr}");
+    let mut added = json(&stdout);
+    assert_eq!(added["changed"], true);
+    assert_eq!(
+        names(&added["folders"]["saved"]),
+        ["Music", "extra"],
+        "the system's folder stays"
+    );
+    for key in ["dirs", "saved", "system"] {
+        added["folders"][key] = serde_json::json!(names(&added["folders"][key]));
+    }
+    assert_snapshot("music_dirs", &added.to_string());
+
+    let (stdout, _, ok) = run_here(&["music-dirs", "add", extra_arg]);
+    assert!(ok);
+    assert!(stdout.contains("already on the list"), "{stdout}");
+
+    let (_, stderr, ok) = run_here(&["music-dirs", "remove", dir.join("nope").to_str().unwrap()]);
+    assert!(!ok, "a folder not on the list is not 'removed'");
+    assert!(
+        stderr.contains("CONFIG_LOAD") && stderr.contains("the folders:"),
+        "{stderr}"
+    );
+
+    let (stdout, stderr, ok) = run_here(&["provider", "scan", "--json"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        json(&stdout)["write"]["inserted"],
+        1,
+        "the added folder's song: {stdout}"
+    );
+
+    let (_, stderr, ok) = run_here(&["music-dirs", "remove", extra_arg]);
+    assert!(ok, "{stderr}");
+    let (stdout, stderr, ok) = run_here(&["provider", "scan", "--json"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        json(&stdout)["write"]["removed"],
+        1,
+        "its song left with it: {stdout}"
+    );
+}
+
 #[test]
 fn testing_an_unknown_provider_lists_the_known_ones() {
     let dir = temp_dir("providertest");

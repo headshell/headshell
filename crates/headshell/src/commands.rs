@@ -30,16 +30,18 @@ use headshell_core::model::PlayRule;
 use headshell_core::playback::{PlaybackAnchor, PrefetchReport, QueueItem, QueueView, RepeatMode};
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::session::{
-    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, PlayFromReport, PlayOptions,
-    PluginCatalogReport, PluginConsentReport, PluginInstallReport, PluginListReport,
-    PluginRemoveReport, PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport,
-    ScanReport, SearchReport, SecretListReport, SecretWriteReport, ServerAddReport,
-    ServerListReport, ServerRemoveReport, SleeveResponse, StatsResponse,
+    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, MusicFoldersReport,
+    OnlineReport, PlayFromReport, PlayOptions, PluginCatalogReport, PluginConsentReport,
+    PluginInstallReport, PluginListReport, PluginRemoveReport, PluginUpdateReport,
+    ProviderListReport, ProviderTestReport, ResolveReport, ScanReport, SearchReport,
+    SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport,
+    SleeveResponse, StatsResponse,
 };
 use headshell_core::sleeve::CardPreset;
 use headshell_core::stats::StatsQuery;
 use headshell_core::suggest::SuggestReport;
 
+use crate::debug::DebugMode;
 use crate::state::{AppState, CommandError, CommandResult};
 use crate::theme::{ActiveTheme, ThemeList};
 
@@ -239,6 +241,60 @@ pub async fn provider_use(
                 core.live
                     .session()
                     .set_play_from(&core.registry, &ProviderId::new(name))
+            })
+        })
+        .await
+}
+
+/// The music folders and who decided them (D-085) — `headshell
+/// music-dirs`.
+#[tauri::command]
+pub async fn music_dirs(state: State<'_, AppState>) -> CommandResult<MusicFoldersReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.session().music_folders() }))
+        .await
+}
+
+/// Adds a music folder — `headshell music-dirs add`. The registry is rebuilt
+/// at once, so the scan the interface runs next reads it, and a song from it
+/// plays (the local provider plays only under its folders).
+#[tauri::command]
+pub async fn music_dirs_add(
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<MusicFoldersReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let report = core
+                    .live
+                    .session()
+                    .add_music_folder(std::path::Path::new(&path))?;
+                if report.changed {
+                    core.refresh_registry()?;
+                }
+                Ok(report)
+            })
+        })
+        .await
+}
+
+/// Takes a music folder off — `headshell music-dirs remove`; its songs leave
+/// at the scan the interface runs next.
+#[tauri::command]
+pub async fn music_dirs_remove(
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<MusicFoldersReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                let report = core
+                    .live
+                    .session()
+                    .remove_music_folder(std::path::Path::new(&path))?;
+                core.refresh_registry()?;
+                Ok(report)
             })
         })
         .await
@@ -773,6 +829,19 @@ fn theme_error(text: String) -> CommandError {
     CommandError::new(headshell_core::diag::Stage::ConfigLoad, &text)
 }
 
+/// Whether the developer's details are shown (D-083). Like the theme, the
+/// interface's own choice: no core call, no CLI counterpart.
+#[tauri::command]
+pub async fn debug_mode(state: State<'_, AppState>) -> CommandResult<DebugMode> {
+    state.debug().mode().map_err(theme_error)
+}
+
+/// Saves the debug mode; `DEBUG=1` still holds a launch that sets it on.
+#[tauri::command]
+pub async fn debug_set(state: State<'_, AppState>, on: bool) -> CommandResult<DebugMode> {
+    state.debug().set(on).map_err(theme_error)
+}
+
 /// The loadable themes + **the rejected ones and their reasons** (K9).
 #[tauri::command]
 pub async fn themes_list(state: State<'_, AppState>) -> CommandResult<ThemeList> {
@@ -1082,8 +1151,12 @@ pub struct Environment {
     pub database: std::path::PathBuf,
     pub music_dirs: Vec<std::path::PathBuf>,
     pub version: String,
-    /// `HEADSHELL_ONLINE`, as read at startup (D-076).
+    /// The mode the app goes by now (D-082); the `online` command says who
+    /// decided it.
     pub lookup: LookupMode,
+    /// `HEADSHELL_ONLINE` holds `lookup` for this launch (D-082): the
+    /// settings switch cannot change it until the app starts without it.
+    pub lookup_held: bool,
 }
 
 #[tauri::command]
@@ -1095,11 +1168,33 @@ pub async fn environment(state: State<'_, AppState>) -> CommandResult<Environmen
                 Ok(Environment {
                     data_dir: config.data_dir().to_path_buf(),
                     database: config.database_path(),
-                    music_dirs: config.music_dirs(),
+                    music_dirs: config.music_folders()?.dirs,
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     lookup: core.lookup,
+                    lookup_held: session::lookup_mode_variable()?.is_some(),
                 })
             })
         })
+        .await
+}
+
+/// Whether the desktop goes online, and who decided it (D-082) —
+/// `headshell online`.
+#[tauri::command]
+pub async fn online(state: State<'_, AppState>) -> CommandResult<OnlineReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.online() }))
+        .await
+}
+
+/// Saves whether the desktop goes online and goes by it at once (D-082) —
+/// `headshell online on|off`.
+#[tauri::command]
+pub async fn online_set(
+    state: State<'_, AppState>,
+    mode: LookupMode,
+) -> CommandResult<OnlineReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.set_online(mode) }))
         .await
 }

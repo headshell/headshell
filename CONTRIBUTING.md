@@ -73,11 +73,17 @@ Building and the tests run with the same `cargo` commands. The differences:
   `~/Library/Application Support/headshell` on macOS. For experiments, give a
   separate directory with `HEADSHELL_DATA_DIR` or the CLI's `--data-dir`.
 - The `HEADSHELL_MUSIC_DIRS` list is written like `PATH`: with `;` on Windows,
-  with `:` elsewhere.
-- The desktop has no command line, so its `--online` is an environment
-  variable: `HEADSHELL_ONLINE=1` (D-076). It takes `1` or `0`; anything else
-  stops startup with the reason, so a `true` that went unrecognised doesn't
+  with `:` elsewhere. It decides the folders for a run that sets it, over the
+  ones chosen in the app (sources → music folders, or `headshell music-dirs`;
+  D-085).
+- The desktop has no command line: its `--online` is a choice kept in the data
+  directory (settings, or `headshell online on|off`), and `HEADSHELL_ONLINE`
+  decides one launch over it (D-082). The variable takes `1` or `0`; anything
+  else stops startup with the reason, so a `true` that went unrecognised doesn't
   silently leave you offline.
+- The desktop hides the developer's details — diagnostics, raw reports, ids,
+  zero counts — unless the debug mode is on: `DEBUG=1` (exactly `1`) for one
+  launch, or the switch at the bottom of settings (D-083).
 - The repository checks out with LF line endings on every platform
   (`.gitattributes`). Even with `core.autocrlf` on in Windows, the snapshots
   match byte for byte.

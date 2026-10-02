@@ -93,6 +93,16 @@ pub struct Resolution {
     /// `1` for links that do not use a candidate list (ISRC, `LocalKey`).
     #[serde(default = "one")]
     pub tied_candidates: usize,
+    /// The source ranks more candidates as high as the ones read, and they
+    /// were left unread (D-081): its top tier did not fit in one
+    /// [`WHOLE_PAGE`], or the reading stopped because the rest could only
+    /// join a tie already seen. `tied_candidates` is then a lower bound, and
+    /// a winner unique among the candidates read is **not** claimed — it was
+    /// never compared with the rest.
+    ///
+    /// `false` for links that do not search.
+    #[serde(default)]
+    pub unread_equals: bool,
 }
 
 /// `serde` default: old records without the field count as a single winner.
@@ -112,6 +122,30 @@ const SCORE_EPSILON: f64 = 1e-9;
 /// tie.
 const AMBIGUITY_MARGIN: f64 = 0.01;
 
+/// The first read of a search (D-081): most searches end on it, so it stays
+/// as small as it was before searches were read whole.
+const FIRST_PAGE: usize = 25;
+
+/// The second and last read of a search: MusicBrainz's largest page, asked
+/// for **from the start** in one request (D-081).
+///
+/// Not the next page: MusicBrainz answers each address from its own cache,
+/// filled by whichever index replica served it, and the replicas order the
+/// equally scored hits differently. A first page of 25 and a second page
+/// from offset 25 came from different replicas in four reads of five
+/// (measured 2026-10-02): 25 hits twice, 25 never. One response is one
+/// replica's ranking, whole. A top tier that does not fit in it is not
+/// claimed — a winner of the part read is not a winner of the catalog.
+pub const WHOLE_PAGE: usize = 100;
+
+/// How far from the query's duration a search narrows, both ways (D-081).
+///
+/// A recording further than this from the query scores at most 0.7
+/// ([`fuzzy`]'s mismatch penalty), below any threshold, so narrowing to it
+/// loses no possible winner — and it turns `Creep`'s 149 equally scored
+/// recordings into 33, read whole in one response (measured 2026-10-02).
+pub const LENGTH_WINDOW_MS: u64 = fuzzy::DURATION_MISMATCH_MS;
+
 /// A scored candidate and all the evidence that tells it apart.
 ///
 /// `gap` travels next to the score because [`fuzzy::similarity`] splits the
@@ -124,6 +158,55 @@ struct Scored {
     /// The difference between the query's duration and the candidate's. If
     /// either is unknown, [`u64::MAX`]: "I can't claim closeness", it sorts last.
     gap: u64,
+}
+
+/// A candidate scored against the query.
+fn score(track: &TrackRef, candidate: Candidate) -> Scored {
+    let score = fuzzy::similarity(
+        &track.artist,
+        &track.title,
+        track.duration_ms,
+        &candidate.artist,
+        &candidate.title,
+        candidate.duration_ms,
+        candidate.disambiguation.as_deref(),
+    );
+    let gap = duration_gap(track.duration_ms, candidate.duration_ms);
+    Scored {
+        candidate,
+        score,
+        gap,
+    }
+}
+
+/// Sorts the best first, breaking score ties **deterministically**.
+///
+/// In a real catalog a tie is the rule, not the exception: a `Radiohead —
+/// Creep` search returns more than 190 recordings, dozens of which carry
+/// exactly the same artist and title, and when the duration is unknown they
+/// all get the same score. `max_by` used to surrender to the order
+/// MusicBrainz sent, and that order is not stable — the same query gave two
+/// different MBIDs in two runs (D-045). For an identity layer that is
+/// unacceptable: the same track cannot get a different canonical id
+/// tomorrow.
+fn sort_scored(scored: &mut [Scored]) {
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| tiebreak_rank(&right.candidate).cmp(&tiebreak_rank(&left.candidate)))
+            // Closeness in duration: evidence that the score's bands swallowed
+            // (D-046). The smaller gap wins.
+            .then_with(|| left.gap.cmp(&right.gap))
+            // Last resort: MBID order. Arbitrary but **stable** — being stable
+            // matters more than not being arbitrary.
+            .then_with(|| {
+                left.candidate
+                    .mbid
+                    .as_str()
+                    .cmp(right.candidate.mbid.as_str())
+            })
+    });
 }
 
 /// Distance to the query's duration; the worst value if unknown.
@@ -200,6 +283,72 @@ pub struct Candidate {
 ///   therefore more trustworthy.
 fn tiebreak_rank(candidate: &Candidate) -> u8 {
     u8::from(candidate.disambiguation.is_none()) * 2 + u8::from(candidate.duration_ms.is_some())
+}
+
+/// The highest [`tiebreak_rank`]: no note, a known duration.
+const TOP_RANK: u8 = 3;
+
+/// Can no candidate left unread change the outcome (D-081)?
+///
+/// Only a tie at the ceiling of every sorting criterion is final: the
+/// highest score [`fuzzy::similarity`] gives (it is clamped to 1), the
+/// [`TOP_RANK`], and the smallest duration gap — `0` when the query has a
+/// duration, and without one every gap is the same unknown. An unread
+/// candidate can at best equal such a tie, which only makes it larger. A
+/// winner that is **unique** among those read is never final: an unread
+/// candidate could equal it.
+fn settled(scored: &[Scored], query_duration: Option<u64>) -> bool {
+    let Some(top) = scored.first() else {
+        return false;
+    };
+    let best_gap = query_duration.is_none() || top.gap == 0;
+    count_tied(scored) > 1
+        && top.score >= 1.0 - SCORE_EPSILON
+        && tiebreak_rank(&top.candidate) == TOP_RANK
+        && best_gap
+}
+
+/// The first hits of a recording search (D-081).
+///
+/// A search engine ranks, and returns the head of the ranking. MusicBrainz
+/// scores every exact match alike — 149 recordings of `Radiohead — Creep` —
+/// and which of them make the head depends on the index replica that
+/// answers: three replicas, three different first 25, one of which held a
+/// single plain recording (measured). A winner picked from the head is a
+/// winner of the head, not of the catalog; `top_continues` is how the source
+/// says the head did not hold its whole top tier.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchPage {
+    /// The candidates, the source's best first.
+    pub candidates: Vec<Candidate>,
+    /// The source's top tier goes on past these candidates: more hits ranked
+    /// as high as its best were not returned. `false`: the tier ended among
+    /// them, or the source holds nothing more.
+    pub top_continues: bool,
+}
+
+/// A range of recording lengths, both ends included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LengthRange {
+    pub from_ms: u64,
+    pub to_ms: u64,
+}
+
+impl LengthRange {
+    /// [`LENGTH_WINDOW_MS`] either side of `ms`.
+    #[must_use]
+    pub const fn around(ms: u64) -> Self {
+        Self {
+            from_ms: ms.saturating_sub(LENGTH_WINDOW_MS),
+            to_ms: ms.saturating_add(LENGTH_WINDOW_MS),
+        }
+    }
+
+    /// Does a known length fall in the range? An unknown one never does.
+    #[must_use]
+    pub fn holds(&self, ms: Option<u64>) -> bool {
+        ms.is_some_and(|ms| (self.from_ms..=self.to_ms).contains(&ms))
+    }
 }
 
 /// The summary of one resolution round. The project's most important metric
@@ -279,12 +428,19 @@ pub trait MetadataLookup: Send + Sync {
     /// Recording id from an ISRC.
     fn recording_by_isrc<'a>(&'a self, isrc: &'a Isrc) -> LookupFuture<'a, Option<Candidate>>;
 
-    /// Candidate search by artist+title.
+    /// Candidate search by artist+title: the first `limit` hits, the
+    /// source's best first, and whether its top tier goes on past them
+    /// (D-081). The source may cap `limit` at its largest page.
+    ///
+    /// With `length`, only recordings whose length lies in it — recordings
+    /// of unknown length are left out too.
     fn search_recordings<'a>(
         &'a self,
         artist: &'a str,
         title: &'a str,
-    ) -> LookupFuture<'a, Vec<Candidate>>;
+        length: Option<LengthRange>,
+        limit: usize,
+    ) -> LookupFuture<'a, SearchPage>;
 }
 
 /// A fingerprint match: a candidate recording + the service's own
@@ -334,8 +490,10 @@ impl MetadataLookup for OfflineLookup {
         &'a self,
         _artist: &'a str,
         _title: &'a str,
-    ) -> LookupFuture<'a, Vec<Candidate>> {
-        Box::pin(std::future::ready(Ok(Vec::new())))
+        _length: Option<LengthRange>,
+        _limit: usize,
+    ) -> LookupFuture<'a, SearchPage> {
+        Box::pin(std::future::ready(Ok(SearchPage::default())))
     }
 }
 
@@ -363,25 +521,40 @@ impl MetadataLookup for StaticLookup {
         })
     }
 
+    /// It cuts its answer like a search engine, but does not rank: every
+    /// match counts as the top, so leaving matches out says the top
+    /// continues.
     fn search_recordings<'a>(
         &'a self,
         artist: &'a str,
         title: &'a str,
-    ) -> LookupFuture<'a, Vec<Candidate>> {
+        length: Option<LengthRange>,
+        limit: usize,
+    ) -> LookupFuture<'a, SearchPage> {
         Box::pin(async move {
             let key_artist = normalize::normalize_artist(artist);
             let key_title = normalize::normalize_text(title);
             // Behave like a real search engine: filter roughly by the first letters and
             // let the scoring make the real decision.
-            Ok(self
+            let matches: Vec<&Candidate> = self
                 .candidates
                 .iter()
                 .filter(|c| {
                     normalize::normalize_artist(&c.artist) == key_artist
                         || normalize::normalize_text(&c.title) == key_title
                 })
-                .cloned()
-                .collect())
+                .filter(|c| length.is_none_or(|range| range.holds(c.duration_ms)))
+                .collect();
+            let candidates: Vec<Candidate> = matches
+                .iter()
+                .take(limit)
+                .map(|&candidate| candidate.clone())
+                .collect();
+            let top_continues = candidates.len() < matches.len();
+            Ok(SearchPage {
+                candidates,
+                top_continues,
+            })
         })
     }
 }
@@ -475,6 +648,7 @@ impl Resolver {
                     confidence: 1.0,
                     matched: Some(candidate),
                     tied_candidates: 1,
+                    unread_equals: false,
                 });
             }
             // The source did not know the ISRC, but the ISRC itself is a valid
@@ -485,59 +659,13 @@ impl Resolver {
                 confidence: 0.95,
                 matched: None,
                 tied_candidates: 1,
+                unread_equals: false,
             });
         }
 
-        // Links 2 and 3: metadata search + scoring.
-        let candidates = self
-            .lookup
-            .search_recordings(&track.artist, &track.title)
-            .await?;
-        let mut scored: Vec<Scored> = candidates
-            .into_iter()
-            .map(|candidate| {
-                let score = fuzzy::similarity(
-                    &track.artist,
-                    &track.title,
-                    track.duration_ms,
-                    &candidate.artist,
-                    &candidate.title,
-                    candidate.duration_ms,
-                    candidate.disambiguation.as_deref(),
-                );
-                let gap = duration_gap(track.duration_ms, candidate.duration_ms);
-                Scored {
-                    candidate,
-                    score,
-                    gap,
-                }
-            })
-            .collect();
-        // Break score ties **deterministically**. In a real catalog a tie is the
-        // rule, not the exception: a `Radiohead — Creep` search returns more than
-        // 190 recordings, dozens of which carry exactly the same artist and title,
-        // and when the duration is unknown they all get the same score. `max_by`
-        // used to surrender to the order MusicBrainz sent, and that order is not
-        // stable — the same query gave two different MBIDs in two runs (D-045).
-        // For an identity layer that is unacceptable: the same track cannot get a
-        // different canonical id tomorrow.
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| tiebreak_rank(&right.candidate).cmp(&tiebreak_rank(&left.candidate)))
-                // Closeness in duration: evidence that the score's bands swallowed
-                // (D-046). The smaller gap wins.
-                .then_with(|| left.gap.cmp(&right.gap))
-                // Last resort: MBID order. Arbitrary but **stable** — being stable
-                // matters more than not being arbitrary.
-                .then_with(|| {
-                    left.candidate
-                        .mbid
-                        .as_str()
-                        .cmp(right.candidate.mbid.as_str())
-                })
-        });
+        // Links 2 and 3: metadata search + scoring, read as far as it can
+        // change the outcome (D-081).
+        let (scored, whole) = self.search(track).await?;
         let tied = count_tied(&scored);
         let best = scored.into_iter().next();
 
@@ -571,7 +699,22 @@ impl Resolver {
                         tied,
                         "equivalent candidates could not be told apart; no authority is claimed"
                     );
-                    return Ok(self.ambiguous(track, tied));
+                    return Ok(self.ambiguous(track, tied, !whole));
+                }
+                if !whole {
+                    // **Nor is it claimed for a winner of the part read** (D-081).
+                    // The source ranks more candidates as high as this one and
+                    // they were not read, so any of them could equal it. Measured:
+                    // one MusicBrainz replica's first page of `Creep` held a single
+                    // plain recording among its 25, while the whole top tier holds
+                    // 39 — claiming that one made the identity depend on the
+                    // replica again, the very thing D-046 ended.
+                    tracing::debug!(
+                        track = track.display_name(),
+                        score,
+                        "the source ranks more candidates as high as the ones read; no authority is claimed"
+                    );
+                    return Ok(self.ambiguous(track, 1, true));
                 }
                 let method = if score >= self.config.exact_match_confidence {
                     ResolveMethod::Mbid
@@ -584,6 +727,7 @@ impl Resolver {
                     confidence: score,
                     matched: Some(candidate),
                     tied_candidates: 1,
+                    unread_equals: false,
                 });
             }
             tracing::debug!(
@@ -597,7 +741,62 @@ impl Resolver {
         // Link 4 (AcoustID) is not called from here and cannot be: the fingerprint
         // looks at the audio itself, and a `TrackRef` has no audio. That link runs
         // through [`Self::resolve_file`], when there is a file.
-        Ok(self.ambiguous(track, 1))
+        Ok(self.ambiguous(track, 1, !whole))
+    }
+
+    /// The candidates a search can decide on, scored and sorted, and whether
+    /// they hold the source's whole top tier (D-081).
+    ///
+    /// With a duration the search first narrows to [`LENGTH_WINDOW_MS`]
+    /// around it. If that tier is read whole and its best is a plain
+    /// recording at the ceiling score, no recording outside it can equal
+    /// that — further away it scores at most 0.7, of unknown length it ranks
+    /// lower — so the window decides. Otherwise every length is read: a
+    /// recording of unknown length may be the best there is.
+    async fn search(&self, track: &TrackRef) -> Result<(Vec<Scored>, bool)> {
+        if let Some(duration) = track.duration_ms {
+            let (scored, whole) = self
+                .read(track, Some(LengthRange::around(duration)))
+                .await?;
+            let decides = scored.first().is_some_and(|top| {
+                top.score >= 1.0 - SCORE_EPSILON && tiebreak_rank(&top.candidate) == TOP_RANK
+            });
+            if !whole || decides {
+                return Ok((scored, whole));
+            }
+        }
+        self.read(track, None).await
+    }
+
+    /// Reads a search's head; if the top tier goes on past it and the
+    /// outcome can still change, the first [`WHOLE_PAGE`] in one response
+    /// (D-081). Returns the candidates read, scored and sorted, and whether
+    /// they hold the whole top tier.
+    async fn read(
+        &self,
+        track: &TrackRef,
+        length: Option<LengthRange>,
+    ) -> Result<(Vec<Scored>, bool)> {
+        let mut limit = FIRST_PAGE;
+        loop {
+            let page = self
+                .lookup
+                .search_recordings(&track.artist, &track.title, length, limit)
+                .await?;
+            let mut scored: Vec<Scored> = page
+                .candidates
+                .into_iter()
+                .map(|candidate| score(track, candidate))
+                .collect();
+            sort_scored(&mut scored);
+            if !page.top_continues {
+                return Ok((scored, true));
+            }
+            if limit >= WHOLE_PAGE || settled(&scored, track.duration_ms) {
+                return Ok((scored, false));
+            }
+            limit = WHOLE_PAGE;
+        }
     }
 
     /// The case where the chain could not reach an authority: the local key.
@@ -605,8 +804,9 @@ impl Resolver {
     /// If `tied` is greater than 1 the reason is not "no candidates at all" but
     /// "the candidates could not be told apart" — both produce the same
     /// identity but they are **not the same diagnosis**, and the report must be
-    /// able to tell them apart (K9).
-    fn ambiguous(&self, track: &TrackRef, tied: usize) -> Resolution {
+    /// able to tell them apart (K9). `unread` says the source ranks more
+    /// candidates as high as the ones read (D-081).
+    fn ambiguous(&self, track: &TrackRef, tied: usize, unread: bool) -> Resolution {
         let _ = self;
         Resolution {
             canonical_id: CanonicalId::from_local_key(&normalize::track_key(
@@ -617,6 +817,7 @@ impl Resolver {
             confidence: 0.2,
             matched: None,
             tied_candidates: tied,
+            unread_equals: unread,
         }
     }
 
@@ -705,6 +906,7 @@ impl Resolver {
             confidence,
             matched: Some(best.candidate.clone()),
             tied_candidates: tied,
+            unread_equals: false,
         })
     }
 
@@ -986,6 +1188,232 @@ mod tests {
             matched.disambiguation, None,
             "the recording with a note should not have been chosen"
         );
+    }
+
+    /// A source that serves fixed answers in turn — the n-th request gets
+    /// the n-th answer, whatever it asks for — and records what was asked:
+    /// the shape of a search without a server (D-081).
+    struct ScriptedLookup {
+        answers: Vec<SearchPage>,
+        asked: std::sync::Mutex<Vec<(Option<LengthRange>, usize)>>,
+    }
+
+    impl ScriptedLookup {
+        fn new(answers: Vec<(Vec<Candidate>, bool)>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: answers
+                    .into_iter()
+                    .map(|(candidates, top_continues)| SearchPage {
+                        candidates,
+                        top_continues,
+                    })
+                    .collect(),
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<(Option<LengthRange>, usize)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl MetadataLookup for ScriptedLookup {
+        fn recording_by_isrc<'a>(&'a self, _isrc: &'a Isrc) -> LookupFuture<'a, Option<Candidate>> {
+            Box::pin(std::future::ready(Ok(None)))
+        }
+
+        fn search_recordings<'a>(
+            &'a self,
+            _artist: &'a str,
+            _title: &'a str,
+            length: Option<LengthRange>,
+            limit: usize,
+        ) -> LookupFuture<'a, SearchPage> {
+            let mut asked = self.asked.lock().unwrap();
+            let answer = self.answers.get(asked.len()).cloned().unwrap_or_default();
+            asked.push((length, limit));
+            Box::pin(std::future::ready(Ok(answer)))
+        }
+    }
+
+    /// `Radiohead — Creep` recording number `n`: plain (no note, 238 s) or a
+    /// live take.
+    fn creep(n: usize, plain: bool) -> Candidate {
+        let mut c = candidate(
+            &format!("00000000-0000-4000-8000-{n:012}"),
+            "Radiohead",
+            "Creep",
+            Some(238_000),
+        );
+        if !plain {
+            c.disambiguation = Some(format!("live, night {n}"));
+        }
+        c
+    }
+
+    /// `head` followed by live takes up to `len` candidates.
+    fn answer(head: Vec<Candidate>, len: usize) -> Vec<Candidate> {
+        let mut out = head;
+        let from = 1000 + out.len();
+        out.extend((from..from + len.saturating_sub(out.len())).map(|n| creep(n, false)));
+        out
+    }
+
+    const NO_LENGTH: Option<LengthRange> = None;
+
+    /// D-081, the replica that turned CI red: its first 25 held a single
+    /// plain recording, and the top went on. The first hundred, read in one
+    /// response, hold another — a tie the head hid. No authority.
+    #[tokio::test]
+    async fn the_first_hundred_find_the_equal_the_head_hid() {
+        let lookup = ScriptedLookup::new(vec![
+            (answer(vec![creep(1, true)], 25), true),
+            (answer(vec![creep(1, true), creep(2, true)], 100), true),
+        ]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep"))
+            .await
+            .unwrap();
+
+        assert_eq!(res.method, ResolveMethod::LocalKey);
+        assert_eq!(res.tied_candidates, 2);
+        assert!(res.unread_equals, "the top went on past the hundred");
+        assert_eq!(lookup.asked(), vec![(NO_LENGTH, 25), (NO_LENGTH, 100)]);
+    }
+
+    /// The other side: the hundred hold the whole tier, with no equal of
+    /// the head's winner — it is a winner of the catalog, and claimed.
+    #[tokio::test]
+    async fn a_winner_of_the_whole_tier_is_claimed() {
+        let lookup = ScriptedLookup::new(vec![
+            (answer(vec![creep(1, true)], 25), true),
+            (answer(vec![creep(1, true)], 60), false),
+        ]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep"))
+            .await
+            .unwrap();
+
+        assert_eq!(res.method, ResolveMethod::Mbid);
+        assert_eq!(res.matched.unwrap().mbid, creep(1, true).mbid);
+        assert!(!res.unread_equals);
+        assert_eq!(lookup.asked().len(), 2);
+    }
+
+    /// A tier wider than one response: the winner of the part read is not
+    /// claimed, and nothing past the hundred is asked for — a next page
+    /// would come from another replica's ranking.
+    #[tokio::test]
+    async fn a_tier_wider_than_one_response_claims_nothing() {
+        let lookup = ScriptedLookup::new(vec![
+            (answer(vec![creep(1, true)], 25), true),
+            (answer(vec![creep(1, true)], 100), true),
+            (answer(vec![creep(2, true)], 100), false),
+        ]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep"))
+            .await
+            .unwrap();
+
+        assert_eq!(res.method, ResolveMethod::LocalKey);
+        assert_eq!(res.tied_candidates, 1);
+        assert!(
+            res.unread_equals,
+            "a winner of the part read is not a winner"
+        );
+        assert_eq!(lookup.asked(), vec![(NO_LENGTH, 25), (NO_LENGTH, 100)]);
+    }
+
+    /// A tie at the ceiling in the head is final: no unread candidate can
+    /// break it, so nothing more is asked for.
+    #[tokio::test]
+    async fn a_tie_at_the_ceiling_stops_the_reading() {
+        let lookup = ScriptedLookup::new(vec![(
+            answer(vec![creep(1, true), creep(2, true)], 25),
+            true,
+        )]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep"))
+            .await
+            .unwrap();
+
+        assert_eq!(res.method, ResolveMethod::LocalKey);
+        assert_eq!(res.tied_candidates, 2);
+        assert_eq!(lookup.asked(), vec![(NO_LENGTH, 25)]);
+    }
+
+    /// With a duration the search narrows to the length window, and a plain
+    /// recording at the ceiling inside it decides: the closest wins.
+    #[tokio::test]
+    async fn with_a_duration_the_length_window_decides() {
+        let mut near = creep(1, true);
+        near.duration_ms = Some(236_000);
+        let exact = creep(2, true);
+        let lookup = ScriptedLookup::new(vec![(answer(vec![near, exact.clone()], 20), false)]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep").with_duration_ms(Some(238_000)))
+            .await
+            .unwrap();
+
+        assert_eq!(res.matched.unwrap().mbid, exact.mbid);
+        assert_eq!(
+            lookup.asked(),
+            vec![(Some(LengthRange::around(238_000)), 25)]
+        );
+    }
+
+    /// A window without a plain recording at the ceiling cannot decide: a
+    /// recording of unknown length — outside every window — may be the best
+    /// there is. Every length is read, and here it is.
+    #[tokio::test]
+    async fn a_window_that_cannot_decide_falls_back_to_every_length() {
+        let mut unknown = creep(5, true);
+        unknown.duration_ms = None;
+        let lookup = ScriptedLookup::new(vec![
+            (answer(Vec::new(), 10), false),
+            (answer(vec![unknown.clone()], 12), false),
+        ]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep").with_duration_ms(Some(238_000)))
+            .await
+            .unwrap();
+
+        assert_eq!(res.matched.unwrap().mbid, unknown.mbid);
+        assert_eq!(
+            lookup.asked(),
+            vec![(Some(LengthRange::around(238_000)), 25), (NO_LENGTH, 25)]
+        );
+    }
+
+    /// A window whose tier does not fit in one response decides nothing,
+    /// and reading every length would only be wider.
+    #[tokio::test]
+    async fn a_window_wider_than_one_response_claims_nothing() {
+        let window = Some(LengthRange::around(238_000));
+        let lookup = ScriptedLookup::new(vec![
+            (answer(vec![creep(1, true)], 25), true),
+            (answer(vec![creep(1, true)], 100), true),
+        ]);
+        let res = Resolver::new(lookup.clone())
+            .resolve(&TrackRef::new("Radiohead", "Creep").with_duration_ms(Some(238_000)))
+            .await
+            .unwrap();
+
+        assert_eq!(res.method, ResolveMethod::LocalKey);
+        assert!(res.unread_equals);
+        assert_eq!(lookup.asked(), vec![(window, 25), (window, 100)]);
+    }
+
+    /// The window is the fuzzy scorer's own limit, and holds known lengths
+    /// only.
+    #[test]
+    fn the_length_window_is_the_mismatch_limit_and_holds_known_lengths_only() {
+        let range = LengthRange::around(238_000);
+        assert_eq!((range.from_ms, range.to_ms), (223_000, 253_000));
+        assert!(range.holds(Some(253_000)));
+        assert!(!range.holds(Some(253_001)));
+        assert!(!range.holds(None));
+        assert_eq!(LengthRange::around(5_000).from_ms, 0);
     }
 
     #[tokio::test]

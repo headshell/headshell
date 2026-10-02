@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{Candidate, LookupFuture, MetadataLookup};
+use super::{Candidate, LengthRange, LookupFuture, MetadataLookup, SearchPage};
 use crate::error::Result;
 use crate::ids::{Isrc, Mbid};
 use crate::net::{HttpClient, HttpHeader, HttpRequest, RateLimiter, encode_query, parse_json};
@@ -40,12 +40,26 @@ pub const DEFAULT_BASE_URL: &str = "https://musicbrainz.org/ws/2";
 /// eats a `503` and starts retrying, which is slower overall.
 const MIN_INTERVAL: Duration = Duration::from_millis(1100);
 
-/// How many candidates to ask for per search.
+/// How many releases a release search asks for (D-076).
 ///
-/// [`super::fuzzy`] does the scoring; the list returned here is its input.
-/// More grows the network traffic and the parsing, fewer drops the right
-/// candidate off the list.
+/// A recording search's page is its caller's to size (D-081); the cover
+/// chain's release search is a single page, and this is its size.
 const SEARCH_LIMIT: usize = 25;
+
+/// MusicBrainz's largest page: a larger `limit` is answered with 100.
+const MAX_PAGE: usize = 100;
+
+/// The lowest score of a search's top tier (D-081).
+///
+/// MusicBrainz scores relative to the best hit of the whole search (a tail
+/// page of `Creep` runs 82 → 32, it does not restart at 100), but rounds
+/// with each index replica's own statistics: the same exact `Creep`s scored
+/// all 100 on one replica, 34 × 100 and 66 × 99 on another. The first
+/// inexact hits scored 94, 93, 92 and 86 (`One More Time, Aerodynamic`,
+/// `Roads (live)`, `Şımarık (remix)`, `Archangel (TASO REMIX)`; measured
+/// 2026-10-02). 97 sits between the two with room for a point of rounding
+/// either way.
+const TOP_TIER: u32 = 97;
 
 /// How many times to retry after a `503` (rate limit).
 ///
@@ -127,7 +141,8 @@ impl MusicBrainzLookup {
         self
     }
 
-    /// How many candidates to ask for.
+    /// How many releases a release search asks for. A recording search's
+    /// page size is its caller's (D-081).
     #[must_use]
     pub fn with_search_limit(mut self, limit: usize) -> Self {
         self.search_limit = limit.clamp(1, 100);
@@ -328,30 +343,64 @@ impl MetadataLookup for MusicBrainzLookup {
         &'a self,
         artist: &'a str,
         title: &'a str,
-    ) -> LookupFuture<'a, Vec<Candidate>> {
+        length: Option<LengthRange>,
+        limit: usize,
+    ) -> LookupFuture<'a, SearchPage> {
         Box::pin(async move {
             let query = build_query(artist, title);
             if query.is_empty() {
                 // An empty query means `400` at MusicBrainz. We say "no candidates"
                 // without sending a request; the chain goes down to the fuzzy link
                 // with an empty list.
-                return Ok(Vec::new());
+                return Ok(SearchPage::default());
             }
+            let query = match length {
+                Some(range) => format!("{query} AND {}", length_clause(range)),
+                None => query,
+            };
+            let limit = limit.clamp(1, MAX_PAGE);
             let url = format!(
-                "{}/recording?query={}&fmt=json&limit={}",
+                "{}/recording?query={}&fmt=json&limit={limit}",
                 self.base_url,
                 encode_query(&query),
-                self.search_limit
             );
             let Some(payload) = self
                 .get_json::<SearchResponse>(&url, "musicbrainz recording search")
                 .await?
             else {
-                return Ok(Vec::new());
+                return Ok(SearchPage::default());
             };
-            Ok(collect_candidates(payload.recordings, "search"))
+            let top_continues = top_continues(&payload, limit);
+            Ok(SearchPage {
+                candidates: collect_candidates(payload.recordings, "search"),
+                top_continues,
+            })
         })
     }
+}
+
+/// Does the search's top tier go on past the hits returned (D-081)?
+///
+/// It does when the search has more hits and the last one returned is still
+/// in the [`TOP_TIER`]. A hit without a score, or a result without a count
+/// that filled its page, is taken as going on: "I don't know" must not read
+/// as "it ended" — that would claim a whole tier nobody saw.
+fn top_continues(payload: &SearchResponse, limit: usize) -> bool {
+    let Some(last) = payload.recordings.last() else {
+        return false;
+    };
+    let returned = payload.recordings.len();
+    let more = payload
+        .count
+        .map_or(returned >= limit, |count| returned < count);
+    more && last.score.is_none_or(|score| score >= TOP_TIER)
+}
+
+/// The Lucene clause for a length range: MusicBrainz indexes a recording's
+/// length in milliseconds as `dur`; one of unknown length has none and
+/// falls outside every range.
+fn length_clause(range: LengthRange) -> String {
+    format!("dur:[{} TO {}]", range.from_ms, range.to_ms)
 }
 
 /// Turns raw recordings into candidates; what cannot be turned **is counted
@@ -448,6 +497,9 @@ struct IsrcResponse {
 
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
+    /// How many hits the whole search has, past every page.
+    #[serde(default)]
+    count: Option<usize>,
     #[serde(default)]
     recordings: Vec<MbRecording>,
 }
@@ -475,6 +527,10 @@ struct MbRecording {
     disambiguation: Option<String>,
     #[serde(default)]
     isrcs: Vec<String>,
+    /// A search hit's score, 0–100, relative to the best hit of the whole
+    /// search ([`TOP_TIER`]). Absent outside searches.
+    #[serde(default)]
+    score: Option<u32>,
 }
 
 impl MbRecording {
@@ -593,7 +649,12 @@ mod tests {
     async fn a_search_becomes_a_scored_candidate() {
         let http = FakeHttp::new().route("/recording?query=", CREEP_SEARCH);
         let mb = lookup(http);
-        let found = mb.search_recordings("Radiohead", "Creep").await.unwrap();
+        let page = mb
+            .search_recordings("Radiohead", "Creep", None, 25)
+            .await
+            .unwrap();
+        assert!(!page.top_continues, "a count of 1 has nothing after it");
+        let found = page.candidates;
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].artist, "Radiohead");
@@ -638,7 +699,7 @@ mod tests {
         let http = FakeHttp::new().route_status("/recording?query=", 500, "broken");
         let mb = lookup(http);
         let err = mb
-            .search_recordings("Radiohead", "Creep")
+            .search_recordings("Radiohead", "Creep", None, 25)
             .await
             .unwrap_err();
         let text = err.chain_text();
@@ -652,7 +713,9 @@ mod tests {
         let mb = MusicBrainzLookup::new(http.clone())
             .with_base_url("http://mb.test/ws/2")
             .with_min_interval(Duration::ZERO);
-        mb.search_recordings("Radiohead", "Creep").await.unwrap();
+        mb.search_recordings("Radiohead", "Creep", None, 25)
+            .await
+            .unwrap();
 
         let sent = http.requests();
         let agent = sent[0]
@@ -665,6 +728,132 @@ mod tests {
             agent.value.contains('('),
             "contact address: {}",
             agent.value
+        );
+    }
+
+    /// A search answer of `count` hits whose first ones score `scores`.
+    fn search_page(count: usize, scores: &[u32]) -> String {
+        let recordings: Vec<String> = scores
+            .iter()
+            .enumerate()
+            .map(|(index, score)| {
+                format!(
+                    r#"{{ "id": "00000000-0000-4000-8000-{index:012}", "title": "Creep",
+                         "score": {score}, "length": 238000,
+                         "artist-credit": [{{ "name": "Radiohead" }}] }}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{ "count": {count}, "offset": 0, "recordings": [{}] }}"#,
+            recordings.join(",")
+        )
+    }
+
+    /// `limit` hits of `scores` from a search of `count`: does the top go on?
+    async fn continues(count: usize, scores: &[u32], limit: usize) -> bool {
+        let body = search_page(count, scores);
+        lookup(FakeHttp::new().route("/recording?query=", &body))
+            .search_recordings("Radiohead", "Creep", None, limit)
+            .await
+            .unwrap()
+            .top_continues
+    }
+
+    /// D-081: `Creep` has 149 exact hits, and the first 25 cut through them.
+    /// The answer says so — the measured shape of the failure.
+    #[tokio::test]
+    async fn a_head_ending_inside_the_top_tier_says_the_top_continues() {
+        let body = search_page(192, &[100; 25]);
+        let http = Arc::new(FakeHttp::new().route("/recording?query=", &body));
+        let mb = MusicBrainzLookup::new(http.clone())
+            .with_base_url("http://mb.test/ws/2")
+            .with_min_interval(Duration::ZERO);
+        let page = mb
+            .search_recordings("Radiohead", "Creep", None, 25)
+            .await
+            .unwrap();
+
+        assert_eq!(page.candidates.len(), 25);
+        assert!(page.top_continues);
+        let url = &http.requests()[0].url;
+        assert!(url.ends_with("&fmt=json&limit=25"), "{url}");
+    }
+
+    /// A replica rounds the same exact hits to 99: still the top tier.
+    #[tokio::test]
+    async fn a_tier_rounded_to_99_still_continues() {
+        let mut scores = vec![100; 10];
+        scores.extend([99; 15]);
+        assert!(continues(192, &scores, 25).await);
+    }
+
+    /// The tier ended among the hits: what comes after is inexact.
+    #[tokio::test]
+    async fn a_head_where_the_top_tier_ends_says_the_top_does_not_continue() {
+        let mut scores = vec![100; 20];
+        scores.extend([94, 92, 87, 86, 80]);
+        assert!(!continues(148, &scores, 25).await);
+    }
+
+    /// An answer holding every hit of the search has nothing after it.
+    #[tokio::test]
+    async fn an_answer_holding_every_hit_says_the_top_does_not_continue() {
+        assert!(!continues(25, &[100; 25], 25).await);
+    }
+
+    /// "I don't know" is not "it ended": a hit without a score, or a result
+    /// without a count that filled its page, is taken as going on.
+    #[tokio::test]
+    async fn an_unknown_score_or_count_is_taken_as_going_on() {
+        let no_score = r#"{ "count": 192, "recordings": [
+            { "id": "00000000-0000-4000-8000-000000000001", "title": "Creep",
+              "artist-credit": [{ "name": "Radiohead" }] } ] }"#;
+        let page = lookup(FakeHttp::new().route("/recording?query=", no_score))
+            .search_recordings("Radiohead", "Creep", None, 1)
+            .await
+            .unwrap();
+        assert!(page.top_continues, "a hit without a score");
+
+        let no_count = search_page(0, &[100, 100]).replace(r#""count": 0, "#, "");
+        let page = lookup(FakeHttp::new().route("/recording?query=", &no_count))
+            .search_recordings("Radiohead", "Creep", None, 2)
+            .await
+            .unwrap();
+        assert!(page.top_continues, "a full page without a count");
+    }
+
+    /// MusicBrainz answers a larger `limit` with 100; asking for more would
+    /// only make the count look short.
+    #[tokio::test]
+    async fn a_page_is_never_asked_larger_than_musicbrainz_gives() {
+        let http = Arc::new(FakeHttp::new().route("/recording?query=", CREEP_SEARCH));
+        let mb = MusicBrainzLookup::new(http.clone())
+            .with_base_url("http://mb.test/ws/2")
+            .with_min_interval(Duration::ZERO);
+        mb.search_recordings("Radiohead", "Creep", None, 500)
+            .await
+            .unwrap();
+        let url = &http.requests()[0].url;
+        assert!(url.ends_with("&limit=100"), "{url}");
+    }
+
+    /// A length range becomes MusicBrainz's `dur` clause, in milliseconds.
+    #[tokio::test]
+    async fn a_length_range_narrows_the_query_to_dur() {
+        let http = Arc::new(FakeHttp::new().route("/recording?query=", CREEP_SEARCH));
+        let mb = MusicBrainzLookup::new(http.clone())
+            .with_base_url("http://mb.test/ws/2")
+            .with_min_interval(Duration::ZERO);
+        mb.search_recordings("Radiohead", "Creep", Some(LengthRange::around(238_000)), 25)
+            .await
+            .unwrap();
+        let url = &http.requests()[0].url;
+        assert!(
+            url.contains(&encode_query(
+                r#"recording:"Creep" AND dur:[223000 TO 253000]"#
+            )),
+            "{url}"
         );
     }
 
@@ -739,7 +928,7 @@ mod tests {
             .with_base_url("http://mb.test/ws/2")
             .with_min_interval(Duration::ZERO);
         let err = mb
-            .search_recordings("Radiohead", "Creep")
+            .search_recordings("Radiohead", "Creep", None, 25)
             .await
             .unwrap_err();
 

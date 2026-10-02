@@ -84,6 +84,11 @@
       <symbol id="i-diag" viewBox="0 0 24 24">
         <path d="M3 12h4l2.5-6 5 12 2.5-6h4" />
       </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M4 8h8M16.5 8H20M4 16h3.5M12 16h8" />
+        <circle cx="14.25" cy="8" r="2.25" />
+        <circle cx="9.75" cy="16" r="2.25" />
+      </symbol>
       <symbol id="i-help" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="8.5" />
         <path d="M9.7 9.5a2.4 2.4 0 0 1 4.7.6c0 1.6-2.4 2.1-2.4 3.8M12 16.6v.3" />
@@ -154,7 +159,7 @@
           <button class="nav" data-panel="stats" title="stats (Ctrl+3)">
             <svg class="icon" aria-hidden="true"><use href="#i-stats" /></svg><span class="nav-label">stats</span>
           </button>
-          <button class="nav" data-panel="sleeve" title="sleeve card (Ctrl+4)">
+          <button class="nav" data-panel="sleeve" title="your sleeve (Ctrl+4)">
             <svg class="icon" aria-hidden="true"><use href="#i-sleeve" /></svg><span class="nav-label">sleeve</span>
           </button>
           <button class="nav" data-panel="import" title="import (Ctrl+5)">
@@ -163,12 +168,12 @@
         </div>
 
         <div class="nav-group" role="group" aria-labelledby="navGroupSources">
-          <p id="navGroupSources" class="nav-group-title">sources</p>
-          <button class="nav" data-panel="providers" title="providers (Ctrl+6)">
-            <svg class="icon" aria-hidden="true"><use href="#i-providers" /></svg><span class="nav-label">providers</span>
+          <p id="navGroupSources" class="nav-group-title">connect</p>
+          <button class="nav" data-panel="providers" title="sources (Ctrl+6)">
+            <svg class="icon" aria-hidden="true"><use href="#i-providers" /></svg><span class="nav-label">sources</span>
           </button>
-          <button class="nav" data-panel="plugins" title="plugins (Ctrl+7)">
-            <svg class="icon" aria-hidden="true"><use href="#i-plugins" /></svg><span class="nav-label">plugins</span>
+          <button class="nav" data-panel="plugins" title="services (Ctrl+7)">
+            <svg class="icon" aria-hidden="true"><use href="#i-plugins" /></svg><span class="nav-label">services</span>
             <span id="navPluginBadge" class="nav-badge" hidden></span>
           </button>
         </div>
@@ -178,8 +183,11 @@
           <button class="nav" data-panel="theme" title="appearance (Ctrl+8)">
             <svg class="icon" aria-hidden="true"><use href="#i-theme" /></svg><span class="nav-label">appearance</span>
           </button>
-          <button class="nav" data-panel="diag" title="diagnostics (Ctrl+9)">
+          <button class="nav debug-only" data-panel="diag" title="diagnostics (Ctrl+9)">
             <svg class="icon" aria-hidden="true"><use href="#i-diag" /></svg><span class="nav-label">diagnostics</span>
+          </button>
+          <button class="nav" data-panel="settings" title="settings (Ctrl+0)">
+            <svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg><span class="nav-label">settings</span>
           </button>
         </div>
       </div>
@@ -196,8 +204,8 @@
               id="playQuery"
               type="search"
               role="combobox"
-              placeholder="play: artist or track"
-              aria-label="track or artist to play"
+              placeholder="what do you want to hear?"
+              aria-label="a song or an artist to play"
               aria-autocomplete="list"
               aria-expanded="false"
               aria-controls="suggest"
@@ -206,7 +214,7 @@
             />
           </label>
           <button type="submit" class="primary">play</button>
-          <button id="btnPlayAll" type="button" title="queue every matching track (Shift+Enter)">queue all</button>
+          <button id="btnPlayAll" type="button" title="play every match (Shift+Enter)">play all</button>
           <!-- What the play box offers while it is typed in (D-080): the
                chosen provider's tracks whose title begins with the text, then
                the artists, then the rest; when it has nothing, the others'
@@ -224,10 +232,8 @@
         <section id="panel-library" class="panel" aria-labelledby="titleLibrary" hidden>
           <header class="panel-head">
             <h1 id="titleLibrary" class="panel-title">library</h1>
-            <p class="panel-lede">
-              Searches your listening history: imported exports and what was played here. The
-              count is the number of counted listens — the same calculation as in the stats.
-            </p>
+            <p class="panel-lede">Every song you've ever played, all in one place.</p>
+            <p class="hint debug-only">Searches your listening history: imported exports and what was played here. The count is the number of counted listens — the same calculation as in the stats.</p>
           </header>
           <form id="searchForm" class="row">
             <label class="field grow">
@@ -235,23 +241,23 @@
               <input
                 id="searchQuery"
                 type="search"
-                placeholder="artist, track, album"
-                aria-label="search the library"
+                placeholder="search for a song, an artist or an album"
+                aria-label="search your library"
                 autocomplete="off"
               />
             </label>
             <button type="submit">search</button>
-            <button id="btnSearchPlayAll" type="button" hidden>queue all</button>
+            <button id="btnSearchPlayAll" type="button" hidden>play all</button>
           </form>
-          <p id="searchIdle" class="empty">Type an artist, a track or an album and press Enter.</p>
+          <p id="searchIdle" class="empty">Type a name and press Enter to dig through your history.</p>
           <p id="searchCount" class="hint" hidden></p>
           <table id="searchResult" class="table" hidden>
             <thead>
               <tr>
-                <th>track</th>
+                <th>song</th>
                 <th>artist</th>
                 <th>album</th>
-                <th class="num">listens</th>
+                <th class="num">plays</th>
                 <th class="num">time</th>
                 <th><span class="visually-hidden">action</span></th>
               </tr>
@@ -265,20 +271,18 @@
         <section id="panel-stats" class="panel" aria-labelledby="titleStats" hidden>
           <header class="panel-head">
             <h1 id="titleStats" class="panel-title">stats</h1>
-            <p class="panel-lede">
-              All computed from raw listen records. Clicking a year's bar narrows it down to
-              that year.
-            </p>
+            <p class="panel-lede">Your listening, in numbers. Click a year to zoom in on it.</p>
+            <p class="hint debug-only">All computed from raw listen records. Clicking a year's bar narrows it down to that year.</p>
             <div class="panel-actions">
-              <label class="inline-label">rows
-                <select id="statsTop" aria-label="how many rows in lists">
+              <label class="inline-label">show
+                <select id="statsTop" aria-label="how many to show in each list">
                   <option value="10">10</option>
                   <option value="25">25</option>
                   <option value="50">50</option>
                   <option value="100">100</option>
                 </select>
               </label>
-              <button id="btnStatsRefresh" type="button" title="recompute">
+              <button id="btnStatsRefresh" type="button" title="count again">
                 <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span>refresh</span>
               </button>
             </div>
@@ -287,8 +291,8 @@
           <p id="statsScope" class="scope"></p>
           <div id="statsSummary" class="summary"></div>
           <p id="statsEmpty" class="empty" hidden>
-            No listens to count. First give an export archive in <b>import</b>, or play
-            something.
+            Nothing to count yet — bring in your Spotify history under <b>import</b>, or play a few
+            songs.
           </p>
           <p id="statsNotes" class="hint"></p>
 
@@ -303,7 +307,7 @@
               <ol id="statsArtists" class="ranking"></ol>
             </div>
             <div>
-              <h3>tracks</h3>
+              <h3>songs</h3>
               <ol id="statsTracks" class="ranking"></ol>
             </div>
             <div>
@@ -320,9 +324,10 @@
           <header class="panel-head">
             <h1 id="titleSleeve" class="panel-title">sleeve</h1>
             <p class="panel-lede">
-              A shareable listening card — with all of your history, which the provider's
-              12-month year-end card cannot see.
+              Your music story on one card, ready to share — and it can cover every year, not just
+              the last one.
             </p>
+            <p class="hint debug-only">A shareable listening card — with all of your history, which the provider's 12-month year-end card cannot see.</p>
           </header>
           <form id="sleeveForm" class="row">
             <label class="inline-label">year
@@ -338,12 +343,12 @@
           </form>
           <div id="sleeveStage" class="card-stage">
             <div id="sleevePreview" class="card-preview" hidden></div>
-            <p id="sleeveEmpty" class="empty">Press <b>preview</b> to see the card.</p>
+            <p id="sleeveEmpty" class="empty">Hit <b>preview</b> to see your card.</p>
           </div>
           <p class="hint">
-            The core's own renderer produces the card; the saved file is the same as what
-            you see on screen. The extension decides the format: <code>.png</code> or <code>.svg</code>.
+            Save it as a picture (.png), or as a drawing that stays sharp at any size (.svg).
           </p>
+          <p class="hint debug-only">The core's own renderer produces the card; the saved file is the same as what you see on screen. The extension decides the format: <code>.png</code> or <code>.svg</code>.</p>
         </section>
 
         <!-- ————————————————— import -->
@@ -351,25 +356,28 @@
           <header class="panel-head">
             <h1 id="titleImport" class="panel-title">import</h1>
             <p class="panel-lede">
-              History comes not from an API but <b>from export files</b> — the right to data portability
-              cannot be restricted by terms of service. Giving the same archive twice does no
-              harm — duplicate records are counted and skipped.
+              Bring your Spotify history along — every song you've played there joins your stats.
             </p>
+            <p class="hint debug-only">History comes from export files, not from an API (K2). Importing the same archive twice does no harm — duplicate records are counted and skipped.</p>
           </header>
           <div id="dropzone" class="dropzone">
             <svg class="dropzone-icon" aria-hidden="true"><use href="#i-archive" /></svg>
-            <p class="dropzone-title">Drop the export archive onto the window</p>
+            <p class="dropzone-title">Drop your Spotify data here</p>
             <p class="hint">
-              a zip or an extracted directory · today Spotify's export can be read (extended
-              streaming history and account data)
+              Ask Spotify for a copy of your data in your account's privacy settings, then drop the
+              zip they send you right here.
+            </p>
+            <p class="hint debug-only">
+              a zip or an extracted directory · Spotify's extended streaming history and account data
+              can be read
             </p>
             <form id="importForm" class="row">
               <input
                 id="importPath"
                 type="text"
                 class="grow"
-                placeholder="/path/my_spotify_data.zip"
-                aria-label="path of the export archive"
+                placeholder="my_spotify_data.zip"
+                aria-label="your Spotify data file"
               />
               <button id="btnImportPick" type="button">choose a file…</button>
               <button type="submit" class="primary">import</button>
@@ -377,13 +385,19 @@
           </div>
 
           <div id="importReport" hidden>
-            <h2 class="section-title">last import</h2>
-            <p id="importSource" class="scope"></p>
+            <h2 class="section-title">your last import</h2>
             <div id="importSummary" class="summary"></div>
-            <h3>identity chain</h3>
-            <div id="importChain" class="chain"></div>
-            <p id="importSkipped" class="hint" hidden></p>
-            <details id="importRaw" class="fold">
+            <!-- The rest of K9's summary — every count and every route — one level
+                 deeper, for everyone; the raw report only in the debug mode (D-083). -->
+            <details class="fold">
+              <summary>details</summary>
+              <p id="importSource" class="scope"></p>
+              <div id="importMore" class="summary"></div>
+              <h3>how your songs were matched</h3>
+              <div id="importChain" class="chain"></div>
+              <p id="importSkipped" class="hint" hidden></p>
+            </details>
+            <details id="importRaw" class="fold debug-only">
               <summary>raw report</summary>
               <pre id="importResult" class="block"></pre>
             </details>
@@ -393,64 +407,72 @@
         <!-- ————————————————— providers -->
         <section id="panel-providers" class="panel" aria-labelledby="titleProviders" hidden>
           <header class="panel-head">
-            <h1 id="titleProviders" class="panel-title">providers</h1>
+            <h1 id="titleProviders" class="panel-title">sources</h1>
             <p class="panel-lede">
-              Where the sound comes from. They all play into the same queue, and every play is
-              written to the same history.
+              Where your music lives — folders on this computer and your own music servers.
             </p>
+            <p class="hint debug-only">Providers: where the sound comes from. They all play into the same queue, and every play is written to the same history.</p>
             <div class="panel-actions">
-              <button id="btnScanStale" type="button">scan only if changed</button>
-              <button id="btnScan" type="button">scan</button>
+              <button id="btnScanStale" type="button" class="debug-only">scan only if changed</button>
+              <button id="btnScan" type="button">check for new music</button>
             </div>
           </header>
 
           <!-- Where the play box searches first (D-080); the others are asked
                only when it finds nothing. -->
           <div class="card play-from">
-            <h2 class="section-title">play from</h2>
+            <h2 class="section-title">search here first</h2>
             <p class="hint">
-              The play box and its suggestions search here first; the others are asked only when
-              nothing is found here, and their results are named.
+              When you search, we look here first — and only check your other sources if nothing
+              turns up.
             </p>
-            <div id="playFromList" class="play-from-list" role="radiogroup" aria-label="play from">
+            <p class="hint debug-only">The play box and its suggestions search here first; the others are asked only when nothing is found here, and their results are named (D-080).</p>
+            <div id="playFromList" class="play-from-list" role="radiogroup" aria-label="search here first">
               <span id="playFromPill" class="play-from-pill" aria-hidden="true" hidden></span>
             </div>
             <p id="playFromMissing" class="warn-note" hidden></p>
           </div>
 
-          <div class="card">
-            <h2 class="section-title">local directories</h2>
-            <ul id="musicDirs" class="paths"></ul>
-            <p class="hint">
-              <code>HEADSHELL_MUSIC_DIRS</code> (an environment variable) sets them. Files re-tagged in
-              place are only picked up when a plain <b>scan</b> runs.
+          <!-- The music folders (D-085): chosen here, kept by the core; adding or
+               taking one off checks for new music at once. -->
+          <div class="card music-folders">
+            <h2 class="section-title">music folders</h2>
+            <p class="hint">Songs in these folders show up in your library.</p>
+            <ul id="musicDirs" class="folders"></ul>
+            <p id="musicDirsNote" class="warn-note" hidden></p>
+            <div class="row">
+              <button id="btnAddFolder" type="button">add a folder…</button>
+            </div>
+            <p class="hint debug-only">
+              <code>HEADSHELL_MUSIC_DIRS</code> decides the folders for a run that sets it; with nothing
+              chosen, the system's music folder is used. Files re-tagged in place are picked up by a
+              plain scan.
             </p>
           </div>
 
-          <h2 class="section-title">registered providers</h2>
+          <h2 class="section-title">connected</h2>
           <table id="providerTable" class="table">
             <thead>
-              <tr><th>name</th><th>capabilities</th><th>state</th><th><span class="visually-hidden">action</span></th></tr>
+              <tr><th>name</th><th class="debug-only">capabilities</th><th>state</th><th><span class="visually-hidden">action</span></th></tr>
             </thead>
             <tbody></tbody>
           </table>
           <p id="providerEmpty" class="empty" hidden>
-            No registered providers. Set <code>HEADSHELL_MUSIC_DIRS</code> for local files,
-            add a server below for a remote library, or install a plugin from the <b>plugins</b>
-            catalog.
+            Nothing's connected yet — add a music folder, connect a server below, or add a service
+            like YouTube Music.
           </p>
 
-          <h2 class="section-title">servers</h2>
+          <h2 class="section-title">music servers</h2>
           <table id="serverTable" class="table">
             <thead>
               <tr><th>name</th><th>type</th><th>address</th><th>user</th><th><span class="visually-hidden">action</span></th></tr>
             </thead>
             <tbody></tbody>
           </table>
-          <p id="serverEmpty" class="empty" hidden>No registered servers.</p>
+          <p id="serverEmpty" class="empty" hidden>No servers yet — got a Subsonic or Jellyfin server? Connect it below.</p>
 
           <details class="fold">
-            <summary>add a server</summary>
+            <summary>connect a server</summary>
             <form id="serverForm" class="grid">
               <label>type
                 <select id="serverKind">
@@ -459,12 +481,12 @@
                 </select>
               </label>
               <label>address <input id="serverUrl" type="url" placeholder="https://music.home" required /></label>
-              <label>user <input id="serverUser" type="text" required /></label>
+              <label>username <input id="serverUser" type="text" required /></label>
               <label>password <input id="serverPassword" type="password" /></label>
-              <label>api key (jellyfin) <input id="serverApiKey" type="password" /></label>
-              <label>name (derived from the address if empty) <input id="serverName" type="text" /></label>
-              <label class="check"><input id="serverVerify" type="checkbox" checked /> connect and verify before saving</label>
-              <button type="submit" class="primary">add</button>
+              <label>API key (Jellyfin only) <input id="serverApiKey" type="password" /></label>
+              <label>name (optional) <input id="serverName" type="text" /></label>
+              <label class="check"><input id="serverVerify" type="checkbox" checked /> check the connection first</label>
+              <button type="submit" class="primary">connect</button>
             </form>
           </details>
         </section>
@@ -472,54 +494,53 @@
         <!-- ————————————————— plugins (Phase 2, D-069, D-071) -->
         <section id="panel-plugins" class="panel" aria-labelledby="titlePlugins" hidden>
           <header class="panel-head">
-            <h1 id="titlePlugins" class="panel-title">plugins</h1>
+            <h1 id="titlePlugins" class="panel-title">services</h1>
             <p class="panel-lede">
-              Written in JavaScript and run in the engine inside the app; you do not need to
-              install any runtime.
+              Listen from YouTube Music, SoundCloud and more — add a service and it's ready to play.
             </p>
+            <p class="hint debug-only">Plugins: written in JavaScript and run in the engine inside the app (QuickJS); you do not need to install any runtime.</p>
           </header>
 
-          <div class="segmented tabs" role="tablist" aria-label="plugin view">
+          <div class="segmented tabs" role="tablist" aria-label="services">
             <span class="segmented-thumb" aria-hidden="true"></span>
-            <button id="tabInstalled" type="button" role="tab" class="segment" aria-selected="true" aria-controls="pluginsInstalled">installed</button>
-            <button id="tabCatalog" type="button" role="tab" class="segment" aria-selected="false" aria-controls="pluginsCatalog">catalog</button>
-            <button id="tabSecrets" type="button" role="tab" class="segment" aria-selected="false" aria-controls="pluginsSecrets">secrets</button>
+            <button id="tabInstalled" type="button" role="tab" class="segment" aria-selected="true" aria-controls="pluginsInstalled">added</button>
+            <button id="tabCatalog" type="button" role="tab" class="segment" aria-selected="false" aria-controls="pluginsCatalog">browse</button>
+            <button id="tabSecrets" type="button" role="tab" class="segment" aria-selected="false" aria-controls="pluginsSecrets">keys</button>
           </div>
 
           <div id="pluginsInstalled" class="tab-panel" role="tabpanel" aria-labelledby="tabInstalled">
             <div class="row">
               <button id="btnPluginReload" type="button">
-                <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span>refresh the list</span>
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span>refresh</span>
               </button>
               <span id="pluginSummary" class="hint"></span>
             </div>
             <p id="pluginEnforce" class="warn-note" hidden>
-              <b>Permissions are not enforced.</b> The listed permissions are the ones the plugin <i>declares</i>
-              — the core does not technically restrict them (D-040). Consent is given to
-              plugins you trust.
+              <b>Heads up:</b> only allow services you trust — they could connect to more than they
+              say.
             </p>
-            <p id="pluginEnforced" class="note" hidden>
-              <b>Permissions are enforced.</b> The plugin can only connect to the hosts it declares
-              and cannot access the file system (D-069). The tools on the <b>engine</b> line
-              (like yt-dlp) are separate programs and are outside this boundary.
+            <p id="pluginEnforced" class="note debug-only" hidden>
+              A plugin reaches only the hosts it declares and none of your files (D-069); the tools it
+              needs (like yt-dlp) run as separate programs.
             </p>
             <ul id="pluginList" class="plugins"></ul>
             <p id="pluginEmpty" class="empty" hidden>
-              No plugins installed. You can install them from the <b>catalog</b>. A plugin installed by hand
-              goes into the <code>plugins/</code> folder of the data directory; its path is in the environment block under
-              <b>diagnostics</b>.
+              No services yet — have a look in <b>browse</b> for YouTube Music, SoundCloud and more.
+            </p>
+            <p class="hint debug-only">
+              A plugin installed by hand goes into the <code>plugins/</code> folder of the data directory.
             </p>
           </div>
 
           <div id="pluginsCatalog" class="tab-panel" role="tabpanel" aria-labelledby="tabCatalog" hidden>
-            <p class="note">
-              Plugins come from the <code>headshell/plugins</code> repository. The catalog is only read when you
-              ask; every file is verified with its sha256, and an installed plugin <b>awaits
-              consent</b>. An update never overwrites a plugin installed or changed
-              by hand.
+            <p class="hint">Find a service you like and add it in a click.</p>
+            <p class="note debug-only">
+              Plugins come from the <code>headshell/plugins</code> repository (D-071). The catalog is only read
+              when you ask; every file is verified with its sha256, and an installed plugin awaits consent.
+              An update never overwrites a plugin installed or changed by hand.
             </p>
             <div class="row">
-              <button id="btnCatalogLoad" type="button" class="primary">fetch the catalog</button>
+              <button id="btnCatalogLoad" type="button" class="primary">show available services</button>
               <button id="btnCatalogUpdateAll" type="button">update all</button>
               <span id="catalogSummary" class="hint"></span>
             </div>
@@ -528,23 +549,26 @@
           </div>
 
           <div id="pluginsSecrets" class="tab-panel" role="tabpanel" aria-labelledby="tabSecrets" hidden>
-            <p class="note">
-              Keys used by the plugins and the core (API keys, tokens, cookies).
-              The list only carries <b>names</b> — values are never read back (D-042).
-              The namespace is the plugin's name (<code>ytmusic</code>) or a link of the core
-              (<code>identity:acoustid</code>).
+            <p class="hint">
+              Some services need a key or a sign-in to work. Once you save one, it stays private —
+              we never show it again.
+            </p>
+            <p class="note debug-only">
+              Keys used by the plugins and the core (API keys, tokens, cookies). The list only carries
+              names — values are never read back (D-042). The namespace is the plugin's name
+              (<code>ytmusic</code>) or a link of the core (<code>identity:acoustid</code>).
             </p>
             <table id="secretTable" class="table">
               <thead>
-                <tr><th>namespace</th><th>key</th><th><span class="visually-hidden">action</span></th></tr>
+                <tr><th>service</th><th>name</th><th><span class="visually-hidden">action</span></th></tr>
               </thead>
               <tbody></tbody>
             </table>
-            <p id="secretEmpty" class="empty" hidden>No secrets stored.</p>
+            <p id="secretEmpty" class="empty" hidden>No keys saved yet.</p>
             <form id="secretForm" class="row">
-              <input id="secretNamespace" type="text" placeholder="namespace (e.g. identity:acoustid)" aria-label="secret namespace" required />
-              <input id="secretKey" type="text" placeholder="key (e.g. api_key)" aria-label="secret key" required />
-              <input id="secretValue" type="password" placeholder="value" aria-label="secret value" required />
+              <input id="secretNamespace" type="text" placeholder="service (e.g. ytmusic)" aria-label="service" required />
+              <input id="secretKey" type="text" placeholder="name (e.g. cookies)" aria-label="key name" required />
+              <input id="secretValue" type="password" placeholder="value" aria-label="key value" required />
               <button type="submit" class="primary">save</button>
             </form>
           </div>
@@ -554,31 +578,32 @@
         <section id="panel-theme" class="panel" aria-labelledby="titleTheme" hidden>
           <header class="panel-head">
             <h1 id="titleTheme" class="panel-title">appearance</h1>
-            <p class="panel-lede">
-              Themes only change the look: colour, corner radius, motion duration. They
-              cannot access data or run scripts.
-            </p>
+            <p class="panel-lede">Pick the look you like best.</p>
+            <p class="hint debug-only">Themes only change the look: colour, corner radius, motion duration. They cannot access data or run scripts.</p>
             <div class="panel-actions">
               <button id="btnThemeReload" type="button">
-                <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span>refresh the list</span>
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span>refresh</span>
               </button>
             </div>
           </header>
 
           <ul id="themeList" class="themes"></ul>
 
-          <h2 class="section-title">writing a theme</h2>
-          <p class="hint">
-            A theme is a directory with <b>theme.json</b> and <b>theme.css</b> in it. Put it in the path
-            below and press <b>refresh the list</b> — no need to close the app. The
-            guaranteed surface is only <b>:root</b> and its <b>--headshell-*</b> tokens; themes that go
-            beyond it are loaded, but flagged <i>extended</i> in the list.
-          </p>
-          <pre id="themeDir" class="block"></pre>
+          <div id="themeRejectedBlock" hidden>
+            <h2 class="section-title">themes that couldn't be loaded</h2>
+            <ul id="themeRejected" class="rejected"></ul>
+          </div>
 
-          <h2 class="section-title">themes that could not be loaded</h2>
-          <ul id="themeRejected" class="rejected"></ul>
-          <p id="themeRejectedEmpty" class="empty">No rejected themes.</p>
+          <details class="fold theme-guide debug-only">
+            <summary>writing a theme</summary>
+            <p class="hint">
+              A theme is a directory with <b>theme.json</b> and <b>theme.css</b> in it. Put it in the path
+              below and press <b>refresh the list</b> — no need to close the app. The
+              guaranteed surface is only <b>:root</b> and its <b>--headshell-*</b> tokens; themes that go
+              beyond it are loaded, but flagged <i>extended</i> in the list.
+            </p>
+            <pre id="themeDir" class="block"></pre>
+          </details>
         </section>
 
         <!-- ————————————————— diagnostics -->
@@ -622,8 +647,8 @@
           </form>
           <p class="hint">
             Shows which link gave a track its canonical identity: ISRC → MBID →
-            fuzzy → fingerprint. It only goes online when the app was started with
-            <code>HEADSHELL_ONLINE=1</code> — the CLI's <code>--online</code>.
+            fuzzy → fingerprint. It goes online only while <b>online lookups</b> are on in
+            <b>settings</b> — the CLI's <code>--online</code>.
           </p>
           <div id="resolveCard" class="card" hidden>
             <dl id="resolveFacts" class="facts-list"></dl>
@@ -631,6 +656,69 @@
               <summary>JSON</summary>
               <pre id="resolveResult" class="block"></pre>
             </details>
+          </div>
+        </section>
+
+        <!-- ————————————————— settings (D-082)
+             The app's own choices, kept in the data directory. The CLI decides
+             its runs with flags; `headshell online` shows and makes this one. -->
+        <section id="panel-settings" class="panel" aria-labelledby="titleSettings" hidden>
+          <header class="panel-head">
+            <h1 id="titleSettings" class="panel-title">settings</h1>
+            <p class="panel-lede">Make headshell work just the way you like.</p>
+            <p class="hint debug-only">Choices this app keeps in its data directory (D-082, D-083). The CLI makes its own, run by run, with flags.</p>
+          </header>
+
+          <div class="card setting">
+            <div class="setting-row">
+              <div class="setting-text">
+                <h2 id="onlineTitle" class="setting-title">look things up online</h2>
+                <p id="onlineHint" class="hint">
+                  Find missing album covers and song details on the internet.
+                </p>
+                <p class="hint debug-only">
+                  Covers and canonical identities from MusicBrainz and the Cover Art Archive. Off,
+                  neither is asked: covers come only from where the tracks live.
+                </p>
+              </div>
+              <button
+                id="onlineSwitch"
+                type="button"
+                class="switch"
+                role="switch"
+                aria-checked="false"
+                aria-labelledby="onlineTitle"
+                aria-describedby="onlineHint onlineNote"
+              >
+                <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
+              </button>
+            </div>
+            <p id="onlineNote" class="hint setting-note"></p>
+          </div>
+
+          <!-- The debug mode (D-083), at the very bottom: the developer's details —
+               diagnostics, raw data, internal identifiers — only while it is on. -->
+          <div class="card setting">
+            <div class="setting-row">
+              <div class="setting-text">
+                <h2 id="debugTitle" class="setting-title">debug mode</h2>
+                <p id="debugHint" class="hint">
+                  Show the technical details — handy when something isn't working right.
+                </p>
+              </div>
+              <button
+                id="debugSwitch"
+                type="button"
+                class="switch"
+                role="switch"
+                aria-checked="false"
+                aria-labelledby="debugTitle"
+                aria-describedby="debugHint debugNote"
+              >
+                <span class="switch-thumb" aria-hidden="true"><span class="switch-knob"></span></span>
+              </button>
+            </div>
+            <p id="debugNote" class="hint setting-note" hidden></p>
           </div>
         </section>
       </main>
@@ -728,7 +816,7 @@
                 <button id="tabQueue" type="button" role="tab" class="segment" aria-selected="true" aria-controls="queuePanel">up next<span id="queueCount" class="count"></span></button>
                 <button id="tabLyrics" type="button" role="tab" class="segment" aria-selected="false" aria-controls="lyricsHome">lyrics</button>
               </div>
-              <button id="btnLyricsExpand" class="icon-button subtle" type="button" title="lyrics on the whole sheet" aria-label="lyrics on the whole sheet" hidden>
+              <button id="btnLyricsExpand" class="icon-button subtle" type="button" title="lyrics, full screen" aria-label="lyrics, full screen" hidden>
                 <svg class="icon" aria-hidden="true"><use href="#i-expand" /></svg>
               </button>
             </div>
@@ -751,9 +839,9 @@
                 <div class="lyrics-foot">
                   <p id="lyricsSource" class="lyrics-source"></p>
                   <div id="lyricsShift" class="lyrics-shift" role="group" aria-label="shift the lyrics" hidden>
-                    <button id="btnShiftSooner" type="button" title="the lines 0.5 s sooner">sooner</button>
-                    <button id="btnShiftReset" type="button" class="shift-value" title="back to the lyrics' own timing">on time</button>
-                    <button id="btnShiftLater" type="button" title="the lines 0.5 s later">later</button>
+                    <button id="btnShiftSooner" type="button" title="show the lines a little earlier">sooner</button>
+                    <button id="btnShiftReset" type="button" class="shift-value" title="back to the original timing">on time</button>
+                    <button id="btnShiftLater" type="button" title="show the lines a little later">later</button>
                   </div>
                 </div>
               </section>
@@ -774,7 +862,7 @@
               <strong id="lyricsFullTitle"></strong>
               <span id="lyricsFullArtist"></span>
             </span>
-            <button id="btnLyricsCollapse" class="icon-button subtle" type="button" title="back beside the record (Esc)" aria-label="back beside the record">
+            <button id="btnLyricsCollapse" class="icon-button subtle" type="button" title="back to the record (Esc)" aria-label="back to the record">
               <svg class="icon" aria-hidden="true"><use href="#i-collapse" /></svg>
             </button>
           </header>
@@ -790,22 +878,20 @@
               <li class="step">
                 <span class="step-no" aria-hidden="true">1</span>
                 <span class="step-text">
-                  <b>Set up a music source.</b>
-                  Local directories are set with <code>HEADSHELL_MUSIC_DIRS</code> and a remote
-                  library (Subsonic, Jellyfin) is added under providers; for SoundCloud or
-                  YouTube Music, install a plugin from the catalog.
+                  <b>Add your music.</b>
+                  Songs in your Music folder show up on their own. Add more folders or a music server
+                  under sources, or bring in YouTube Music and SoundCloud from services.
                 </span>
                 <span class="step-actions">
-                  <button class="go" type="button" data-go="providers">providers</button>
-                  <button class="go" type="button" data-go="plugins">catalog</button>
+                  <button class="go" type="button" data-go="providers">sources</button>
+                  <button class="go" type="button" data-go="plugins">services</button>
                 </span>
               </li>
               <li class="step">
                 <span class="step-no" aria-hidden="true">2</span>
                 <span class="step-text">
-                  <b>Import your history.</b>
-                  An export archive fills the statistics and the sleeve card. Today
-                  Spotify's export can be read.
+                  <b>Bring your history.</b>
+                  Import your Spotify data to fill up your stats and your sleeve.
                 </span>
                 <span class="step-actions">
                   <button class="go" type="button" data-go="import">import</button>
@@ -814,19 +900,15 @@
               <li class="step">
                 <span class="step-no" aria-hidden="true">3</span>
                 <span class="step-text">
-                  <b>Play.</b>
-                  Type an artist or a track in the box above and press Enter; to queue every
-                  matching track, press Shift+Enter.
+                  <b>Press play.</b>
+                  Type a song or an artist up top and hit Enter — Shift+Enter plays every match.
                 </span>
                 <span class="step-actions">
-                  <button class="go" type="button" data-go="focus-play">play box</button>
+                  <button class="go" type="button" data-go="focus-play">search box</button>
                 </span>
               </li>
             </ol>
-            <p class="hint">
-              If there is no sound or nothing can be found, <b>diagnostics</b> shows at which
-              stage the last run stopped.
-            </p>
+            <p class="hint">If something won't play, the message that pops up tells you why.</p>
           </div>
         </div>
       </section>
@@ -835,13 +917,13 @@
     <!-- ————————————————— player bar -->
     <footer id="player" class="player" aria-label="player">
       <div class="controls transport">
-        <button id="btnPrev" class="icon-button" type="button" title="previous (←)" aria-label="previous track">
+        <button id="btnPrev" class="icon-button" type="button" title="previous (←)" aria-label="previous song">
           <svg class="icon" aria-hidden="true"><use href="#i-prev" /></svg>
         </button>
         <button id="btnPlayPause" class="icon-button play" type="button" title="play / pause (space)" aria-label="play">
           <svg class="icon" aria-hidden="true"><use id="playPauseIcon" href="#i-play" /></svg>
         </button>
-        <button id="btnNext" class="icon-button" type="button" title="next (→)" aria-label="next track">
+        <button id="btnNext" class="icon-button" type="button" title="next (→)" aria-label="next song">
           <svg class="icon" aria-hidden="true"><use href="#i-next" /></svg>
         </button>
         <button id="btnStop" class="icon-button subtle" type="button" title="stop" aria-label="stop">
@@ -875,23 +957,22 @@
       <div id="helpBox" class="sheet-box" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
         <h2 id="helpTitle">keyboard shortcuts</h2>
         <ul class="keys">
-          <li><span><kbd>space</kbd></span> pause / resume</li>
-          <li><span><kbd>←</kbd> <kbd>→</kbd></span> previous / next track</li>
-          <li><span><kbd>/</kbd></span> go to the play box</li>
-          <li><span><kbd>L</kbd></span> the lyrics — and again, back to up next</li>
+          <li><span><kbd>space</kbd></span> pause or keep playing</li>
+          <li><span><kbd>←</kbd> <kbd>→</kbd></span> previous or next song</li>
+          <li><span><kbd>/</kbd></span> jump to the search box</li>
+          <li><span><kbd>L</kbd></span> show the lyrics — press again for up next</li>
           <li><span><kbd>Enter</kbd></span> play the first match</li>
-          <li><span><kbd>↓</kbd> <kbd>↑</kbd></span> in the play box: through the suggestions — <kbd>Enter</kbd> plays the lit one</li>
-          <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> queue every matching track</li>
-          <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></span> sections, in the sidebar's order</li>
-          <li><span><kbd>Shift</kbd>+<kbd>F10</kbd></span> what the focused item offers — the right click's menu</li>
-          <li><span><kbd>Esc</kbd></span> close the topmost: this list, the notices, the whole-sheet lyrics, now playing</li>
-          <li><span><kbd>?</kbd></span> this list</li>
+          <li><span><kbd>↓</kbd> <kbd>↑</kbd></span> move through the suggestions (Enter plays one)</li>
+          <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> play every match</li>
+          <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>0</kbd></span> jump to a section</li>
+          <li><span><kbd>Shift</kbd>+<kbd>F10</kbd></span> open the menu for what's selected</li>
+          <li><span><kbd>Esc</kbd></span> close whatever is on top</li>
+          <li><span><kbd>?</kbd></span> show this list</li>
         </ul>
         <p class="hint">
-          In a text box, keys go to the box, not to the shortcuts. A right click on a track, a
-          plugin or a section in the sidebar lists what can be done with it. Notices also close when
-          dragged to the right. Now playing opens from the player bar — a click or a drag
-          upwards — and closes the same way, or when dragged down.
+          Right-click a song, a service or anything in the sidebar to see what you can do with it.
+          Swipe a message to the right to make it go away. Click the player bar, or drag it up, to
+          open now playing.
         </p>
         <button id="btnHelpClose" type="button">close</button>
       </div>

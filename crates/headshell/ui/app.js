@@ -127,10 +127,66 @@ function firstLine(chain) {
 
 // ————————————————————————————————————— notices
 //
-// An error shows up with its stage (K9): "where did it break" should be
-// answered at first glance. The full chain stays folded and is copied with a
-// single click — `diag`'s last run may have been replaced by another command
-// in the meantime, but this block does not change.
+// An error shows up with its stage (K9): "where did it break" is answered at
+// first glance — in plain words (D-083), the stage's code and the full chain
+// folded under "details", copied with a single click. `diag`'s last run may
+// have been replaced by another command in the meantime, but this block does
+// not change. In the debug mode the code stands beside the words.
+
+/// The core's stages in plain words, by their wire names (`diag::Stage`;
+/// `ui_contract.rs` holds every one of them here).
+const STAGE_TEXT = {
+  CONFIG_LOAD: "A setting couldn't be read",
+  IMPORT_READ: "That file couldn't be opened",
+  IMPORT_DETECT: "That doesn't look like a Spotify export",
+  IMPORT_PARSE: "That export couldn't be read",
+  IDENTITY_RESOLVE: "That song couldn't be matched",
+  LIBRARY_OPEN: "Your library couldn't be opened",
+  LIBRARY_WRITE: "Your library couldn't be saved",
+  LIBRARY_QUERY: "Your library couldn't be searched",
+  STATS_COMPUTE: "Your stats couldn't be counted",
+  PROVIDER_CALL: "The source didn't answer",
+  PLUGIN_LOAD: "A service couldn't be loaded",
+  PLUGIN_RUNTIME: "A service stopped working",
+  PLUGIN_START: "A service couldn't start",
+  PLUGIN_CATALOG: "The list of services couldn't be loaded",
+  NETWORK_REQUEST: "Couldn't reach the server",
+  SLEEVE_RENDER: "Your card couldn't be drawn",
+  PLAYBACK_RESOLVE: "That song couldn't be found",
+  PLAYBACK_DECODE: "That song couldn't be played",
+  PLAYBACK_OUTPUT: "No sound came out",
+  ARTWORK_READ: "The cover couldn't be read",
+  ARTWORK_LOOKUP: "The cover couldn't be found",
+  ARTWORK_STORE: "The cover couldn't be saved",
+  LYRICS_READ: "The lyrics couldn't be read",
+  LYRICS_LOOKUP: "The lyrics couldn't be found",
+  LYRICS_STORE: "The lyrics couldn't be saved",
+};
+
+/// What the listener can do about it (D-084), where there is something to
+/// do; the core's own cause is the debug mode's, and the details'.
+const STAGE_HINT = {
+  CONFIG_LOAD: "One of headshell's files may be damaged — the details say which.",
+  IMPORT_READ: "Check that the file is still there, then try again.",
+  IMPORT_DETECT: "Make sure it's the zip Spotify sent you.",
+  IMPORT_PARSE: "Make sure it's the zip Spotify sent you, just as it came.",
+  LIBRARY_OPEN: "Try again — if it keeps happening, the details will help.",
+  LIBRARY_WRITE: "Try again — if it keeps happening, the details will help.",
+  LIBRARY_QUERY: "Try again — if it keeps happening, the details will help.",
+  PROVIDER_CALL: "It may be busy — give it a moment and try again.",
+  PLUGIN_LOAD: "Try updating it under services.",
+  PLUGIN_RUNTIME: "Try again, or turn it off and on again under services.",
+  PLUGIN_START: "Try turning it off and on again under services.",
+  PLUGIN_CATALOG: "Check your internet connection and try again.",
+  NETWORK_REQUEST: "Check your internet connection and try again.",
+  PLAYBACK_RESOLVE: "Try another search, or check for new music under sources.",
+  PLAYBACK_DECODE: "The file may be damaged — try another song.",
+  PLAYBACK_OUTPUT: "Check that your speakers or headphones are connected.",
+};
+
+function stageText(stage) {
+  return STAGE_TEXT[stage] ?? "Something went wrong";
+}
 //
 // A notice comes from below (next to the player) and leaves to the right:
 // the close button, running out of time and dragging to the right all exit
@@ -149,7 +205,7 @@ function toast(err, info = false) {
   const whole = chain.startsWith("STEP:") ? chain : `STEP: ${stage}\n  ${chain}`;
   const copyOut = info
     ? () => copyText(String(err), "the notice copied to the clipboard")
-    : () => copyText(whole, "error chain copied to the clipboard");
+    : () => copyText(whole, "the details copied to the clipboard");
   const box = h("div", {
     class: info ? "toast info" : "toast",
     role: info ? "status" : "alert",
@@ -165,7 +221,7 @@ function toast(err, info = false) {
           if (box.isConnected) armToast(box, 4000);
         },
         items: [
-          { label: info ? "copy the text" : "copy the error chain", run: copyOut },
+          { label: info ? "copy the text" : "copy the details", run: copyOut },
           "-",
           { label: "close", run: () => dismissToast(box) },
           $("toasts").childElementCount > 1 && { label: "close every notice", key: "Esc", run: dismissAllToasts },
@@ -178,10 +234,23 @@ function toast(err, info = false) {
     box.append(h("div", { text: err }));
   } else {
     box.append(
-      h("span", { class: "stage", text: `STEP: ${stage}` }),
-      h("div", { text: firstLine(err?.chain) }),
-      h("details", {}, h("summary", { text: "full chain" }), h("pre", { text: chain })),
-      h("div", { class: "toast-actions" }, h("button", { type: "button", onclick: copyOut }, icon("copy"), "copy")),
+      h(
+        "div",
+        { class: "toast-head" },
+        h("span", { class: "stage", text: stageText(stage) }),
+        h("code", { class: "toast-code debug-only", text: stage }),
+      ),
+      // For the listener what to do about it; the core's own cause is the
+      // debug mode's — and the details' for everyone (D-084).
+      ...(STAGE_HINT[stage] ? [h("div", { class: "toast-cause plain-only", text: STAGE_HINT[stage] })] : []),
+      h("div", { class: "toast-cause debug-only", text: firstLine(err?.chain) }),
+      h(
+        "details",
+        {},
+        h("summary", { text: "details" }),
+        h("pre", { text: chain }),
+        h("div", { class: "toast-actions" }, h("button", { type: "button", onclick: copyOut }, icon("copy"), "copy")),
+      ),
     );
   }
 
@@ -329,7 +398,14 @@ function filePath(picked) {
 // this order (`ui_contract.rs` checks that the two name the same set). A new
 // section is added here, to a group in the sidebar and to `ON_OPEN`.
 
-const PANELS = ["now", "library", "stats", "sleeve", "import", "providers", "plugins", "theme", "diag"];
+const PANELS = ["now", "library", "stats", "sleeve", "import", "providers", "plugins", "theme", "diag", "settings"];
+
+/// A section's shortcut: `Ctrl`+its place in the sidebar, the tenth on `0`
+/// — the key after `9` on the number row.
+function panelShortcut(panel) {
+  const slot = PANELS.indexOf(panel) + 1;
+  return `Ctrl+${slot % 10}`;
+}
 
 // The work done when a section opens. All of it is local reading: nothing
 // here goes online — the catalog is only read with the button (D-071).
@@ -348,6 +424,11 @@ const ON_OPEN = {
   },
   theme: refreshThemes,
   diag: refreshDiag,
+  settings: () => {
+    onlineSwitch.placeThumb(true);
+    debugSwitch.placeThumb(true);
+    refreshOnline();
+  },
 };
 
 // "Now playing" is not one of the sections in the content column but a sheet
@@ -362,6 +443,8 @@ const nowSheet = $("panel-now");
 
 function openPanel(name, { instant = false } = {}) {
   if (!PANELS.includes(name)) return;
+  // Diagnostics is the developer's: there only in the debug mode (D-083).
+  if (name === "diag" && !debugMode) return;
   if (name === "now") {
     setNowOpen(true, { instant });
     return;
@@ -455,6 +538,8 @@ window.addEventListener("resize", () => {
   sleeveFormat.placeThumb(true);
   pluginTabs.placeThumb(true);
   nowTabs.placeThumb(true);
+  onlineSwitch.placeThumb(true);
+  debugSwitch.placeThumb(true);
   placePlayFromPill(true);
   // The field changed width; the panel under it follows.
   if (suggestUp) openSuggest();
@@ -508,6 +593,152 @@ function segmented(container, onSelect) {
   return { select, placeThumb, selected };
 }
 
+// ————————————————————————————————————— switch
+
+/// An on/off switch (`role="switch"`): the knob slides on a spring, so a
+/// second press while it travels turns it back from where it is. Pressed, the
+/// knob stretches toward where a release sends it (style.css). It answers at
+/// once and calls `onChange(on)`; the caller settles it with `set` when the
+/// core has answered.
+function toggleSwitch(button, onChange) {
+  const thumb = button.querySelector(".switch-thumb");
+  const on = () => button.getAttribute("aria-checked") === "true";
+
+  function placeThumb(instant = false) {
+    if (!button.offsetWidth) return; // no size in a hidden section; it settles when opened
+    const travel = button.clientWidth - thumb.offsetWidth - 2 * thumb.offsetLeft;
+    const x = on() ? travel : 0;
+    if (instant) place(thumb, { x });
+    else animate(thumb, { x });
+  }
+
+  function set(value, { instant = false } = {}) {
+    if (on() !== value) {
+      button.setAttribute("aria-checked", String(value));
+      placeThumb(instant);
+    } else if (instant) {
+      placeThumb(true);
+    }
+  }
+
+  function toggle() {
+    if (button.disabled) return;
+    set(!on());
+    onChange(on());
+  }
+
+  button.addEventListener("click", toggle);
+  return { set, toggle, on, placeThumb, held: () => button.disabled };
+}
+
+// ————————————————————————————————————— online lookups (D-082)
+//
+// Whether the app asks MusicBrainz and the Cover Art Archive: a choice kept
+// by the core, which `HEADSHELL_ONLINE` overrides for one launch. The switch
+// shows what the app goes by **now**, and the note says who decided it.
+
+let online = null;
+
+const onlineSwitch = toggleSwitch($("onlineSwitch"), async (on) => {
+  const report = await call("online_set", { mode: on ? "online" : "offline" });
+  // A failed call has said why in a notice; the switch goes back to what
+  // holds.
+  paintOnline(report?.online ?? online);
+});
+
+async function refreshOnline() {
+  const report = await call("online");
+  if (report) paintOnline(report.online);
+}
+
+function paintOnline(choice) {
+  if (!choice) return;
+  online = choice;
+  const on = choice.mode === "online";
+  const held = choice.source === "variable";
+  $("onlineSwitch").disabled = held;
+  onlineSwitch.set(on, { instant: !$("onlineSwitch").offsetWidth });
+  // For the listener what changes for them; who set it and the other
+  // services' own rules are the debug mode's (D-084).
+  const plain = [];
+  const full = [];
+  if (held) {
+    const saved = choice.saved === "online" ? "on" : "off";
+    plain.push(`It's ${on ? "on" : "off"} for now — this choice takes over the next time you open headshell.`);
+    full.push(
+      `HEADSHELL_ONLINE=${on ? 1 : 0} holds this launch ${on ? "on" : "off"}; ` +
+        `the saved choice — ${saved} — applies when the app starts without it.`,
+    );
+  } else if (on) {
+    plain.push("Importing a big history takes longer while this is on.");
+    full.push("Importing asks MusicBrainz about every track, one a second: a large export takes hours.");
+  }
+  full.push("Lyrics and plugins go online by their own rules, not by this one.");
+  const onlineNote = $("onlineNote");
+  onlineNote.replaceChildren(
+    h("span", { class: "plain-only", text: plain.join(" ") }),
+    h("span", { class: "debug-only", text: full.join(" ") }),
+  );
+  // Nothing to say to the listener: the note takes no room outside the debug
+  // mode.
+  onlineNote.classList.toggle("debug-only", plain.length === 0);
+  if (environment) {
+    environment.lookup = choice.mode;
+    environment.lookup_held = held;
+    paintEnvironment();
+  }
+}
+
+/// The environment block in diagnostics: constants asked once, and the
+/// online mode as it stands.
+function paintEnvironment() {
+  const lookup =
+    environment.lookup === "online" ? "yes — settings: online lookups" : "no — settings: online lookups";
+  $("envBlock").textContent = [
+    `version     : ${environment.version}`,
+    `data dir    : ${environment.data_dir}`,
+    `database    : ${environment.database}`,
+    `music       : ${environment.music_dirs.length > 0 ? environment.music_dirs.join(", ") : "not set (HEADSHELL_MUSIC_DIRS)"}`,
+    `online      : ${lookup}`,
+  ].join("\n");
+}
+
+// ————————————————————————————————————— debug mode (D-083)
+//
+// The developer's details — diagnostics, raw reports, internal identifiers,
+// the counts that are zero — are drawn always and shown only while the debug
+// mode is on: one attribute on the root (`data-debug`) and the `.debug-only`
+// class (its opposite, `.plain-only`) do it, so turning it on or off redraws
+// nothing. Menus and tooltips, made when they are needed, ask `debugMode`.
+// The choice is the interface's own, beside the theme; `DEBUG=1` holds a
+// launch on.
+
+let debugMode = false;
+
+const debugSwitch = toggleSwitch($("debugSwitch"), async (on) => {
+  const mode = await call("debug_set", { on });
+  // A failed call has said why in a notice; the switch goes back to what
+  // holds.
+  paintDebug(mode ?? { on: debugMode, held: $("debugSwitch").disabled, saved: debugMode });
+});
+
+function paintDebug(mode) {
+  if (!mode) return;
+  debugMode = mode.on;
+  document.documentElement.toggleAttribute("data-debug", mode.on);
+  $("debugSwitch").disabled = mode.held;
+  debugSwitch.set(mode.on, { instant: !$("debugSwitch").offsetWidth });
+  const note = $("debugNote");
+  note.hidden = !mode.held;
+  note.textContent = mode.held
+    ? `DEBUG=1 keeps it on for now; your choice here — ${mode.saved ? "on" : "off"} — takes over without it.`
+    : "";
+  // The diagnostics row came or went: the sidebar's pill follows its row, and
+  // a section that is no longer there is left.
+  if (!mode.on && basePanel === "diag") showBase("settings", { instant: true });
+  markNav(true);
+}
+
 // ————————————————————————————————————— player
 //
 // **Everything** kept here came from the core. It is not a source of truth of
@@ -523,7 +754,7 @@ const REPEAT_LABELS = { off: "off", all: "all", one: "one track" };
 const STATE_TEXT = {
   playing: "playing",
   paused: "paused",
-  buffering: "buffering",
+  buffering: "loading",
   stopped: "stopped",
 };
 
@@ -560,6 +791,16 @@ function renderQueue(view) {
   refreshCovers();
 }
 
+/// The local provider's id: its tracks need no label of their source.
+const LOCAL_PROVIDER = "local";
+
+/// Where a track plays from (D-083): a label only for a source other than
+/// the local files, by its name; the id is the debug mode's.
+function sourceChip(provider) {
+  if (provider === LOCAL_PROVIDER) return h("span", { class: "chip debug-only", text: provider, title: "provider" });
+  return h("span", { class: "chip", text: providerName(provider), title: provider });
+}
+
 function queueRow(item, index, current) {
   const track = item.track;
   return h(
@@ -590,7 +831,7 @@ function queueRow(item, index, current) {
         h("span", { class: "q-title", text: track.title }),
         h("span", { class: "q-artist", text: track.artist }),
       ),
-      h("span", { class: "chip", text: item.id.provider, title: "provider" }),
+      sourceChip(item.id.provider),
       h("span", { class: "q-time", text: track.duration_ms ? clock(track.duration_ms) : "" }),
     ),
   );
@@ -617,7 +858,11 @@ function renderNow() {
   $("nowCardState").textContent = STATE_TEXT[state] ?? state;
   $("nowCardTitle").textContent = track.title;
   $("nowCardArtist").textContent = [track.artist, track.album].filter(Boolean).join(" · ");
-  $("nowCardSource").textContent = current.id.provider;
+  const source = $("nowCardSource");
+  const local = current.id.provider === LOCAL_PROVIDER;
+  source.textContent = local ? current.id.provider : providerName(current.id.provider);
+  source.title = current.id.provider;
+  source.classList.toggle("debug-only", local);
   $("nowCardDuration").textContent = track.duration_ms ? clock(track.duration_ms) : "";
 }
 
@@ -775,10 +1020,10 @@ let coversBusy = false;
 let coversAgain = false;
 
 const COVER_SOURCES = {
-  embedded: "from the file's tags",
-  folder: "from an image in the file's folder",
-  provider: "from the provider",
-  cover_art_archive: "from the Cover Art Archive",
+  embedded: "from the song file",
+  folder: "from a picture in the song's folder",
+  provider: "from where the song plays",
+  cover_art_archive: "found online",
 };
 
 /// A row's cover as the user reads it. "Not looked up" and "not found" are
@@ -788,13 +1033,13 @@ function coverText(item) {
     case "found":
       return `cover ${COVER_SOURCES[item.source] ?? item.source}`;
     case "not_found":
-      return `no cover found — ${item.detail}`;
+      return debugMode ? `no cover found — ${item.detail}` : "no cover found";
     case "not_checked_offline":
-      return "cover not looked up — offline (HEADSHELL_ONLINE=1 asks MusicBrainz)";
+      return "no cover yet — “look things up online” in settings can find it";
     case "failed":
-      return `the cover failed — ${firstLine(item.chain)}`;
+      return debugMode ? `the cover failed — ${firstLine(item.chain)}` : "the cover could not be fetched";
     case "pending":
-      return "looking for the cover…";
+      return "finding the cover…";
     default:
       return `cover: ${item.status}`;
   }
@@ -907,12 +1152,11 @@ function paintCoverNote() {
   const parts = [];
   if (s?.not_checked_offline > 0) {
     parts.push(
-      `Offline — no cover looked up for ${countOf(s.not_checked_offline, "track")}. ` +
-        "HEADSHELL_ONLINE=1 at startup asks MusicBrainz and the Cover Art Archive.",
+      `Missing covers? Turn on “look things up online” in settings and we'll find them.`,
     );
   }
   if (s?.failed > 0) {
-    parts.push(`The cover of ${countOf(s.failed, "track")} failed — the row's tooltip says why.`);
+    parts.push(`${countOf(s.failed, "cover")} couldn't be loaded.`);
   }
   note.hidden = parts.length === 0;
   note.textContent = parts.join(" ");
@@ -979,8 +1223,8 @@ let browsing = false;
 let browseTimer = 0;
 
 const LYRICS_FROM = {
-  sidecar: "from the .lrc beside the file",
-  embedded: "from the file's tags",
+  sidecar: "from a lyrics file next to the song",
+  embedded: "from the song file",
   lrclib: "from LRCLIB",
 };
 
@@ -1184,35 +1428,40 @@ function paintLyricsNote(item) {
   let warn = false;
   let retry = false;
   if (!item) {
-    text = "Nothing is playing.";
+    text = "Play something and its lyrics show up here.";
   } else {
     switch (item.status) {
       case "pending":
-        text = "Looking for the lyrics…";
+        text = "Finding the lyrics…";
         break;
       case "not_requested":
-        text = "The lyrics are looked up while this view is open.";
+        text = "We'll find the lyrics while you're looking at them.";
         break;
       case "not_found":
-        text = `No lyrics for this recording — ${item.detail}.`;
+        text = debugMode ? `No lyrics for this recording — ${item.detail}.` : "No lyrics for this one, sorry.";
         break;
       case "instrumental":
-        text = "Instrumental — no words.";
+        text = "It's an instrumental — no words to sing along to.";
         break;
       case "failed":
-        text = `The lyrics could not be looked up — ${firstLine(item.chain)}`;
+        text = debugMode
+          ? `The lyrics could not be looked up — ${firstLine(item.chain)}`
+          : "Couldn't get the lyrics just now.";
         retry = true;
         break;
       case "found":
         if (item.synced && item.fit === "closest") {
           warn = true;
-          text =
-            "The timing may be off: LRCLIB has no version of this recording's length, and its nearest " +
-            `is ${lengthDifference(item.delta_ms)}. Shift the lines until they meet the singing.`;
+          text = debugMode
+            ? "The timing may be off: LRCLIB has no version of this recording's length, and its nearest " +
+              `is ${lengthDifference(item.delta_ms)}. Shift the lines until they meet the singing.`
+            : "These lyrics might run a little early or late — nudge them with sooner or later until they match.";
         } else if (!item.synced) {
-          text = "Words without their timing — nothing to follow.";
+          text = "Just the words this time — they won't scroll along with the song.";
         } else if (item.fit === "unmeasured") {
-          text = "The recording's length is not known, so the timing could not be checked.";
+          text = debugMode
+            ? "The recording's length is not known, so the timing could not be checked."
+            : "These lyrics might not line up perfectly with the song.";
         }
         break;
       default:
@@ -1557,7 +1806,7 @@ async function queueAdded(view, what) {
   if (!view) return;
   renderQueue(view);
   renderAnchor(await call("anchor"));
-  toast(`added to the queue: ${what}`, true);
+  toast(`Added ${what} to your queue.`, true);
 }
 
 $("playForm").addEventListener("submit", (event) => {
@@ -1644,7 +1893,7 @@ function showSearching() {
     return;
   }
   suggestPanel.replaceChildren(
-    h("p", { class: "suggest-note searching", text: `searching ${providerName(playFrom?.provider)}…` }),
+    h("p", { class: "suggest-note searching", text: `Looking in ${providerName(playFrom?.provider)}…` }),
   );
   openSuggest();
 }
@@ -1654,25 +1903,27 @@ function drawSuggest(report, asked) {
   suggestLit = -1;
   const nodes = [];
   if (report.sections[0]?.fallback) {
-    nodes.push(h("p", { class: "suggest-note", text: `nothing in ${providerName(report.play_from.provider)}` }));
+    nodes.push(h("p", { class: "suggest-note", text: `Nothing in ${providerName(report.play_from.provider)}` }));
   }
   for (const section of report.sections) {
     if (section.fallback) {
-      nodes.push(h("p", { class: "suggest-heading", text: `results from ${section.display_name}:` }));
+      nodes.push(h("p", { class: "suggest-heading", text: `From ${section.display_name}:` }));
     }
     for (const item of section.tracks) nodes.push(suggestTrack(item));
     for (const artist of section.artists) nodes.push(suggestArtist(artist.artist));
     for (const item of section.more) nodes.push(suggestTrack(item));
   }
   if (report.sections.length === 0) {
-    nodes.push(h("p", { class: "suggest-note", text: `nothing found for “${report.query.trim()}”` }));
+    nodes.push(h("p", { class: "suggest-note", text: `Couldn't find “${report.query.trim()}” anywhere` }));
   }
   // "Not found" and "could not ask" are different answers (K9).
   for (const failure of report.failures) {
     nodes.push(
       h("p", {
         class: "suggest-failure",
-        text: `could not ask ${failure.display_name} — STEP: ${failure.stage} — ${firstLine(failure.chain)}`,
+        text: debugMode
+          ? `could not ask ${failure.display_name} — STEP: ${failure.stage} — ${firstLine(failure.chain)}`
+          : `could not ask ${failure.display_name} — ${stageText(failure.stage).toLowerCase()}`,
         title: failure.chain,
       }),
     );
@@ -1766,7 +2017,7 @@ function suggestArtist(artist) {
       "span",
       { class: "suggest-main" },
       h("span", { class: "suggest-title", text: artist }),
-      h("span", { class: "suggest-sub", text: "artist · plays every track" }),
+      h("span", { class: "suggest-sub", text: "artist · play all their songs" }),
     ),
   );
   suggestRows.push({ el: row, pick: () => startPlay(artist, true) });
@@ -1914,10 +2165,10 @@ document.addEventListener("keydown", (event) => {
     else if (nowOpen) setNowOpen(false);
     return;
   }
-  // Ctrl+1…9: sections. It works in a text box too — pressing a number key
-  // with Ctrl is not typing.
+  // Ctrl+1…9, 0: sections. It works in a text box too — pressing a number
+  // key with Ctrl is not typing.
   if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-    const slot = Number(event.key);
+    const slot = event.key === "0" ? 10 : Number(event.key);
     if (Number.isInteger(slot) && slot >= 1 && slot <= PANELS.length) {
       event.preventDefault();
       openPanel(PANELS[slot - 1]);
@@ -2039,9 +2290,9 @@ $("searchForm").addEventListener("submit", async (event) => {
   $("btnSearchPlayAll").hidden = !found;
   $("searchCount").hidden = !found;
   $("searchCount").textContent =
-    hits.length >= SEARCH_LIMIT ? `first ${fmt(SEARCH_LIMIT)} results` : `${countOf(hits.length, "result")}`;
+    hits.length >= SEARCH_LIMIT ? `the first ${fmt(SEARCH_LIMIT)} matches` : `${countOf(hits.length, "match")}`;
   $("searchEmpty").hidden = found;
-  $("searchEmpty").textContent = `no records found for "${report.query}".`;
+  $("searchEmpty").textContent = `Nothing in your history for “${report.query}” yet.`;
 });
 
 // The **core** builds the queue: the result rows are not collected and sent
@@ -2089,22 +2340,35 @@ function figure(big, label, muted = false) {
 
 function renderStats(r) {
   const scope = r.query.year ?? "all time";
-  $("statsScope").textContent = `${scope} · ${countOf(r.listens_in_scope, "record")} in scope`;
+  $("statsScope").replaceChildren(
+    String(scope),
+    h("span", { class: "debug-only", text: ` · ${countOf(r.listens_in_scope, "record")} in scope` }),
+  );
   $("statsSummary").replaceChildren(
-    figure(fmt(r.plays), "counted listens"),
-    figure(hoursText(r.total_ms_played), "total time"),
+    figure(fmt(r.plays), "plays"),
+    figure(hoursText(r.total_ms_played), "of listening"),
     figure(fmt(r.unique_artists), "artists"),
-    figure(fmt(r.unique_tracks), "tracks"),
+    figure(fmt(r.unique_tracks), "songs"),
   );
   // Partial success is **always** reported: how many records fell below the
   // threshold, how many have no canonical identity, how many are outside the
   // year. Nothing is swallowed silently (K9).
-  const notes = [
+  //
+  // Plainly and only when not zero for everyone (D-083); every count, zeros
+  // included, in the debug mode.
+  const full = [
     `${countOf(r.skipped_short, "short play")} below the threshold`,
     `${countOf(r.without_canonical_id, "record")} without a canonical identity`,
   ];
-  if (r.query.year !== null) notes.push(`${countOf(r.out_of_scope, "record")} outside the year`);
-  $("statsNotes").textContent = notes.join(" · ");
+  if (r.query.year !== null) full.push(`${countOf(r.out_of_scope, "record")} outside the year`);
+  const plain = [];
+  if (r.skipped_short > 0) plain.push(`${countOf(r.skipped_short, "quick skip")} left out`);
+  if (r.without_canonical_id > 0) plain.push(`${countOf(r.without_canonical_id, "play")} couldn't be matched to a song`);
+  if (r.query.year !== null && r.out_of_scope > 0) plain.push(`${countOf(r.out_of_scope, "play")} from other years`);
+  $("statsNotes").replaceChildren(
+    h("span", { class: "plain-only", text: plain.join(" · ") }),
+    h("span", { class: "debug-only", text: full.join(" · ") }),
+  );
   // Zero listens is not an error, but an empty table is not an answer either:
   // it says what to do.
   $("statsEmpty").hidden = r.plays > 0;
@@ -2113,7 +2377,7 @@ function renderStats(r) {
   renderRanking(
     $("statsArtists"),
     r.top_artists,
-    (a) => [a.artist, `${countOf(a.unique_tracks, "track")}`, a.plays],
+    (a) => [a.artist, `${countOf(a.unique_tracks, "song")}`, a.plays],
     (a) => artistMenu(a.artist),
   );
   renderRanking(
@@ -2167,16 +2431,16 @@ function renderYears() {
           class: "year",
           type: "button",
           dataset: { year: String(entry.year) },
-          title: `${entry.year}: ${countOf(entry.plays, "listen")} · ${durationText(entry.ms_played)}`,
+          title: `${entry.year}: ${countOf(entry.plays, "play")} · ${durationText(entry.ms_played)}`,
           "aria-pressed": "false",
           onclick: () => runStats(stats.year === entry.year ? null : entry.year),
           menu: () => ({
-            title: `${entry.year} · ${countOf(entry.plays, "listen")}`,
+            title: `${entry.year} · ${countOf(entry.plays, "play")}`,
             items: [
               stats.year === entry.year
                 ? { label: "back to all time", run: () => runStats(null) }
-                : { label: `narrow down to ${entry.year}`, run: () => runStats(entry.year) },
-              { label: `the ${entry.year} sleeve card`, run: () => sleeveFor(entry.year) },
+                : { label: `just ${entry.year}`, run: () => runStats(entry.year) },
+              { label: `your ${entry.year} sleeve`, run: () => sleeveFor(entry.year) },
             ],
           }),
         },
@@ -2254,7 +2518,7 @@ $("btnSleeveSave").addEventListener("click", saveSleeve);
 async function saveSleeve() {
   const args = sleeveArgs();
   const path = await pickSavePath({
-    title: "save the sleeve card",
+    title: "save your sleeve",
     defaultPath: `headshell-sleeve-${args.year ?? "all-time"}${args.story ? "-story" : ""}.png`,
     filters: [
       { name: "PNG", extensions: ["png"] },
@@ -2267,8 +2531,8 @@ async function saveSleeve() {
   const written = response.written;
   toast(
     written
-      ? `card written: ${written.path} · ${countOf(written.bytes, "byte")}`
-      : "the card was computed but no file was written",
+      ? `Saved your card to ${written.path}.`
+      : "Your card is ready, but it wasn't saved — try again.",
     true,
   );
 }
@@ -2287,20 +2551,21 @@ const EXPORT_LABELS = {
 // reason we do not know arrives, we show the raw value — silently swallowing
 // a new reason would make the skipped record invisible (K9).
 const SKIP_LABELS = {
-  not_music: "not music",
-  missing_title: "no track title",
+  not_music: "not music (podcasts and the like)",
+  missing_title: "no song title",
   missing_artist: "no artist name",
-  bad_timestamp: "timestamp not read",
-  bad_duration: "duration not read",
+  bad_timestamp: "unreadable date",
+  bad_duration: "unreadable length",
 };
 
-// The links of the identity chain, in K6's order.
+// The links of the identity chain, in K6's order: how the listener reads
+// them, and what the debug mode calls them (D-084).
 const CHAIN = [
-  ["by_isrc", "ISRC", "m-isrc"],
-  ["by_mbid", "MBID", "m-mbid"],
-  ["by_fuzzy", "fuzzy", "m-fuzzy"],
-  ["by_fingerprint", "fingerprint", "m-fingerprint"],
-  ["by_local_key", "local key", "m-local"],
+  ["by_isrc", "by their code", "m-isrc", "ISRC"],
+  ["by_mbid", "by name, exactly", "m-mbid", "MBID"],
+  ["by_fuzzy", "by a close name", "m-fuzzy", "fuzzy"],
+  ["by_fingerprint", "by their sound", "m-fingerprint", "fingerprint"],
+  ["by_local_key", "kept as they are", "m-local", "local key"],
 ];
 
 $("importForm").addEventListener("submit", (event) => {
@@ -2313,7 +2578,7 @@ $("btnImportPick").addEventListener("click", pickImport);
 
 async function pickImport() {
   const path = await pickFile({
-    title: "choose an export archive",
+    title: "choose your Spotify data",
     multiple: false,
     filters: [{ name: "Export archive", extensions: ["zip"] }],
   });
@@ -2333,13 +2598,19 @@ async function runImport(path) {
   const w = report.write;
   $("importSource").textContent =
     `${i.source} · ${EXPORT_LABELS[i.export] ?? i.export} · ${countOf(i.files_matched, "file")}`;
+  // What changed in the library first; how the archive was read under
+  // "details" (D-083).
   $("importSummary").replaceChildren(
-    figure(fmt(i.records_total), "raw records"),
-    figure(fmt(i.listens), "became listens"),
-    figure(fmt(w.inserted), "newly written"),
-    figure(fmt(w.duplicates), "already there", true),
-    figure(fmt(w.new_tracks), "new tracks"),
-    figure(fmt(i.with_isrc), "carrying an ISRC", true),
+    figure(fmt(w.inserted), "new plays"),
+    figure(fmt(w.duplicates), "already here", true),
+    figure(fmt(w.new_tracks), "new songs"),
+  );
+  const isrc = figure(fmt(i.with_isrc), "carrying an ISRC", true);
+  isrc.classList.add("debug-only");
+  $("importMore").replaceChildren(
+    figure(fmt(i.records_total), "entries in the file"),
+    figure(fmt(i.listens), "plays found"),
+    isrc,
   );
   renderChain(d);
 
@@ -2348,7 +2619,7 @@ async function runImport(path) {
   const skipped = Object.entries(i.skipped ?? {});
   const skippedLine = $("importSkipped");
   skippedLine.hidden = skipped.length === 0;
-  skippedLine.textContent = `skipped: ${skipped.map(([why, n]) => `${SKIP_LABELS[why] ?? why} ${fmt(n)}`).join(" · ")}`;
+  skippedLine.textContent = `left out: ${skipped.map(([why, n]) => `${SKIP_LABELS[why] ?? why} ${fmt(n)}`).join(" · ")}`;
 
   $("importResult").textContent = JSON.stringify({ import: i, identity: d, write: w }, null, 2);
   $("importReport").hidden = false;
@@ -2357,7 +2628,7 @@ async function runImport(path) {
   // time they open.
   stats.loaded = false;
   sleeve.previewed = false;
-  toast(`imported · ${countOf(w.inserted, "new listen")}`, true);
+  toast(w.inserted > 0 ? `All done — ${countOf(w.inserted, "new play")} imported!` : "All done — nothing new this time.", true);
 }
 
 /// How many records each link resolved: the ratios are the part's share of the
@@ -2367,7 +2638,7 @@ function renderChain(summary) {
   const total = summary.total;
   const bar = h("div", { class: "chain-bar", role: "img", "aria-label": "identity chain breakdown" });
   const legend = h("ul", { class: "chain-legend" });
-  for (const [key, label, className] of CHAIN) {
+  for (const [key, label, className, technical] of CHAIN) {
     const count = summary[key] ?? 0;
     if (count > 0) {
       const segment = h("span", { class: `chain-seg ${className}`, title: `${label}: ${fmt(count)}` });
@@ -2380,11 +2651,12 @@ function renderChain(summary) {
         {},
         h("span", { class: `swatch-dot ${className}`, "aria-hidden": "true" }),
         `${label} `,
+        h("span", { class: "debug-only", text: `(${technical}) ` }),
         h("b", { text: fmt(count) }),
       ),
     );
   }
-  legend.append(h("li", {}, `total `, h("b", { text: fmt(total) })));
+  legend.append(h("li", {}, `in all `, h("b", { text: fmt(total) })));
   $("importChain").replaceChildren(bar, legend);
 }
 
@@ -2417,7 +2689,14 @@ const CAPABILITIES = [
 ];
 
 // A catalog entry's capabilities arrive as text.
-const CAPABILITY_NAMES = { search: "search", browse: "browse", stream: "play", control: "control" };
+const CAPABILITY_NAMES = {
+  search: "search",
+  browse: "browse",
+  stream: "play",
+  control: "control",
+  artwork: "show covers",
+  lyrics: "show lyrics",
+};
 
 // ————————————————————————————————————— play from (D-080)
 //
@@ -2446,8 +2725,8 @@ function providerName(id) {
 
 function updatePlayPlaceholder() {
   playInput.placeholder = playFrom?.provider
-    ? `play from ${providerName(playFrom.provider)}: artist or track`
-    : "play: artist or track";
+    ? `what do you want to hear? (from ${providerName(playFrom.provider)})`
+    : "what do you want to hear?";
 }
 
 function renderPlayFrom(list) {
@@ -2456,8 +2735,8 @@ function renderPlayFrom(list) {
   const missing = $("playFromMissing");
   missing.hidden = !playFrom.missing;
   missing.textContent = playFrom.missing
-    ? `The chosen ${playFrom.missing} is not registered or cannot play now — the play box searches ` +
-      `${providerName(playFrom.provider)} first instead.`
+    ? `${providerName(playFrom.missing)} isn't available right now, so we'll look in ` +
+      `${providerName(playFrom.provider)} first.`
     : "";
   placePlayFromPill(true);
 }
@@ -2475,7 +2754,7 @@ function playFromRow(info) {
       dataset: { provider: info.id },
     },
     h("span", { class: "play-from-name", text: info.display_name }),
-    h("span", { class: "play-from-id", text: info.id }),
+    h("span", { class: "play-from-id debug-only", text: info.id }),
   );
   // Chosen the moment the button goes down, as the sidebar's rows are;
   // `click` is for the keyboard and touch.
@@ -2540,7 +2819,7 @@ async function choosePlayFrom(id) {
 let environment = null;
 
 async function refreshProviders() {
-  renderMusicDirs();
+  refreshMusicDirs();
 
   const list = await call("providers");
   if (list) {
@@ -2567,7 +2846,7 @@ async function refreshProviders() {
               items: [
                 { label: "copy the address", run: () => copyText(server.url, "address copied to the clipboard") },
                 "-",
-                { label: "delete", danger: true, confirm: "really delete?", run: () => removeServer(server) },
+                { label: "remove", danger: true, confirm: "remove it?", run: () => removeServer(server) },
               ],
             }),
           },
@@ -2586,23 +2865,105 @@ async function refreshProviders() {
 async function removeServer(server) {
   const report = await call("server_remove", { name: server.id });
   if (report) {
-    toast(`${report.id} removed · left: ${fmt(report.remaining)}`, true);
+    toast(debugMode ? `${report.id} removed · left: ${fmt(report.remaining)}` : `Removed ${report.id}.`, true);
     refreshProviders();
   }
 }
 
-function renderMusicDirs() {
-  const dirs = environment?.music_dirs ?? [];
+// ————————————————————————————————————— music folders (D-085)
+//
+// Chosen here and kept by the core (`headshell music-dirs`). Adding or taking
+// one off checks for new music at once: the songs come and go with their
+// folder. While `HEADSHELL_MUSIC_DIRS` decides the run, the list is the
+// variable's and cannot be changed here.
+
+let musicFolders = null;
+
+async function refreshMusicDirs() {
+  const report = await call("music_dirs");
+  if (report) paintMusicDirs(report.folders);
+}
+
+function paintMusicDirs(folders) {
+  musicFolders = folders;
+  const held = folders.source === "variable";
   $("musicDirs").replaceChildren(
-    ...(dirs.length > 0
-      ? dirs.map((dir) =>
-          h("li", {
-            text: dir,
-            menu: () => [{ label: "copy the path", run: () => copyText(dir, "path copied to the clipboard") }],
-          }),
+    ...(folders.dirs.length > 0
+      ? folders.dirs.map((dir) =>
+          h(
+            "li",
+            {
+              class: "folder",
+              menu: () => [
+                { label: "copy the path", run: () => copyText(dir, "path copied to the clipboard") },
+                !held && { label: "remove this folder", danger: true, run: () => removeFolder(dir) },
+              ],
+            },
+            // The folder's name first — what the listener recognises — and
+            // where it is, quieter; the whole path in the tooltip.
+            h("span", { class: "folder-name", text: folderName(dir), title: dir }),
+            h("span", { class: "folder-path", text: folderParent(dir), title: dir }),
+            held
+              ? null
+              : h(
+                  "button",
+                  {
+                    type: "button",
+                    class: "icon-button subtle",
+                    title: "remove this folder",
+                    "aria-label": `remove ${dir}`,
+                    onclick: () => removeFolder(dir),
+                  },
+                  icon("close"),
+                ),
+          ),
         )
-      : [h("li", { class: "empty", text: "not set" })]),
+      : [h("li", { class: "empty", text: "No folders yet — add one and its songs show up here." })]),
   );
+  $("btnAddFolder").disabled = held;
+  const note = $("musicDirsNote");
+  note.hidden = !held;
+  note.replaceChildren(
+    h("span", { class: "plain-only", text: "These folders are set outside headshell for now, so they can't be changed here." }),
+    h("span", { class: "debug-only", text: "HEADSHELL_MUSIC_DIRS decides the folders for this launch; the ones chosen here apply without it." }),
+  );
+}
+
+$("btnAddFolder").addEventListener("click", async () => {
+  const path = await pickFile({ directory: true, title: "choose a music folder" });
+  if (!path) return;
+  const report = await call("music_dirs_add", { path });
+  if (!report) return;
+  paintMusicDirs(report.folders);
+  if (!report.changed) {
+    toast("That folder is already on the list.", true);
+    return;
+  }
+  await scanAfterFolders(`Added ${folderName(path)}`);
+});
+
+async function removeFolder(dir) {
+  const report = await call("music_dirs_remove", { path: dir });
+  if (!report) return;
+  paintMusicDirs(report.folders);
+  await scanAfterFolders(`Removed ${folderName(dir)}`);
+}
+
+/// A folder changed: its songs come or go with it (D-085).
+async function scanAfterFolders(done) {
+  const report = await call("provider_scan", { ifStale: false });
+  if (report) toast(`${done} — ${countOf(report.summary.indexed, "song")} in your music folders now.`, true);
+  refreshProviders();
+}
+
+function folderName(path) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/// Where a folder is: its path without its own name.
+function folderParent(path) {
+  const name = folderName(path);
+  return path.endsWith(name) ? path.slice(0, path.length - name.length).replace(/[\\/]$/, "") || path : path;
 }
 
 function providerRow(info) {
@@ -2616,16 +2977,20 @@ function providerRow(info) {
       menu: () => ({
         title: info.display_name,
         items: [
-          { label: "test", run: () => testProvider(info, status) },
+          { label: "check the connection", run: () => testProvider(info, status) },
           "-",
-          { label: `copy “${info.id}”`, run: () => copyText(info.id, "name copied to the clipboard") },
+          debugMode && { label: `copy “${info.id}”`, run: () => copyText(info.id, "name copied to the clipboard") },
         ],
       }),
     },
-    h("td", {}, h("div", { text: info.display_name }), h("div", { class: "dim mono", text: info.id })),
-    h("td", {}, h("div", { class: "caps" }, caps.length > 0 ? caps : h("span", { class: "dim", text: "none" }))),
+    h("td", {}, h("div", { text: info.display_name }), h("div", { class: "dim mono debug-only", text: info.id })),
+    h(
+      "td",
+      { class: "debug-only" },
+      h("div", { class: "caps" }, caps.length > 0 ? caps : h("span", { class: "dim", text: "none" })),
+    ),
     h("td", {}, status),
-    h("td", {}, h("button", { type: "button", onclick: () => testProvider(info, status) }, "test")),
+    h("td", {}, h("button", { type: "button", onclick: () => testProvider(info, status) }, "check")),
   );
 }
 
@@ -2635,7 +3000,7 @@ async function testProvider(info, status) {
   // the notice, the health answer is here.
   if (!report) {
     status.className = "health down";
-    status.replaceChildren(h("span", { class: "dot" }), " error (see the notice)");
+    status.replaceChildren(h("span", { class: "dot" }), " didn't work (see the message)");
     return;
   }
   const health = report.health;
@@ -2643,8 +3008,10 @@ async function testProvider(info, status) {
   status.className = health.reachable ? "health up" : "health down";
   status.replaceChildren(
     h("span", { class: "dot" }),
-    health.reachable ? ` up${count === null ? "" : ` · ${countOf(count, "track")}`}` : ` unreachable`,
-    health.reachable ? null : h("span", { class: "health-detail", text: ` — ${health.detail ?? "no reason given"}` }),
+    health.reachable ? ` working${count === null ? "" : ` · ${countOf(count, "song")}`}` : ` can't connect`,
+    health.reachable
+      ? null
+      : h("span", { class: "health-detail debug-only", text: ` — ${health.detail ?? "no reason given"}` }),
   );
 }
 
@@ -2656,12 +3023,18 @@ async function scan(onlyStale) {
   if (!report) return;
   // "Unchanged" and "I could not look" are different things: the reason the
   // core gives is shown as it is (K9).
-  toast(
-    report.scanned
-      ? `scanned · ${countOf(report.summary.indexed, "track")} (${fmt(report.summary.failed)} unreadable) · added ${fmt(report.write.inserted)}, updated ${fmt(report.write.updated)}, dropped ${fmt(report.write.removed)} — ${report.reason}`
-      : `scan skipped — ${report.reason}`,
-    true,
-  );
+  // In plain words what changed; every count and the reason in the debug
+  // mode (D-084).
+  const technical = report.scanned
+    ? `scanned · ${countOf(report.summary.indexed, "track")} (${fmt(report.summary.failed)} unreadable) · added ${fmt(report.write.inserted)}, updated ${fmt(report.write.updated)}, dropped ${fmt(report.write.removed)} — ${report.reason}`
+    : `scan skipped — ${report.reason}`;
+  const added = report.write.inserted;
+  const plain = !report.scanned
+    ? "All caught up — nothing new since last time."
+    : added > 0
+      ? `Found ${countOf(added, "new song")} — ${countOf(report.summary.indexed, "song")} in your music folders now.`
+      : `All caught up — ${countOf(report.summary.indexed, "song")} in your music folders.`;
+  toast(debugMode ? technical : plain, true);
   refreshProviders();
 }
 
@@ -2683,7 +3056,14 @@ $("serverForm").addEventListener("submit", async (event) => {
   $("serverApiKey").value = "";
   if (!report) return;
   const notes = report.notes.length > 0 ? ` · ${report.notes.join(" · ")}` : "";
-  toast(`${report.server.id} added${report.verified ? " (verified)" : " (not verified)"}${notes}`, true);
+  toast(
+    debugMode
+      ? `${report.server.id} added${report.verified ? " (verified)" : " (not verified)"}${notes}`
+      : report.verified
+        ? `Connected to ${report.server.id}!`
+        : `Saved ${report.server.id} — we didn't check the connection.`,
+    true,
+  );
   refreshProviders();
 });
 
@@ -2720,10 +3100,10 @@ function armedButton(label, action) {
 // (`PluginEntry::is_loadable`).
 
 const CONSENT = {
-  approved: ["approved", "chip chip-ok"],
-  not_asked: ["awaiting consent", "chip chip-warn"],
-  needs_approval: ["asks for new permissions", "chip chip-warn"],
-  disabled: ["disabled", "chip"],
+  approved: ["allowed", "chip chip-ok"],
+  not_asked: ["needs your OK", "chip chip-warn"],
+  needs_approval: ["wants more access", "chip chip-warn"],
+  disabled: ["turned off", "chip"],
 };
 
 const pluginTabs = segmented(document.querySelector("#panel-plugins .segmented"), (tab) => {
@@ -2740,10 +3120,34 @@ async function refreshPlugins() {
     $("pluginEmpty").hidden = list.plugins.length > 0;
 
     const s = list.summary;
-    $("pluginSummary").textContent =
-      `${countOf(s.discovered, "plugin")} · ${fmt(s.ready)} ready · ${fmt(s.needs_install)} awaiting install · ` +
-      `${fmt(s.awaiting_approval)} awaiting consent · ${fmt(s.disabled)} disabled · ` +
-      `${fmt(s.incompatible)} incompatible · ${fmt(s.broken)} broken`;
+    // What needs the user first, and only what is not zero (D-083); every
+    // count in the debug mode.
+    const plainCounts = [
+      [s.ready, "ready to play"],
+      [s.needs_install, "need a quick setup"],
+      [s.awaiting_approval, "need your OK"],
+      [s.disabled, "turned off"],
+      [s.incompatible, "won't work here"],
+      [s.broken, "broken"],
+    ];
+    const counts = [
+      [s.ready, "ready"],
+      [s.needs_install, "awaiting install"],
+      [s.awaiting_approval, "awaiting consent"],
+      [s.disabled, "disabled"],
+      [s.incompatible, "incompatible"],
+      [s.broken, "broken"],
+    ];
+    $("pluginSummary").replaceChildren(
+      h("span", {
+        class: "plain-only",
+        text: [countOf(s.discovered, "service"), ...plainCounts.filter(([n]) => n > 0).map(([n, label]) => `${fmt(n)} ${label}`)].join(" · "),
+      }),
+      h("span", {
+        class: "debug-only",
+        text: [countOf(s.discovered, "plugin"), ...counts.map(([n, label]) => `${fmt(n)} ${label}`)].join(" · "),
+      }),
+    );
     // No trust is given to a protection that does not exist, and the limit of
     // the one that does is said: two notes sit with the list and one of them is
     // always visible.
@@ -2771,12 +3175,18 @@ function pluginCard(entry) {
     "div",
     { class: "plugin-head" },
     h("span", { class: "name", text: entry.display_name ?? entry.name }),
-    h("span", {
-      class: "author",
-      text: [entry.name, entry.version, entry.api === null || entry.api === undefined ? null : `api ${entry.api}`]
-        .filter(Boolean)
-        .join(" · "),
-    }),
+    h(
+      "span",
+      { class: "author" },
+      entry.version ?? "",
+      h("span", {
+        class: "debug-only",
+        text: [entry.name, entry.api === null || entry.api === undefined ? null : `api ${entry.api}`]
+          .filter(Boolean)
+          .map((part) => ` · ${part}`)
+          .join(""),
+      }),
+    ),
     consent ? h("span", { class: consentClass, text: consentText }) : null,
   );
 
@@ -2792,7 +3202,7 @@ function pluginCard(entry) {
           "-",
           ...tail,
           "-",
-          { label: `copy “${entry.name}”`, run: () => copyText(entry.name, "name copied to the clipboard") },
+          debugMode && { label: `copy “${entry.name}”`, run: () => copyText(entry.name, "name copied to the clipboard") },
         ],
       }),
     },
@@ -2805,24 +3215,30 @@ function pluginCard(entry) {
 
   if (consent === "needs_approval") {
     card.append(
-      h("p", { class: "perms" }, h("b", { text: "newly requested network: " }), (entry.consent.extra?.net ?? []).join(", ") || "—"),
+      h("p", { class: "perms" }, h("b", { text: "now also wants to reach: " }), (entry.consent.extra?.net ?? []).join(", ") || "—"),
     );
   }
   const net = entry.permissions?.net ?? [];
   card.append(
-    h("p", { class: "perms" }, h("b", { text: "network: " }), net.length > 0 ? net.join(", ") : "none requested"),
+    h("p", { class: "perms" }, h("b", { text: "connects to: " }), net.length > 0 ? net.join(", ") : "nothing"),
   );
 
   // The artifacts the engine will download go on a separate line (D-055): the
   // engine does the downloading, not the plugin, so they do not mix with the
   // plugin's permission list.
+  // A tool the service needs is the listener's business only when it is
+  // not ready; which tool, its version and its path are the debug mode's.
   for (const requirement of entry.requires ?? []) {
+    const { plain, detail, ready } = requirementText(requirement.state);
     card.append(
       h(
         "p",
-        { class: "plugin-need" },
-        h("b", { text: "engine: " }),
-        `${requirement.name} ${requirement.version} (${requirement.platform}) — ${requirementText(requirement.state)}`,
+        { class: ready ? "plugin-need debug-only" : "plugin-need" },
+        h("span", { class: "plain-only", text: plain }),
+        h("span", {
+          class: "debug-only",
+          text: `engine: ${requirement.name} ${requirement.version} (${requirement.platform}) — ${detail ?? plain}`,
+        }),
       ),
     );
   }
@@ -2845,14 +3261,14 @@ function pluginActions(entry) {
   );
   const command = (label, name, primary = false) => ({ label, primary, run: () => pluginCommand(name, entry.name) });
   const lead = [];
-  if (consent === "not_asked" || consent === "needs_approval") lead.push(command("approve", "plugin_approve", true));
-  if (installable) lead.push(command("install the tools", "plugin_install", true));
-  if (consent === "disabled") lead.push(command("enable", "plugin_enable", true));
-  if (consent === "approved") lead.push(command("disable", "plugin_disable"));
+  if (consent === "not_asked" || consent === "needs_approval") lead.push(command("allow", "plugin_approve", true));
+  if (installable) lead.push(command("finish setup", "plugin_install", true));
+  if (consent === "disabled") lead.push(command("turn on", "plugin_enable", true));
+  if (consent === "approved") lead.push(command("turn off", "plugin_disable"));
   const tail = [];
-  if (consent && consent !== "not_asked") tail.push(command("forget consent", "plugin_forget"));
+  if (consent && consent !== "not_asked") tail.push(command("revoke", "plugin_forget"));
   // Removing cannot be undone (the directory goes along with `state/`).
-  tail.push({ label: "remove", danger: true, confirm: "really remove?", run: () => removePlugin(entry.name) });
+  tail.push({ label: "remove", danger: true, confirm: "remove it?", run: () => removePlugin(entry.name) });
   return { lead, tail };
 }
 
@@ -2866,28 +3282,44 @@ async function removePlugin(name) {
   const report = await call("plugin_remove", { name });
   if (!report) return;
   const kept = report.kept_secrets.length ? ` · secrets left: ${report.kept_secrets.join(", ")}` : "";
-  toast(`${report.name} removed · consent ${report.consent_forgotten ? "forgotten" : "had no record"}${kept}`, true);
+  toast(
+    debugMode
+      ? `${report.name} removed · consent ${report.consent_forgotten ? "forgotten" : "had no record"}${kept}`
+      : `Removed ${report.name}.`,
+    true,
+  );
   refreshPlugins();
 }
 
 /// The artifact state arrives externally tagged: `"Missing"` or
 /// `{ Installed: { path } }` / `{ Corrupt: { expected, found } }` /
-/// `{ Unsupported: { platform, available } }`.
+/// `{ Unsupported: { platform, available } }`. In plain words for everyone,
+/// the path, the hashes and the platforms in the debug mode (D-083).
 function requirementText(state) {
-  if (state === "Missing") return "not installed";
+  if (state === "Missing") {
+    return { plain: "Needs a quick setup — press finish setup.", detail: "not installed", ready: false };
+  }
   if (typeof state === "object" && state !== null) {
-    if (state.Installed) return `installed · ${state.Installed.path}`;
+    if (state.Installed) return { plain: "Ready.", detail: `installed · ${state.Installed.path}`, ready: true };
     if (state.Corrupt) {
-      return `hash mismatch (expected ${short(state.Corrupt.expected)}, found ${short(state.Corrupt.found)})`;
+      return {
+        plain: "Something went wrong with its setup — press finish setup to fix it.",
+        detail: `hash mismatch (expected ${short(state.Corrupt.expected)}, found ${short(state.Corrupt.found)})`,
+        ready: false,
+      };
     }
     // Installing does not fix this; that is why the "install" button is not
     // shown.
     if (state.Unsupported) {
-      return `no release for this platform (${state.Unsupported.platform}) · declared: ${state.Unsupported.available.join(", ")}`;
+      return {
+        plain: "Doesn't work on this computer yet.",
+        detail: `no release for ${state.Unsupported.platform} · declared: ${state.Unsupported.available.join(", ")}`,
+        ready: false,
+      };
     }
   }
   // An unknown state is not silently counted as "fine".
-  return JSON.stringify(state);
+  return { plain: "Isn't ready yet.", detail: JSON.stringify(state), ready: false };
 }
 
 function short(hash) {
@@ -2912,12 +3344,26 @@ const ACTION_LABELS = {
   forget: "consent forgotten",
 };
 
+/// What allowing, turning off or revoking did — in a sentence; the states
+/// in the debug mode (D-084).
+const ACTION_DONE = {
+  approve: (name) => `${name} is allowed — enjoy!`,
+  disable: (name) => `${name} is turned off.`,
+  enable: (name) => `${name} is back on.`,
+  forget: (name) => `${name} will ask for your OK again.`,
+};
+
 function consentText(report) {
   const state = report.status?.state;
+  if (!debugMode) return ACTION_DONE[report.action]?.(report.name) ?? `${report.name}: done.`;
   return `${report.name}: ${ACTION_LABELS[report.action] ?? report.action} · ${CONSENT[state]?.[0] ?? state ?? "—"}`;
 }
 
 function installText(name, report) {
+  if (!debugMode) {
+    if (!report.ready) return `${name} is added, but its setup isn't finished — try finish setup.`;
+    return report.consent?.state === "approved" ? `${name} is ready to play!` : `${name} is added — allow it to start listening.`;
+  }
   const origin = report.fetched ? `downloaded ${report.fetched.version} from the catalog` : "tools";
   const tools = report.ready ? "ready" : "still incomplete";
   const consent = CONSENT[report.consent?.state]?.[0] ?? report.consent?.state ?? "—";
@@ -2935,11 +3381,11 @@ $("btnPluginReload").addEventListener("click", refreshPlugins);
 
 const INSTALL = {
   not_installed: [null, null],
-  current: ["installed · up to date", "chip chip-ok"],
-  update_available: ["update available", "chip chip-info"],
-  manual: ["installed by hand", "chip"],
-  modified: ["changed locally", "chip chip-warn"],
-  unreadable: ["origin record unreadable", "chip chip-err"],
+  current: ["added", "chip chip-ok"],
+  update_available: ["update ready", "chip chip-info"],
+  manual: ["added by hand", "chip"],
+  modified: ["changed by hand", "chip chip-warn"],
+  unreadable: ["can't tell", "chip chip-err"],
 };
 
 async function refreshCatalog() {
@@ -2947,20 +3393,28 @@ async function refreshCatalog() {
   if (!report) return;
   $("catalogList").replaceChildren(...report.plugins.map((plugin) => catalogCard(plugin, report.platform)));
   const s = report.summary;
-  $("catalogSummary").textContent =
-    `${countOf(s.listed, "plugin")} · ${fmt(s.installable)} installable · ${fmt(s.installed)} installed · ` +
-    `${countOf(s.updates, "update")} · ${fmt(s.problems)} cannot be installed`;
+  const plainParts = [countOf(s.listed, "service")];
+  if (s.updates > 0) plainParts.push(`${countOf(s.updates, "update")} ready`);
+  $("catalogSummary").replaceChildren(
+    h("span", { class: "plain-only", text: plainParts.join(" · ") }),
+    h("span", {
+      class: "debug-only",
+      text:
+        `${countOf(s.listed, "plugin")} · ${fmt(s.installable)} installable · ${fmt(s.installed)} installed · ` +
+        `${countOf(s.updates, "update")} · ${fmt(s.problems)} cannot be installed`,
+    }),
+  );
   const delisted = $("catalogDelisted");
   delisted.hidden = report.delisted.length === 0;
   delisted.textContent = report.delisted.length
-    ? `Pulled from the catalog but installed on this machine: ${report.delisted.join(", ")}. ` +
-      "To remove them, use \"remove\" on the installed tab."
+    ? `No longer offered, but still added here: ${report.delisted.join(", ")}. ` +
+      "You can remove them under added."
     : "";
 }
 
 function catalogCard(plugin, platform) {
   const state = plugin.installed?.state;
-  const [stateText, stateClass] = plugin.problem ? ["cannot be installed", "chip chip-err"] : (INSTALL[state] ?? [state, "chip"]);
+  const [stateText, stateClass] = plugin.problem ? ["can't be added", "chip chip-err"] : (INSTALL[state] ?? [state, "chip"]);
   const offered = catalogActions(plugin, state);
   const card = h(
     "li",
@@ -2971,7 +3425,7 @@ function catalogCard(plugin, platform) {
         items: [
           ...offered,
           "-",
-          { label: `copy “${plugin.name}”`, run: () => copyText(plugin.name, "name copied to the clipboard") },
+          debugMode && { label: `copy “${plugin.name}”`, run: () => copyText(plugin.name, "name copied to the clipboard") },
         ],
       }),
     },
@@ -2979,7 +3433,12 @@ function catalogCard(plugin, platform) {
       "div",
       { class: "plugin-head" },
       h("span", { class: "name", text: plugin.display_name ?? plugin.name }),
-      h("span", { class: "author", text: [plugin.name, plugin.version].filter(Boolean).join(" · ") }),
+      h(
+        "span",
+        { class: "author" },
+        plugin.version ?? "",
+        h("span", { class: "debug-only", text: plugin.name ? ` · ${plugin.name}` : "" }),
+      ),
       stateText ? h("span", { class: stateClass, text: stateText }) : null,
     ),
   );
@@ -2987,25 +3446,29 @@ function catalogCard(plugin, platform) {
   if (plugin.description) card.append(h("p", { class: "plugin-desc", text: plugin.description }));
   // An entry that cannot be installed is not hidden: the user should see why
   // they cannot install what they were looking for (K9).
-  if (plugin.problem) card.append(h("p", { class: "plugin-problem", text: plugin.problem }));
+  if (plugin.problem) {
+    card.append(h("p", { class: "plugin-problem plain-only", text: "This one can't be added on this computer." }));
+    card.append(h("p", { class: "plugin-problem debug-only", text: plugin.problem }));
+  }
   const detail = installDetail(plugin.installed);
   if (detail) card.append(h("p", { class: "plugin-need", text: detail }));
 
   if (!plugin.problem) {
     const caps = (plugin.capabilities ?? []).map((cap) => CAPABILITY_NAMES[cap] ?? cap);
-    if (caps.length > 0) card.append(h("p", { class: "perms" }, h("b", { text: "can do: " }), caps.join(" · ")));
+    if (caps.length > 0) card.append(h("p", { class: "perms" }, h("b", { text: "lets you: " }), caps.join(" · ")));
     const net = plugin.permissions?.net ?? [];
-    card.append(h("p", { class: "perms" }, h("b", { text: "network: " }), net.length > 0 ? net.join(", ") : "none requested"));
+    card.append(h("p", { class: "perms" }, h("b", { text: "connects to: " }), net.length > 0 ? net.join(", ") : "nothing"));
     for (const requirement of plugin.requires ?? []) {
       const here = requirement.assets?.[platform];
       card.append(
         h(
           "p",
-          { class: "plugin-need" },
-          h("b", { text: "engine: " }),
-          here
-            ? `${requirement.name} ${requirement.version} (${platform})`
-            : `${requirement.name} ${requirement.version} — no release for this platform (${platform})`,
+          { class: here ? "plugin-need debug-only" : "plugin-need" },
+          h("span", { class: "plain-only", text: "Doesn't work on this computer yet." }),
+          h("span", {
+            class: "debug-only",
+            text: `engine: ${requirement.name} ${requirement.version} (${platform})${here ? "" : " — no release for this platform"}`,
+          }),
         ),
       );
     }
@@ -3019,7 +3482,7 @@ function catalogCard(plugin, platform) {
 function catalogActions(plugin, state) {
   if (plugin.problem) return [];
   if (state === "not_installed") {
-    return [{ label: "install", primary: true, run: () => catalogCommand("plugin_install", plugin.name) }];
+    return [{ label: "add", primary: true, run: () => catalogCommand("plugin_install", plugin.name) }];
   }
   if (state === "update_available") {
     return [{ label: "update", primary: true, run: () => catalogCommand("plugin_update", plugin.name) }];
@@ -3030,13 +3493,19 @@ function catalogActions(plugin, state) {
 function installDetail(installed) {
   switch (installed?.state) {
     case "update_available":
-      return `installed ${installed.installed} → ${installed.available} in the catalog`;
+      return debugMode
+        ? `installed ${installed.installed} → ${installed.available} in the catalog`
+        : `A newer version is ready (${installed.available}).`;
     case "modified":
-      return `installed ${installed.version}; files changed by hand: ${installed.files.join(", ")} — an update does not overwrite them`;
+      return debugMode
+        ? `installed ${installed.version}; files changed by hand: ${installed.files.join(", ")} — an update does not overwrite them`
+        : "Changed by hand, so updates leave it alone.";
     case "manual":
-      return "installed by hand (no origin record) — the catalog does not touch it";
+      return debugMode
+        ? "installed by hand (no origin record) — the catalog does not touch it"
+        : "Added by hand, so updates leave it alone.";
     case "unreadable":
-      return `origin record unreadable: ${installed.detail}`;
+      return debugMode ? `origin record unreadable: ${installed.detail}` : null;
     default:
       return null;
   }
@@ -3083,6 +3552,10 @@ function updateText(report) {
   const total =
     `${countOf(s.checked, "plugin")}: ${fmt(s.updated)} updated, ${fmt(s.current)} up to date, ` +
     `${fmt(s.skipped)} skipped, ${fmt(s.failed)} failed`;
+  if (!debugMode) {
+    if (s.failed > 0) return `${countOf(s.failed, "service")} couldn't be updated — the details say why.`;
+    return s.updated > 0 ? `Updated ${countOf(s.updated, "service")}.` : "Everything is up to date.";
+  }
   return lines.length ? `${lines.join(" · ")} (${total})` : "no plugins installed from the catalog";
 }
 
@@ -3121,7 +3594,7 @@ async function refreshSecrets() {
             menu: () => ({
               title: `${namespace}/${key}`,
               items: [
-                { label: "delete", danger: true, confirm: "really delete?", run: () => removeSecret(namespace, key) },
+                { label: "remove", danger: true, confirm: "remove it?", run: () => removeSecret(namespace, key) },
               ],
             }),
           },
@@ -3140,7 +3613,7 @@ async function refreshSecrets() {
 async function removeSecret(namespace, key) {
   const report = await call("secret_remove", { namespace, key });
   if (!report) return;
-  toast(`${report.namespace}/${report.key} ${report.changed ? "removed" : "was not there"}`, true);
+  toast(report.changed ? "Removed the key." : "That key wasn't there.", true);
   refreshSecrets();
 }
 
@@ -3154,7 +3627,7 @@ $("secretForm").addEventListener("submit", async (event) => {
   // The value must not stay in the form — after a failed attempt either.
   $("secretValue").value = "";
   if (!report) return;
-  toast(`${report.namespace}/${report.key} saved`, true);
+  toast("Saved — it stays private.", true);
   refreshSecrets();
 });
 
@@ -3180,7 +3653,10 @@ async function refreshThemes() {
   const list = await call("themes_list");
   if (!list) return;
 
-  $("themeDir").textContent = [`theme directory : ${list.dir}`, `contract version: api ${list.api}`].join("\n");
+  $("themeDir").replaceChildren(
+    `theme directory : ${list.dir}`,
+    h("span", { class: "debug-only", text: `\ncontract version: api ${list.api}` }),
+  );
 
   // The default is an option too: the way back from a theme must be visible.
   $("themeList").replaceChildren(
@@ -3191,7 +3667,8 @@ async function refreshThemes() {
   $("themeRejected").replaceChildren(
     ...list.rejected.map((entry) => h("li", {}, h("span", { class: "id", text: entry.id }), ` — ${entry.reason}`)),
   );
-  $("themeRejectedEmpty").hidden = list.rejected.length > 0;
+  // Only when there is one: an empty heading is noise (D-083).
+  $("themeRejectedBlock").hidden = list.rejected.length === 0;
 }
 
 function themeCard(theme, activeId) {
@@ -3200,7 +3677,7 @@ function themeCard(theme, activeId) {
   const card = h("li", {
     class: current ? "theme current" : "theme",
     menu: () =>
-      current ? null : { title: theme.name, items: [{ label: "apply", run: () => selectTheme(theme.id ?? null) }] },
+      current ? null : { title: theme.name, items: [{ label: "use this look", run: () => selectTheme(theme.id ?? null) }] },
   });
   card.append(swatch(theme.preview));
 
@@ -3212,11 +3689,11 @@ function themeCard(theme, activeId) {
   if (theme.builtin && theme.id) foot.append(h("span", { class: "tag", text: "built in" }));
   // D-038: we do not reject, we flag. The label tells the user "this theme goes
   // outside the contract, there is no guarantee".
-  if (theme.extended) foot.append(h("span", { class: "tag warn", text: "extended · no guarantee" }));
+  if (theme.extended) foot.append(h("span", { class: "tag warn debug-only", text: "extended · no guarantee" }));
   foot.append(
     current
       ? h("button", { type: "button", disabled: true }, icon("check"), "in use")
-      : h("button", { type: "button", onclick: () => selectTheme(theme.id ?? null) }, "apply"),
+      : h("button", { type: "button", onclick: () => selectTheme(theme.id ?? null) }, "use"),
   );
   card.append(foot);
   return card;
@@ -3284,6 +3761,20 @@ const METHOD_LABELS = {
   local_key: "local key — no authority",
 };
 
+/// Why a resolution has no match — the CLI's words (K9): no candidate came
+/// close, candidates could not be told apart (D-046), or the source ranks
+/// more as high than were read (D-081). None of them is a choice.
+function noMatchReason(res) {
+  const atLeast = res.unread_equals ? "at least " : "";
+  if (res.tied_candidates > 1) {
+    return `${atLeast}${countOf(res.tied_candidates, "candidate")} could not be told apart; no authority claimed`;
+  }
+  if (res.unread_equals) {
+    return "the source ranks more candidates as high than were read; none is claimed";
+  }
+  return "no candidate came close enough";
+}
+
 $("resolveForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = $("resolveQuery").value.trim();
@@ -3299,15 +3790,10 @@ $("resolveForm").addEventListener("submit", async (event) => {
       "match",
       res.matched
         ? `${res.matched.artist} - ${res.matched.title} [${res.matched.mbid}]`
-        : "none (the metadata source returned no candidates)",
+        : `none — ${noMatchReason(res)}`,
     ],
   ];
   if (res.matched?.disambiguation) facts.push(["not", res.matched.disambiguation]);
-  // A tie must not stay silent: if the choice was made among equals, the user
-  // must see it, otherwise they take an arbitrary choice for a definite answer.
-  if (res.tied_candidates > 1) {
-    facts.push(["tied", `${countOf(res.tied_candidates, "candidate")} got the same score; the choice is deterministic but arbitrary`]);
-  }
   $("resolveFacts").replaceChildren(
     ...facts.flatMap(([label, value]) => [h("dt", { text: label }), h("dd", { text: value })]),
   );
@@ -3332,13 +3818,14 @@ function trackTitle(track) {
 /// What any track offers besides being played.
 function trackItems(track) {
   return [
-    { label: "find the artist in the library", run: () => searchLibrary(track.artist) },
-    track.album && { label: "find the album in the library", run: () => searchLibrary(track.album) },
+    { label: "find this artist in your library", run: () => searchLibrary(track.artist) },
+    track.album && { label: "find this album in your library", run: () => searchLibrary(track.album) },
     {
       label: "copy artist and title",
       run: () => copyText(`${track.artist} — ${track.title}`, "artist and title copied to the clipboard"),
     },
-    { label: "resolve its identity", run: () => resolveIdentity(track) },
+    // Diagnostics' tool: there in the debug mode only (D-083).
+    debugMode && { label: "resolve its identity", run: () => resolveIdentity(track) },
   ];
 }
 
@@ -3402,14 +3889,14 @@ function artistMenu(artist) {
   return {
     title: artist,
     items: [
-      { label: "play every track", run: () => startPlay(artist, true) },
-      { label: "shuffle every track", run: () => startPlay(artist, true, true) },
+      { label: "play all their songs", run: () => startPlay(artist, true) },
+      { label: "shuffle their songs", run: () => startPlay(artist, true, true) },
       {
-        label: "add every track to the queue",
+        label: "add all their songs to your queue",
         run: () => addSearch(artist, true, `every track by ${artist}`),
       },
       "-",
-      { label: "find in the library", run: () => searchLibrary(artist) },
+      { label: "find them in your library", run: () => searchLibrary(artist) },
       { label: "copy the name", run: () => copyText(artist, "name copied to the clipboard") },
     ],
   };
@@ -3421,13 +3908,13 @@ function albumMenu(album, artist) {
   return {
     title: `${album} · ${artist}`,
     items: [
-      { label: "play every track on it", run: () => startPlay(`${artist} ${album}`, true) },
+      { label: "play the album", run: () => startPlay(`${artist} ${album}`, true) },
       {
-        label: "add every track on it to the queue",
+        label: "add the album to your queue",
         run: () => addSearch(`${artist} ${album}`, true, `every track on ${album}`),
       },
       "-",
-      { label: "find in the library", run: () => searchLibrary(album) },
+      { label: "find it in your library", run: () => searchLibrary(album) },
       { label: "copy the name", run: () => copyText(`${artist} — ${album}`, "name copied to the clipboard") },
     ],
   };
@@ -3449,8 +3936,8 @@ function playerMenu() {
     mark: false,
     items: [
       pauseItem(),
-      { label: "next track", key: "→", run: playNext },
-      { label: "previous track", key: "←", run: playPrevious },
+      { label: "next song", key: "→", run: playNext },
+      { label: "previous song", key: "←", run: playPrevious },
       { label: "stop", run: stopPlayback },
       "-",
       { label: "shuffle", kind: "check", checked: queue.shuffle, run: () => setShuffle(!queue.shuffle) },
@@ -3487,18 +3974,18 @@ function lyricsMenu(target) {
         run: () => copyText(lines.map((each) => each.text).join("\n"), "the lyrics copied to the clipboard"),
       },
       "-",
-      synced && { label: "the lines 0.5 s sooner", run: () => shiftLyrics(SHIFT_STEP_MS) },
-      synced && { label: "the lines 0.5 s later", run: () => shiftLyrics(-SHIFT_STEP_MS) },
+      synced && { label: "show the lines a little earlier", run: () => shiftLyrics(SHIFT_STEP_MS) },
+      synced && { label: "show the lines a little later", run: () => shiftLyrics(-SHIFT_STEP_MS) },
       synced && {
-        label: "back to their own timing",
+        label: "back to the original timing",
         disabled: (lyricsItem.offset_ms ?? 0) === 0,
         run: () => shiftLyrics(null),
       },
       lyricsItem?.status === "failed" && { label: "try again", run: retryLyrics },
       "-",
       lyricsFull
-        ? { label: "back beside the record", key: "Esc", run: () => setLyricsFull(false) }
-        : { label: "lyrics on the whole sheet", run: () => setLyricsFull(true) },
+        ? { label: "back to the record", key: "Esc", run: () => setLyricsFull(false) }
+        : { label: "lyrics, full screen", run: () => setLyricsFull(true) },
     ],
   };
 }
@@ -3533,7 +4020,7 @@ const SECTION_ITEMS = {
   now: () => [{ label: lyricsToggleLabel(), key: "L", run: toggleLyrics }],
   library: () => [
     {
-      label: "search the library",
+      label: "search your library",
       run: () => {
         openPanel("library");
         $("searchQuery").focus();
@@ -3542,7 +4029,7 @@ const SECTION_ITEMS = {
   ],
   stats: () => [
     {
-      label: "recompute",
+      label: "count again",
       run: () => {
         // Opening a section never computed computes it already.
         const loaded = stats.loaded;
@@ -3551,10 +4038,10 @@ const SECTION_ITEMS = {
       },
     },
   ],
-  sleeve: () => [{ label: "save the card as…", run: saveSleeve }],
+  sleeve: () => [{ label: "save your card…", run: saveSleeve }],
   import: () => [
     {
-      label: "choose an export archive…",
+      label: "choose your Spotify data…",
       run: () => {
         openPanel("import");
         pickImport();
@@ -3562,21 +4049,22 @@ const SECTION_ITEMS = {
     },
   ],
   providers: () => [
-    { label: "scan", run: () => scan(false) },
-    { label: "scan only if changed", run: () => scan(true) },
+    { label: "check for new music", run: () => scan(false) },
+    debugMode && { label: "scan only if changed", run: () => scan(true) },
+    { label: "add a music folder…", run: () => $("btnAddFolder").click() },
   ],
   plugins: () => [
     {
-      label: "fetch the catalog",
+      label: "show available services",
       run: () => {
         openPanel("plugins");
         pluginTabs.select($("tabCatalog"));
         refreshCatalog();
       },
     },
-    { label: "update every plugin", run: updateAllPlugins },
+    { label: "update every service", run: updateAllPlugins },
     {
-      label: "secrets",
+      label: "keys",
       run: () => {
         openPanel("plugins");
         pluginTabs.select($("tabSecrets"));
@@ -3584,11 +4072,20 @@ const SECTION_ITEMS = {
     },
   ],
   diag: () => [{ label: "copy the last run's report", run: copyDiagReport }],
+  settings: () => [
+    {
+      label: "look things up online",
+      kind: "check",
+      checked: onlineSwitch.on(),
+      disabled: onlineSwitch.held(),
+      run: () => onlineSwitch.toggle(),
+    },
+  ],
 };
 
 for (const button of document.querySelectorAll(".nav")) {
   const panel = button.dataset.panel;
-  const shortcut = `Ctrl+${PANELS.indexOf(panel) + 1}`;
+  const shortcut = panelShortcut(panel);
   menus.set(button, () => ({
     title: button.querySelector(".nav-label").textContent,
     items: [
@@ -3774,6 +4271,9 @@ listen("headshell://busy", (event) => {
   // The theme **first**: drawing a frame with the default colours and then
   // jumping to the theme would flash on every start.
   applyTheme(await call("theme_active"));
+  // The debug mode before anything is drawn: its details stay hidden until
+  // it says so (D-083).
+  paintDebug(await call("debug_mode"));
   watchMotionPreference();
   showBase("library", { instant: true });
   openPanel("now", { instant: true });
@@ -3781,13 +4281,12 @@ listen("headshell://busy", (event) => {
   environment = (await call("environment")) ?? null;
   if (environment) {
     $("appVersion").textContent = `headshell ${environment.version}`;
-    $("envBlock").textContent = [
-      `version     : ${environment.version}`,
-      `data dir    : ${environment.data_dir}`,
-      `database    : ${environment.database}`,
-      `music       : ${environment.music_dirs.length > 0 ? environment.music_dirs.join(", ") : "not set (HEADSHELL_MUSIC_DIRS)"}`,
-      `online      : ${environment.lookup === "online" ? "yes (HEADSHELL_ONLINE=1)" : "no — HEADSHELL_ONLINE=1 turns it on"}`,
-    ].join("\n");
+    paintEnvironment();
+    // The switch from what the app goes by — read without a run of its own,
+    // so the last run in diagnostics stays the user's. Its note comes when
+    // settings open.
+    $("onlineSwitch").disabled = environment.lookup_held;
+    onlineSwitch.set(environment.lookup === "online", { instant: true });
   }
   renderQueue(await call("queue"));
   renderAnchor(await call("anchor"));

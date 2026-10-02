@@ -190,6 +190,8 @@ headshell plugin catalog | update [<name>] | remove <name>
 headshell plugin index <catalog-repo> [--url-template T] [--check]
 headshell secret list | set <namespace> <key> | remove <namespace> <key>
 headshell suggest "<query>"                       # what the play box offers while typed in
+headshell online [on|off]                        # the desktop's online choice (not the CLI's)
+headshell music-dirs [add <dir> | remove <dir>]  # the local music folders (HEADSHELL_MUSIC_DIRS overrides)
 headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues
 headshell diag                                   # the last run's diagnostics report
 ```
@@ -205,8 +207,10 @@ subcommand here. The human-readable output is a separate formatting layer
 `--online` is **off** by default: importing an export does not silently
 connect anyone to the network. Without the flag the identity chain runs only
 its local links, and covers come only from where the tracks live (their tags,
-their folder, their provider). The desktop has no flags: its `--online` is
-`HEADSHELL_ONLINE=1` (D-076). Where downloading **is the command itself** (`plugin
+their folder, their provider). The desktop has no flags: its `--online` is a
+saved choice — its settings, or `headshell online on|off` — and
+`HEADSHELL_ONLINE=1|0` decides one launch over it (D-082); the CLI itself is not
+bound by that choice. Where downloading **is the command itself** (`plugin
 catalog`, `install`, `update`), the flag is not required; the catalog address
 changes with `HEADSHELL_PLUGIN_INDEX` (D-071). Lyrics follow the user's own rule
 instead of the flag (D-078): LRCLIB is asked when the user asks for lyrics —

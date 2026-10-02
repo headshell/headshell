@@ -75,6 +75,23 @@ impl CardFormat {
     }
 }
 
+/// `on` or `off` (a clap ValueEnum — not in the core, which says
+/// [`LookupMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
+}
+
+impl Switch {
+    const fn to_mode(self) -> LookupMode {
+        match self {
+            Self::On => LookupMode::Online,
+            Self::Off => LookupMode::Offline,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Import a data export archive (a zip or an extracted directory).
@@ -214,8 +231,43 @@ enum Command {
         #[arg(long)]
         tui: bool,
     },
+    /// Whether the desktop asks MusicBrainz and the Cover Art Archive (D-082).
+    ///
+    /// Without an argument it shows the saved choice, `HEADSHELL_ONLINE` as
+    /// this shell has it, and what a desktop started from here goes by. The
+    /// choice is the desktop's: the CLI itself goes online only with
+    /// `--online`, run by run.
+    Online {
+        /// Save the choice: `on` or `off`.
+        #[arg(value_enum)]
+        state: Option<Switch>,
+    },
+    /// The folders the local files come from (D-085).
+    ///
+    /// Without a subcommand it lists them and says who decided: the
+    /// folders chosen here, `HEADSHELL_MUSIC_DIRS` for this run, or the
+    /// system's music folder when nothing is chosen. A changed folder is read
+    /// at the next `headshell provider scan`.
+    MusicDirs {
+        #[command(subcommand)]
+        action: Option<MusicDirsCommand>,
+    },
     /// The diagnostics report of the last run.
     Diag,
+}
+
+#[derive(Debug, Subcommand)]
+enum MusicDirsCommand {
+    /// Add a folder; with nothing chosen yet, the system's folder stays.
+    Add {
+        /// The folder.
+        dir: PathBuf,
+    },
+    /// Take a folder off the list; its songs leave at the next scan.
+    Remove {
+        /// The folder, as the list shows it.
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -748,6 +800,23 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
 
             let report = session.play(&registry, options).await?;
             render(cli.json, &report, || output::play(&report))
+        }
+        Command::Online { state } => {
+            let report = match state {
+                Some(state) => session.set_online(state.to_mode())?,
+                None => session.online()?,
+            };
+            render(cli.json, &report, || output::online(&report))
+        }
+        Command::MusicDirs { action } => {
+            let report = match action {
+                None => session.music_folders()?,
+                Some(MusicDirsCommand::Add { dir }) => session.add_music_folder(dir)?,
+                Some(MusicDirsCommand::Remove { dir }) => session.remove_music_folder(dir)?,
+            };
+            render(cli.json, &report, || {
+                output::music_folders(&report, action.is_some())
+            })
         }
         Command::Diag => {
             let report = session.last_diag()?;

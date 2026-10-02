@@ -1862,7 +1862,9 @@ chosen.
 
 **Not closed in this round:** fixing the set itself (paging) or moving the
 identity to the work level. Both would let ambiguous queries get authority; each is
-a separate decision.
+a separate decision. *(Paging: decided in D-081 — not every match, but the first
+hundred in one response, read only while the outcome can still change; a tier that
+does not fit claims nothing, which extends Q3 rather than reversing it.)*
 
 ### D-046 addendum (3) — a run with a real key: the match path had never worked
 
@@ -4814,9 +4816,10 @@ decisions below.
    §7).
 5. **Phase 3, §3.10.**
 6. **The desktop's `--online` is `HEADSHELL_ONLINE=1`,** read by the core as
-   `HEADSHELL_MUSIC_DIRS` is. It takes `1` or `0`; anything else stops startup with
-   the reason — a `true` that went unrecognised would leave the user offline without
-   a word. It means what `--online` means in the CLI: covers, but `resolve` and
+   `HEADSHELL_MUSIC_DIRS` is. *(Since D-082 a saved choice — settings, or `headshell
+   online on|off` — with the variable deciding one launch over it.)* It takes `1` or
+   `0`; anything else stops startup with the reason — a `true` that went unrecognised
+   would leave the user offline without a word. It means what `--online` means in the CLI: covers, but `resolve` and
    `import` go online with it too (an online import is slow — one request a second —
    as it is in the CLI). The environment block shows it.
 7. **Where the track lives is not gated:** its tags, its folder, its server and a
@@ -5511,3 +5514,324 @@ lookups. The CLI's counterpart stays `headshell artwork`: the covers of what a q
 waited for. Verified in the container: a local album's folder cover on its suggestion rows,
 the echo plugin's own cover on its track, and a track whose plugin has none keeping the small
 record.
+
+## D-081 — A search's top tier is read whole in one response, or nothing is claimed; a duration narrows the search
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** CI went red on master with the D-080 addendum: `an_ambiguous_query_without_duration_claims_no_authority`
+failed on Linux and Windows in the same run — `Radiohead — Creep` without a duration got an MBID (`tied 1`)
+where it had always got the local key. The test was on the list of flaky ones. It was measured before
+anything was changed, and the user was asked (§0.2): **A** — read on while the outcome can still change, and
+a tier that does not fit claims nothing (a public trait signature changes) — or **B** — never read on, and a
+cut page always claims nothing (one request, but a popular song's file never gets an MBID either). The user
+chose **A**.
+
+D-046 Q3 had rejected *paging* — fetching every match, ~9 s for each ambiguous query — and left "fixing the
+set itself" open as a separate decision. This is that decision. The question put to the user did not cite
+D-046, and should have; the design that came out of the measurements stays inside D-046's objection: at most
+one more request, never a merge of pages.
+
+**Measured** (the live MusicBrainz, 2026-10-02):
+
+1. **The failure is the resolver's, not the test's.** The search scores every exact `Creep` alike — 149 of
+   192 hits — and returns 25 of them. Which 25 depends on the index replica that answers: three replicas,
+   three first pages, holding 7, 9 and **1** plain recording (no note, a known length). On the third the
+   resolver saw a single winner and claimed it: the identity depended on the replica again, the very thing
+   D-046 ended.
+2. **A page past the first comes from another replica.** Each address is answered from a cache filled by
+   whichever replica served it. Reading 0–25, 25–125 and 125–225: in four reads of five, 25 hits came twice
+   and 25 never. The first implementation — read on up to 300 across pages, as option A had said — made
+   `Creep` **with** a duration flip between an MBID and the local key from run to run (one run in five got the
+   MBID). It was replaced before it was kept.
+3. **Scores are relative to the whole search, but rounded with each replica's statistics.** A tail page does
+   not restart at 100 (`Creep`'s runs 82 → 32), yet the same exact hits scored all 100 on one replica and
+   34 × 100 + 66 × 99 on another. The first inexact hits scored 94, 93, 92 and 86 (`One More Time,
+   Aerodynamic`, `Roads (live)`, `Şımarık (remix)`, `Archangel (TASO REMIX)`).
+4. **`dur:[a TO b]` narrows a search to a length range.** `Creep` ±15 s: 53 hits, 33 exact, the same answer
+   on every read; `Bohemian Rhapsody` 49; `Yesterday` 94, three of them exactly 125 000 ms long — a real tie.
+
+**Decision:**
+
+1. **A winner of the part read is not claimed.** `MetadataLookup::search_recordings` returns a `SearchPage {
+   candidates, top_continues }`; when the source's top tier goes on past what was read, a winner unique among
+   the candidates read is no authority — `LocalKey`, with `Resolution::unread_equals` set.
+2. **The top tier is read whole, in one response.** The first 25 as before; if the tier goes on and the
+   outcome can still change, the first 100 — MusicBrainz's largest page — **from the start**, in one request.
+   One response is one replica's ranking, whole. Never the next page; a tier wider than 100 claims nothing.
+3. **The reading stops when nothing unread can change the outcome.** A tie at the ceiling of every sorting
+   criterion — the highest score (`similarity` is clamped to 1), no note and a known length, and with a
+   duration a gap of 0 — is final: an unread candidate can only join it. That is the usual end of a
+   popular song without a duration: one request, as before.
+4. **A duration narrows the search** to ±15 s around it (`LENGTH_WINDOW_MS`, the fuzzy scorer's own mismatch
+   limit: further away a candidate scores at most 0.7, below every threshold, so no possible winner is lost).
+   If the window's tier is read whole and its best is a plain recording at the ceiling, the window decides —
+   nothing outside it can equal that. Otherwise every length is read: a recording of unknown length falls
+   outside every window and may be the best there is.
+5. **MusicBrainz's top tier is a score of 97 or more**: between the exact hits' 99–100 and the inexact ones'
+   94 and below, with a point of rounding either way. A hit without a score, or an answer without a count
+   that filled its page, reads as "goes on" — "I don't know" must not read as "it ended".
+6. **`Resolution::unread_equals`** says the tier was not read whole; `tied_candidates` is then a lower bound.
+   The CLI and the desktop say "at least N candidates could not be told apart", or "the source ranks more
+   candidates as high than were read". The line "N candidates got the same score; the choice is deterministic
+   but arbitrary" — stale since D-046, when a tie stopped choosing — is gone, and so is "the metadata source
+   returned no candidates" for a resolution that had candidates below the threshold ("no candidate came
+   close enough").
+
+**Cost.** Without a duration: one request, two when the first 25 do not settle (the replica that failed CI).
+With a duration: one or two in the window, and the reads of every length only when the window holds no plain
+recording at the ceiling. A page of 100 is ~330 KB and ~1 s; the shared limiter's 1.1 s between requests
+stays the pace.
+
+**Measured after.** `Creep` without a duration: the same `local:b51521e93103eefa` in five runs out of five
+(tied 7–35, each a lower bound). With a duration: `mb:d8b2fac9…` — the 238 026 ms studio take — in ten
+resolutions out of ten over five runs. The accuracy set: **72/72 = 100%** (it runs on `StaticLookup`, which
+now cuts its answer like a search engine and, not ranking, counts every match as the top). The live suite:
+five runs, all green.
+
+**Assumption, written down:** a hit MusicBrainz ranks below the top tier does not equal the winner by the
+resolver's measure. MusicBrainz's style keeps "remaster" and the like in the note, not the title, so it holds
+in practice; a title with an edition suffix — ranked lower by Lucene, normalised equal by us — would break it.
+
+**Public signatures that changed:** `MetadataLookup::search_recordings` (a length range and a limit; returns
+`SearchPage`); `SearchPage`, `LengthRange`, `WHOLE_PAGE`, `LENGTH_WINDOW_MS` (new); `Resolution::unread_equals`
+(new, `serde` default `false`). `MusicBrainzLookup::with_search_limit` now sizes only the release search (the
+cover chain, D-076); a recording search's page is its caller's. The three implementations are in the core.
+
+**Testing:** a scripted lookup that answers in turn and records what was asked — the replica that failed CI,
+a winner of the whole tier, a tier wider than one response, a tie at the ceiling stopping the reading, the
+window deciding, the window falling back to every length, a window wider than one response, the window's
+bounds. MusicBrainz on canned answers: a head inside the top tier, 99 still in it, the tier ending, an answer
+holding every hit, an unknown score or count, the page cap, the `dur` clause. Two deliberate faults — the
+first answer always whole, the window never deciding — fail five tests and one; taking out the early stop
+fails two. Live: the first 25 of `Creep` say the top goes on; the same query with a duration gives the same
+identity twice.
+
+**Also in this round:** CI's actions moved to their Node 24 majors — `checkout` v7, `upload-artifact` v7,
+`download-artifact` v8, `action-gh-release` v3 (their notes were read: the runtime, credentials in a separate
+file, fork pull requests blocked, by-ID download paths and enforced digests — none touches how they are used
+here). The release workflow's run only at the next tag.
+
+## D-082 — The desktop's online choice: kept in the data directory, `headshell online`, a settings section
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** The desktop went online only when it was started with `HEADSHELL_ONLINE=1` (D-076), so a user
+who opens the app from its icon could never get a cover from MusicBrainz and the Cover Art Archive. D-076 had
+left the in-app switch undone: by D-033 a CLI command first, and the variable stood in for it. Asked (§0.2):
+what the saved choice covers, and where the switch sits. The user's answers: **"Yalnız masaüstü"** — the CLI
+keeps deciding run by run with `--online`, and the command only shows and writes the desktop's choice — and
+**System → a new "settings" row**.
+
+**Decision:**
+
+1. **The choice is kept in `preferences.json`** (`"lookup": "online" | "offline"`, beside D-080's `play_from`).
+   Nothing saved is offline, as a fresh install is; a file from before reads as nothing chosen.
+2. **`HEADSHELL_ONLINE` decides one launch over it**, `1` or `0`; anything else still stops startup with the
+   reason (D-076's rule). `Session::online_choice` gives `OnlineChoice { mode, source, saved, variable }`, and
+   the source — `variable`, `saved` or `default` — is always said (K9).
+3. **The CLI is not bound by it** — the user's choice. `headshell online` shows the desktop's mode and who
+   decided it, the saved choice, the variable as this shell has it, and that the CLI goes online only with
+   `--online`; `headshell online on|off` writes the choice. A test proves a CLI run stays offline with the
+   desktop's choice on.
+4. **The desktop goes by it at once.** The switch saves through the core, and the cover worker starts over in
+   the new mode; an offline "not looked up" is never cached, so turning online on reaches the covers it had
+   skipped — no restart. Reading the choice applies it too: a choice saved from the CLI while the app runs
+   takes effect when the settings are read, so the switch never shows a mode the app is not in. While the
+   variable holds the launch, the switch is disabled and the note says by what, and what the saved choice is.
+5. **The settings section** is the system group's third row, `Ctrl`+`0` — appended, so no existing shortcut
+   moved. One card: what online asks and the switch, then a note — the variable's hold, the cost of an online
+   import (one track a second), and that lyrics and plugins go online by their own rules (D-078, D-071). The
+   row's menu has "online lookups" as a check item. The texts that sent the user to the variable — the cover
+   note under the queue, a cover's tooltip, diagnostics' resolve hint and environment block — now say
+   settings.
+6. **The switch** (with /apple-design): `role="switch"`, the knob on a spring, so a second press while it
+   travels turns it back from where it is; the track's colour cross-fades. Pressed, the knob stretches toward
+   where a release sends it. It answers at once and is settled by the core's answer; a failed call says why
+   and the switch goes back. Reduced motion drops the stretch.
+
+**No run at startup.** `environment` carries `lookup_held`, so the switch and the row's menu are right before
+settings is first opened without a recorded run — diagnostics' last run stays the user's (D-080's care).
+Opening settings is a run (`online`), as opening providers is.
+
+**IPC (D-033):** `online` (`headshell online`) and `online_set` (`headshell online on|off`); `Environment.lookup`
+is the mode the app goes by now, `lookup_held` is new. `lookup_mode_from_env` gave way to `lookup_mode_variable`,
+which tells "unset" from `0`.
+
+**Testing:** who decides, as a table; the choice saved beside `play_from` without touching it; a preferences
+file from before D-082; through the CLI — nothing chosen, on, the variable holding a launch, a value it does not
+take, and a CLI run staying offline with the desktop online; `headshell online --json` has a snapshot;
+`ui_contract.rs` holds the new section, its row and the shortcut list.
+
+**Verification:** a Debian 13 container (WebKitGTK 2.54.0; the host's is 2.52.6), Xvfb and a PulseAudio null
+sink, three local tracks named for real recordings. Settings off, then on — `preferences.json` written —
+and `Creep` played with the Pablo Honey cover from the Cover Art Archive, no restart; off again, and `Roads`
+got the offline note's new text; `headshell online on` from the CLI while the app ran, and opening settings
+showed it on and brought `Dummy`'s cover; a restart with `HEADSHELL_ONLINE=0` — the switch disabled, its note
+naming the variable and the saved choice; the row's menu held and, after a restart without the variable,
+checked before settings was opened; turning it off from the menu; the pressed knob's stretch; 900×600.
+
+**Not done:** nothing that was asked. The section holds one choice today; D-080's "play from" stays in
+providers, where it was chosen.
+
+## D-083 — A simpler interface; the developer's details only in the debug mode (`DEBUG=1`, settings)
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** The user: *"Simplify the interface and make it more readable. Visual balance: reduce the
+clutter, bring only the critical information forward, and move the details to a second layer so they do
+not overwhelm the user — minimalist and usable, without overdoing it. Debug mode: make every detail meant
+for developers — technical logs, performance metrics, internal state parameters — visible only with
+`DEBUG=1`."* Every section was captured in the §3.9 container first, and a map was proposed: what stays in
+front, what goes one level deeper for everyone, what only the debug mode shows. Three questions were asked
+(§0.2), done with /apple-design. The answers:
+
+1. **Diagnostics:** hidden — *"but let's put a 'turn on the debug mode' option at the very bottom of the
+   settings"* (the user's own words, over a "copy the report" button in the help sheet, which was not added:
+   the switch leads to the full report).
+2. **A notice's stage:** plain words in front, the stage's code and the full chain folded — K9 kept.
+3. **The source label** in now playing and the queue: only for a source other than the local files, by its
+   name.
+
+**Decision:**
+
+1. **Three layers.** In front: what the user acts on. One level deeper, for everyone (a folded "details", a
+   tooltip): what explains it — K9's summaries among them. Only in the debug mode: raw reports, internal
+   identifiers, versions of the contracts, hashes, platforms, paths of the engine's tools, the counts that are
+   zero, diagnostics. **`DEBUG=1` brings back what the interface showed before this round**, and nothing is
+   lost on the way: every element is still drawn, and one attribute on the root (`data-debug`) with the
+   `.debug-only` class — `.plain-only` its counterpart — decides what shows. Turning the mode on or off
+   redraws nothing.
+2. **The debug mode** is the interface's own choice, kept in `ui.json` beside the theme (§3.3's line: neither
+   is a core concept, so neither goes to `preferences.json`, and there is no CLI counterpart — the CLI is the
+   developer's surface already, as the themes have none). A switch at the bottom of settings; `DEBUG=1`
+   holds a launch on, the switch locked and its note naming the variable and the saved choice. **Only
+   exactly `1`:** the name is shared (Node's `DEBUG=*`, a Makefile's `DEBUG=yes`), so another value is not
+   refused — the app would not start for a variable meant for another program — but left alone, with a
+   warning in the log. While the mode is on at startup the log goes from warnings to `debug` (`RUST_LOG`
+   still decides when set) — the "technical logs" of the ask.
+3. **Notices** (K9): the stage in plain words is the headline — "The server could not be reached" — every
+   one of the core's 25 stages has its words (`STAGE_TEXT`, held complete by `ui_contract.rs`; a stage added
+   without words would fall to "Something went wrong", which says no stage). Then the first cause, two lines
+   at most. The stage's code, the full chain and "copy" are under "details"; the debug mode puts the code
+   beside the words. `.stage` keeps its meaning for themes — the notice's stage — now in words; the code is
+   the new `.toast-code`.
+4. **Partial success** (K9): plainly and only when not zero for everyone ("9 short plays not counted"),
+   every count, zeros included, in the debug mode — statistics and the plugin list. The import report shows
+   what changed in the library (new listens, already there, new tracks); how the archive was read (raw
+   records, listens, ISRCs, skipped, the identity chain) is under "details"; the raw report is the debug
+   mode's.
+5. **Per section:** diagnostics' row and `Ctrl`+`9` exist only in the debug mode; a song's "resolve its
+   identity" (diagnostics' tool) and the "copy id" rows likewise. Providers lose the ids, the capability
+   column and "scan only if changed" (debug); plugins show their version, not their id and api; a tool's
+   state is in words ("ready", "damaged — install it again"), its version, platform and hashes in the debug
+   mode; the permission note is one sentence without decision numbers. The theme guide is folded; "themes
+   that could not be loaded" shows only when there is one. The import's and the providers' introductions are
+   shorter. A cover's or the lyrics' failure says so in words; its chain is the debug mode's.
+6. **The source label** (the user's choice): the local files' tracks carry none; another source's carry its
+   name ("Echo (test)", "YouTube Music"), the id in its tooltip; the debug mode labels the local ones `local`.
+
+**Testing:** `ui_settings.rs` — the theme and the debug mode share `ui.json` and writing one keeps the
+other, a file from before reads as off; `debug.rs` — only `1` turns it on, other values are left alone, the
+choice is kept and the variable holds a launch; `ui_contract.rs` — every core stage has plain words (a stage
+taken out of `STAGE_TEXT` fails it), the debug rule outranks the layout's.
+
+**Verification:** the §3.9 container (WebKitGTK 2.54.0; the host's is 2.52.6) with three local tracks, the
+echo plugin and an imported export: every section captured before and after; a mixed queue (the local track
+without a label, the plugin's with "Echo (test)"); a failing plugin track's notice, plain and in the debug
+mode; an import's report and its details; the debug mode turned on from settings — diagnostics' row, the
+ids, the capability column, the zero counts and `api 4` back at once — and off; a launch held by `DEBUG=1`;
+`DEBUG=yes` ignored with the warning in the log, and `debug` lines in the log with `DEBUG=1`; 900×600.
+
+**Not done:** nothing that was asked. The CLI is unchanged — its output is the developer's by design.
+
+## D-084 — The interface speaks to the listener; the developer's explanations only in the debug mode
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** After D-083 the user: *"It turned out nice again, but what I meant was this: look at the plugins
+section — who wants to learn how plugins work in the backend? Or in settings, who wants to see that the data
+is kept separately? If you were using this app and weren't very knowledgeable, would you like these? Let's
+redo all of these from scratch to be more end-user focused, but when debug is on these texts can appear. I
+understand your aim, but being overly developer-focused would hurt us."* D-083 had hidden the developer's
+*data*; the *words* still explained how the app works — "Written in JavaScript and run in the engine inside
+the app", "Choices this app keeps in its data directory. The CLI makes its own…". Every visible text was
+taken out of the page and the script and read as a listener would. Asked (§0.2): the voice
+— the user chose **warm, conversational** over short and plain; the names — **everyday words**; and the
+music folder, which led to D-085.
+
+**Decision:**
+
+1. **Every section says what it is for, in a sentence**: *"Every song you've ever played, all in one
+   place."* (library), *"Your listening, in numbers. Click a year to zoom in on it."* (stats), *"Bring your
+   Spotify history along — every song you've played there joins your stats."* (import), *"Listen from
+   YouTube Music, SoundCloud and more — add a service and it's ready to play."* (services), *"Make headshell
+   work just the way you like."* (settings). How it works — the engine, the catalog's repository and
+   hashes, the data directory, the CLI, decision numbers — is a `debug-only` paragraph under it: nothing was
+   deleted, the debug mode shows every explanation there was.
+2. **Everyday names:** providers → **sources**, plugins → **services**, the group "sources" → **connect**,
+   secrets → **keys**, catalog → **browse**, installed → **added**; approve → **allow**, forget consent →
+   **revoke**, enable/disable → **turn on/off**, install the tools → **finish setup**, scan → **check for new
+   music**, play from → **search here first**, online lookups → **look things up online**, tracks →
+   **songs**, listens → **plays**, queue all → **play all**, play box → **search box**. The panels' ids
+   (`providers`, `plugins`), the classes of the theme contract and the CLI do not change: the names are the
+   listener's.
+3. **Notices** keep their plain stage (D-083, K9) and say what to do instead of the core's cause: *"Couldn't
+   reach the server — Check your internet connection and try again."* (`STAGE_HINT`, for the stages where
+   there is something to do). The core's cause is in the details for everyone and in front in the debug mode.
+4. **The rest in the same voice:** the getting-started card (*"Add your music."*, *"Bring your history."*,
+   *"Press play."*), the help sheet, the lyrics' notes (*"These lyrics might run a little early or late —
+   nudge them…"*), the covers' tooltips (*"found online"*), the import report (new plays, already here, new
+   songs; how the songs were matched, in words), the services' cards (*"connects to"*, *"lets you"*, a tool's
+   state only when something is to be done: *"Needs a quick setup — press finish setup."*), the result
+   notices (*"Found 2 new songs — 3 songs in your music folders now."*, *"Echo (test) is allowed — enjoy!"*),
+   the menus. A count that is zero, an id, an `api`, a path, a hash, a reason string: the debug mode's.
+
+**Not changed:** the card the sleeve draws (it is the core's renderer's, with its own snapshot); the CLI's
+output — the developer's surface by design; the casing — lowercase titles stay the interface's look.
+
+**Testing:** `ui_contract.rs` (every id the script looks up exists — the copy moved several; the stage words
+are complete); the gates.
+
+**Verification:** the §3.9 container (WebKitGTK 2.54.0; the host's is 2.52.6), every section in the
+listener's view and a few in the debug mode's; three layout faults found only on screen and fixed — an empty
+note keeping its room, a developer paragraph falling into the header's empty right cell, a key in the help
+sheet's text breaking its row.
+
+## D-085 — The music folders are chosen in the app
+
+**Date:** 2026-10-02 · **Status:** APPLIED (2026-10-02)
+
+**Question:** The local files came only from `HEADSHELL_MUSIC_DIRS`, or the system's music folder when it was
+unset — the interface could only say "set an environment variable", the most developer-facing sentence it
+had (found while rewriting the words, D-084). Asked whether this round should only reword it or add a
+folder picker; the user: **add the folder picker** (the core keeps the choice, `headshell music-dirs` is its
+CLI counterpart).
+
+**Decision:**
+
+1. **The choice is kept by the core** in `preferences.json` (`music_dirs`). Order: `HEADSHELL_MUSIC_DIRS`
+   for a run that sets it → the folders chosen in the app → `XDG_MUSIC_DIR` → the system's music folder.
+   `Config::music_folders()` gives `MusicFolders { dirs, source, saved, system }`: who decided is always said
+   (K9). `None` is nothing chosen; an **empty list is a choice** — no local folders.
+2. **Adding keeps what was there:** with nothing chosen, the system's folder stays on the list beside the new
+   one. A folder must exist and be a folder; it is kept absolute. Adding one already there changes nothing
+   and says so (`changed: false`); taking off one that is not there is an error that lists the folders.
+3. **`Config::music_dirs()` is gone:** it could not fail, and reading the chosen folders can — a broken
+   `preferences.json` is an error, not a silent fall back to the system's folder. Its callers — the registry,
+   the scan reports, the desktop's environment — use `music_folders()`.
+4. **`headshell music-dirs [add <dir> | remove <dir>]`** (with `--json`): the folders, who decided, and when
+   the songs change — at the next `headshell provider scan`.
+5. **The desktop:** sources → *music folders*: one row per folder — its name first, where it is quieter —
+   with a remove button, and *add a folder…* (the dialog's folder picker). A change rebuilds the registry —
+   the local provider plays only under its folders — and checks for new music at once: *"Added extra3 — 3
+   songs in your music folders now."* While the variable decides the run, the list is locked and says so.
+
+**Testing:** the order as a table (the variable, an empty choice, the system's folder said beside a choice);
+adding, adding twice, a folder that is not there, the last one off; through the CLI, end to end — listed,
+added, kept in `preferences.json`, read by `provider scan` (a song in), taken off and scanned again (the song
+out), with a snapshot.
+
+**Verification:** the §3.9 container with a home whose Music folder held two songs: the default folder
+listed; a folder added through the dialog (3 songs after the automatic check), taken off (2 songs), the
+choice written each time.

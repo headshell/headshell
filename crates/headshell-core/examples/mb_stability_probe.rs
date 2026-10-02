@@ -39,9 +39,14 @@ async fn main() {
 
     let mut sets: Vec<Vec<String>> = Vec::new();
     for round in 1..=2 {
-        match lookup.search_recordings(&artist, &title).await {
-            Ok(found) => {
-                println!("run {round}: {} candidates", found.len());
+        match lookup.search_recordings(&artist, &title, None, 25).await {
+            Ok(page) => {
+                let found = page.candidates;
+                println!(
+                    "run {round}: {} candidates on the first page, top continues: {}",
+                    found.len(),
+                    page.top_continues
+                );
                 // The score and duration of the best five candidates: is the tie real, or
                 // does the scoring fail to tell apart what it could?
                 let mut scored: Vec<(f64, String, Option<u64>)> = found
@@ -82,8 +87,12 @@ async fn main() {
         // will hold.
         match resolver.resolve(&track).await {
             Ok(res) => println!(
-                "  → {} ({}, confidence {:.3}, tied {})",
-                res.canonical_id, res.method, res.confidence, res.tied_candidates
+                "  → {} ({}, confidence {:.3}, tied {}, unread equals {})",
+                res.canonical_id,
+                res.method,
+                res.confidence,
+                res.tied_candidates,
+                res.unread_equals
             ),
             Err(err) => println!("  → resolution error: {}", err.chain_text()),
         }

@@ -17,7 +17,7 @@ const ARTIST_WEIGHT: f64 = 0.4;
 const DURATION_MATCH_MS: u64 = 3_000;
 /// Durations further apart than this are seriously suspect: a radio edit / a
 /// long version.
-const DURATION_MISMATCH_MS: u64 = 15_000;
+pub(crate) const DURATION_MISMATCH_MS: u64 = 15_000;
 /// The amount a duration agreement adds to the score.
 const DURATION_BONUS: f64 = 0.08;
 /// A duration conflict multiplies the score by this ratio.

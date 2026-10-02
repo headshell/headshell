@@ -172,13 +172,6 @@ pub struct ActiveTheme {
     pub problem: Option<String>,
 }
 
-/// The shape of the file the selection is stored in.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct UiSettings {
-    #[serde(default)]
-    theme: Option<String>,
-}
-
 /// The theme directory + the selection file. Holds no state: every call
 /// reads the disk.
 ///
@@ -348,28 +341,16 @@ impl ThemeStore {
     }
 
     fn selection(&self) -> Result<Option<String>, String> {
-        let text = match fs::read_to_string(&self.settings) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(format!("could not read {}: {err}", self.settings.display())),
-        };
-        let settings: UiSettings = serde_json::from_str(&text)
-            .map_err(|err| format!("{} is corrupt: {err}", self.settings.display()))?;
-        Ok(settings.theme)
+        Ok(crate::ui_settings::read(&self.settings)?.theme)
     }
 
+    /// Writes the selection; the file's other choices (the debug mode, D-083)
+    /// stay as they were.
     fn write_selection(&self, id: Option<&str>) -> Result<(), String> {
-        if let Some(parent) = self.settings.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
-        }
-        let settings = UiSettings {
-            theme: id.map(str::to_owned),
-        };
-        let text = serde_json::to_string_pretty(&settings)
-            .map_err(|err| format!("could not serialise the theme selection: {err}"))?;
-        fs::write(&self.settings, text)
-            .map_err(|err| format!("could not write {}: {err}", self.settings.display()))
+        crate::ui_settings::update(&self.settings, |settings| {
+            settings.theme = id.map(str::to_owned);
+        })
+        .map(|_| ())
     }
 }
 

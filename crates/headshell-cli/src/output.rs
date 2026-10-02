@@ -4,16 +4,18 @@
 //! the terminal. Every number is printed as it came from the core.
 
 use headshell_core::artwork::{ArtworkReport, ArtworkSource, ArtworkStatus};
+use headshell_core::config::FolderSource;
 use headshell_core::library::SearchHit;
 use headshell_core::lyrics::{LyricsFit, LyricsReport, LyricsSource, LyricsStatus};
 use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
 use headshell_core::plugin::catalog::UpdateOutcome;
 use headshell_core::session::{
-    ImportReport, PlayFrom, PlayReport, PluginCatalogReport, PluginConsentReport,
-    PluginIndexReport, PluginInstallReport, PluginListReport, PluginRemoveReport,
-    PluginUpdateReport, ProviderListReport, ProviderTestReport, ResolveReport, ScanReport,
-    SearchReport, SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport,
-    ServerRemoveReport, SleeveResponse, StatsResponse,
+    ImportReport, LookupMode, MusicFoldersReport, OnlineReport, OnlineSource, PlayFrom, PlayReport,
+    PluginCatalogReport, PluginConsentReport, PluginIndexReport, PluginInstallReport,
+    PluginListReport, PluginRemoveReport, PluginUpdateReport, ProviderListReport,
+    ProviderTestReport, ResolveReport, ScanReport, SearchReport, SecretListReport,
+    SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport, SleeveResponse,
+    StatsResponse,
 };
 use headshell_core::stats::StatsReport;
 use headshell_core::suggest::SuggestReport;
@@ -203,21 +205,27 @@ pub fn resolve(report: &ResolveReport) -> String {
             let _ = writeln!(out, "note    : {note}");
         }
     } else {
-        let _ = writeln!(
-            out,
-            "match   : none (the metadata source returned no candidates)"
-        );
-    }
-    // A tie must not stay silent: if the choice was made among equals, the user
-    // must see it, otherwise they take an arbitrary choice for a definite answer.
-    if res.tied_candidates > 1 {
-        let _ = writeln!(
-            out,
-            "tied    : {} candidates got the same score; the choice is deterministic but arbitrary",
-            res.tied_candidates
-        );
+        let _ = writeln!(out, "match   : none — {}", no_match_reason(res));
     }
     out
+}
+
+/// Why a resolution has no match (K9): no candidate came close, candidates
+/// could not be told apart (D-046), or the source ranks more as high than
+/// were read (D-081). No candidate is chosen in any of them — a tie used to
+/// be shown as "a deterministic but arbitrary choice", which D-046 ended.
+fn no_match_reason(res: &headshell_core::identity::Resolution) -> String {
+    let at_least = if res.unread_equals { "at least " } else { "" };
+    if res.tied_candidates > 1 {
+        format!(
+            "{at_least}{} candidates could not be told apart; no authority claimed",
+            res.tied_candidates
+        )
+    } else if res.unread_equals {
+        "the source ranks more candidates as high than were read; none is claimed".to_owned()
+    } else {
+        "no candidate came close enough".to_owned()
+    }
 }
 
 /// The covers of a query's tracks (D-076): one line per track, the counts
@@ -546,6 +554,75 @@ pub fn play_from(from: &PlayFrom) -> String {
         out.push_str(&format!(
             "  the chosen {missing} is not registered or cannot play now — searching from the one above\n"
         ));
+    }
+    out
+}
+
+/// The desktop's online choice (D-082): what a desktop started from here
+/// goes by and who decided it — and that the CLI is not bound by it.
+pub fn online(report: &OnlineReport) -> String {
+    let choice = &report.online;
+    let switch = |mode: LookupMode| match mode {
+        LookupMode::Online => "on",
+        LookupMode::Offline => "off",
+    };
+    let why = match choice.source {
+        OnlineSource::Variable => "HEADSHELL_ONLINE in this shell decides, over the saved choice",
+        OnlineSource::Saved => "the saved choice",
+        OnlineSource::Default => "nothing chosen yet — `headshell online on`",
+    };
+    let saved = choice.saved.map_or("nothing", switch);
+    let variable = match choice.variable {
+        Some(LookupMode::Online) => "HEADSHELL_ONLINE=1",
+        Some(LookupMode::Offline) => "HEADSHELL_ONLINE=0",
+        None => "HEADSHELL_ONLINE not set",
+    };
+    format!(
+        "desktop : online {} ({why})\n\
+         saved   : {saved}\n\
+         shell   : {variable}\n\
+         the CLI : online only with --online, run by run\n\
+         online asks MusicBrainz (identities, covers) and the Cover Art Archive\n",
+        switch(choice.mode)
+    )
+}
+
+/// The music folders and who decided them (D-085); after a change, when
+/// its songs come in.
+pub fn music_folders(report: &MusicFoldersReport, changing: bool) -> String {
+    use std::fmt::Write as _;
+    let folders = &report.folders;
+    let why = match folders.source {
+        FolderSource::Variable => "HEADSHELL_MUSIC_DIRS decides this run",
+        FolderSource::Saved => "chosen here",
+        FolderSource::Default => "nothing chosen — the system's music folder",
+    };
+    let mut out = format!("music folders ({why}):\n");
+    if folders.dirs.is_empty() {
+        out.push_str("  none\n");
+    }
+    for dir in &folders.dirs {
+        let _ = writeln!(out, "  {}", dir.display());
+    }
+    if folders.source == FolderSource::Variable {
+        let chosen = folders.saved.as_ref().unwrap_or(&folders.system);
+        let list: Vec<String> = chosen.iter().map(|dir| dir.display().to_string()).collect();
+        let _ = writeln!(
+            out,
+            "without the variable: {}",
+            if list.is_empty() {
+                "none".to_owned()
+            } else {
+                list.join(", ")
+            }
+        );
+    }
+    if changing {
+        out.push_str(if report.changed {
+            "the songs change at the next scan: headshell provider scan\n"
+        } else {
+            "already on the list — nothing changed\n"
+        });
     }
     out
 }

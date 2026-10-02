@@ -20,11 +20,13 @@
 //! it there on purpose.
 //!
 //! The environment is read in pure functions ([`resolve_data_dir`],
-//! [`resolve_music_dirs`]): in Rust 2024 `set_var` is `unsafe` and the
+//! [`resolve_music_folders`]): in Rust 2024 `set_var` is `unsafe` and the
 //! workspace says `unsafe_code = "forbid"`, so this way the Windows and macOS
 //! branches are tested on every machine.
 
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result};
@@ -33,12 +35,40 @@ use crate::error::{Error, ErrorKind, Result};
 /// portable installs).
 pub const DATA_DIR_ENV: &str = "HEADSHELL_DATA_DIR";
 
-/// Environment variable for giving the music directories by hand.
+/// Environment variable for giving the music directories by hand. It
+/// decides over the folders chosen in the app (D-085).
 ///
 /// The list is written like `PATH`: separated by `:` on Unix and `;` on
 /// Windows — so the colon inside a path like `C:\Music` does not count as a
 /// separator.
 pub const MUSIC_DIRS_ENV: &str = "HEADSHELL_MUSIC_DIRS";
+
+/// Who decided the music folders (D-085).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderSource {
+    /// [`MUSIC_DIRS_ENV`], for this run.
+    Variable,
+    /// The folders chosen in the app, kept in `preferences.json`.
+    Saved,
+    /// Nothing chosen: the system's own music folder.
+    Default,
+}
+
+/// The music folders the local provider reads, and who decided them
+/// (D-085).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MusicFolders {
+    /// What the local provider reads now.
+    pub dirs: Vec<PathBuf>,
+    /// Who decided `dirs` (K9: a choice that does not hold is said).
+    pub source: FolderSource,
+    /// The folders chosen in the app; `None`: nothing chosen. An empty list
+    /// is a choice too — no local folders.
+    pub saved: Option<Vec<PathBuf>>,
+    /// The system's own music folder(s): what "nothing chosen" means here.
+    pub system: Vec<PathBuf>,
+}
 
 /// The paths the core needs to work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,16 +211,25 @@ impl Config {
         self.data_dir.join("last-run.json")
     }
 
-    /// The music directories the local provider scans.
+    /// The music folders the local provider scans (D-085).
     ///
-    /// Order: `HEADSHELL_MUSIC_DIRS` → `XDG_MUSIC_DIR` → this system's usual
-    /// music directory (`%USERPROFILE%\Music` on Windows, `~/Music` on macOS,
-    /// `~/Müzik` and `~/Music` elsewhere). If none exists the list is empty —
-    /// picking a made-up path would turn "I did not find the user's music" into
-    /// "I looked in the wrong place".
-    #[must_use]
-    pub fn music_dirs(&self) -> Vec<PathBuf> {
-        resolve_music_dirs(std::env::consts::OS, &non_empty_env)
+    /// Order: `HEADSHELL_MUSIC_DIRS` → the folders chosen in the app →
+    /// `XDG_MUSIC_DIR` → this system's usual music directory
+    /// (`%USERPROFILE%\Music` on Windows, `~/Music` on macOS, `~/Müzik` and
+    /// `~/Music` elsewhere). If none exists the list is empty — picking a
+    /// made-up path would turn "I did not find the user's music" into "I
+    /// looked in the wrong place".
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read: falling back to the system's
+    /// folder in silence would hide the user's choice (K9).
+    pub fn music_folders(&self) -> Result<MusicFolders> {
+        let saved = crate::preferences::load(&self.preferences_path())?.music_dirs;
+        Ok(resolve_music_folders(
+            std::env::consts::OS,
+            &non_empty_env,
+            saved,
+        ))
     }
 
     /// Creates the data directory.
@@ -254,17 +293,39 @@ fn resolve_data_dir(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<Pa
     }
 }
 
-/// Resolves the music directories from the given environment. The usual
-/// directories go on the list only **if they exist**; explicitly given ones
-/// go on as they are — if they are missing, the scan says so.
-fn resolve_music_dirs(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
-    if let Some(raw) = env(MUSIC_DIRS_ENV) {
+/// Resolves the music folders from the given environment and the folders
+/// chosen in the app. The usual directories go on the list only **if they
+/// exist**; explicitly given ones go on as they are — if they are missing,
+/// the scan says so.
+fn resolve_music_folders(
+    os: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    saved: Option<Vec<PathBuf>>,
+) -> MusicFolders {
+    let system = system_music_dirs(os, env);
+    let (dirs, source) = if let Some(raw) = env(MUSIC_DIRS_ENV) {
         // `split_paths` uses this system's separator: `;` on Windows, `:`
         // elsewhere. Splitting on `:` by hand would cut `C:\Music` in two.
-        return std::env::split_paths(&raw)
+        let dirs = std::env::split_paths(&raw)
             .filter(|path| !path.as_os_str().is_empty())
             .collect();
+        (dirs, FolderSource::Variable)
+    } else if let Some(saved) = &saved {
+        (saved.clone(), FolderSource::Saved)
+    } else {
+        (system.clone(), FolderSource::Default)
+    };
+    MusicFolders {
+        dirs,
+        source,
+        saved,
+        system,
     }
+}
+
+/// The system's own music folder(s): `XDG_MUSIC_DIR`, or the usual one if it
+/// exists.
+fn system_music_dirs(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
     if let Some(dir) = env("XDG_MUSIC_DIR") {
         return vec![PathBuf::from(dir)];
     }
@@ -411,7 +472,7 @@ mod tests {
         let raw = format!("{first}{separator}{separator}/archive");
         let env = env_of(&[("HEADSHELL_MUSIC_DIRS", &raw)]);
         assert_eq!(
-            resolve_music_dirs(std::env::consts::OS, &env),
+            resolve_music_folders(std::env::consts::OS, &env, None).dirs,
             vec![PathBuf::from(first), PathBuf::from("/archive")]
         );
     }
@@ -429,7 +490,7 @@ mod tests {
         ] {
             let env = env_of(&[(key, root)]);
             assert_eq!(
-                resolve_music_dirs(os, &env),
+                resolve_music_folders(os, &env, None).dirs,
                 vec![home.join("Music")],
                 "{os}"
             );
@@ -437,7 +498,47 @@ mod tests {
         // A usual directory that does not exist is not made up.
         let empty = crate::test_support::TempDir::new("config-music-empty");
         let env = env_of(&[("HOME", empty.to_str().unwrap())]);
-        assert!(resolve_music_dirs("linux", &env).is_empty());
+        assert!(resolve_music_folders("linux", &env, None).dirs.is_empty());
+    }
+
+    /// D-085: the variable first, for this run; then the folders chosen in
+    /// the app — an empty choice included; then the system's folder. Who
+    /// decided is always said.
+    #[test]
+    fn the_variable_then_the_chosen_folders_then_the_systems() {
+        let home = crate::test_support::TempDir::new("config-music-order");
+        std::fs::create_dir_all(home.join("Music")).unwrap();
+        let root = home.to_str().unwrap();
+        let chosen = Some(vec![PathBuf::from("/chosen")]);
+
+        let system = resolve_music_folders("linux", &env_of(&[("HOME", root)]), None);
+        assert_eq!(system.source, FolderSource::Default);
+        assert_eq!(system.dirs, vec![home.join("Music")]);
+
+        let saved = resolve_music_folders("linux", &env_of(&[("HOME", root)]), chosen.clone());
+        assert_eq!(saved.source, FolderSource::Saved);
+        assert_eq!(saved.dirs, vec![PathBuf::from("/chosen")]);
+        assert_eq!(
+            saved.system,
+            vec![home.join("Music")],
+            "the system's folder is still said"
+        );
+
+        let none = resolve_music_folders("linux", &env_of(&[("HOME", root)]), Some(Vec::new()));
+        assert_eq!(none.source, FolderSource::Saved);
+        assert!(
+            none.dirs.is_empty(),
+            "an empty choice is not 'nothing chosen'"
+        );
+
+        let held = resolve_music_folders(
+            "linux",
+            &env_of(&[("HOME", root), ("HEADSHELL_MUSIC_DIRS", "/held")]),
+            chosen,
+        );
+        assert_eq!(held.source, FolderSource::Variable);
+        assert_eq!(held.dirs, vec![PathBuf::from("/held")]);
+        assert_eq!(held.saved, Some(vec![PathBuf::from("/chosen")]));
     }
 
     #[test]

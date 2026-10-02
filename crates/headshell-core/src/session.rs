@@ -5,12 +5,12 @@
 //! care of here. Delete a capability from the CLI and the core still offers
 //! it — the Golden Rule's test.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, MusicFolders};
 use crate::diag::{DiagReport, Recorder, Stage};
 use crate::error::{Error, ErrorKind, Result};
 use crate::identity::{
@@ -124,6 +124,71 @@ pub struct PlayFrom {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayFromReport {
     pub play_from: PlayFrom,
+    pub diag: DiagReport,
+}
+
+/// Who set the desktop's lookup mode (D-082).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnlineSource {
+    /// [`ONLINE_ENV`], for one launch.
+    Variable,
+    /// The choice saved in `preferences.json`.
+    Saved,
+    /// Nothing set: offline, as a fresh install is.
+    Default,
+}
+
+/// The desktop's online choice (D-082), and everything that decides it.
+///
+/// The CLI does not go by it — every run there chooses with `--online` — so
+/// what this says is what a desktop started from here goes by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnlineChoice {
+    /// What the desktop goes by.
+    pub mode: LookupMode,
+    /// Who decided `mode` (K9: a choice that does not hold is said, not
+    /// silently overridden).
+    pub source: OnlineSource,
+    /// The saved choice; `None`: nothing saved.
+    pub saved: Option<LookupMode>,
+    /// [`ONLINE_ENV`] as this process read it; `None`: unset.
+    pub variable: Option<LookupMode>,
+}
+
+impl OnlineChoice {
+    /// The variable first — it is set for one launch on purpose — then the
+    /// saved choice, then offline.
+    #[must_use]
+    pub const fn decide(saved: Option<LookupMode>, variable: Option<LookupMode>) -> Self {
+        let (mode, source) = match (variable, saved) {
+            (Some(mode), _) => (mode, OnlineSource::Variable),
+            (None, Some(mode)) => (mode, OnlineSource::Saved),
+            (None, None) => (LookupMode::Offline, OnlineSource::Default),
+        };
+        Self {
+            mode,
+            source,
+            saved,
+            variable,
+        }
+    }
+}
+
+/// What `headshell online [on|off]` answers (D-082).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OnlineReport {
+    pub online: OnlineChoice,
+    pub diag: DiagReport,
+}
+
+/// What `headshell music-dirs [add|remove]` answers (D-085).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MusicFoldersReport {
+    pub folders: MusicFolders,
+    /// Whether the chosen folders changed: adding a folder already on the
+    /// list changes nothing, and says so.
+    pub changed: bool,
     pub diag: DiagReport,
 }
 
@@ -932,6 +997,174 @@ impl Session {
         })
     }
 
+    /// Whether the desktop goes online (D-082): [`ONLINE_ENV`] when it is
+    /// set — for one launch — otherwise the choice saved with
+    /// [`Self::set_online`], otherwise offline. The CLI does not go by it.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read, or the variable holds anything
+    /// but `1` or `0`.
+    pub fn online_choice(&self) -> Result<OnlineChoice> {
+        let saved = crate::preferences::load(&self.config.preferences_path())?.lookup;
+        Ok(OnlineChoice::decide(saved, lookup_mode_variable()?))
+    }
+
+    /// [`Self::online_choice`] as a report: `headshell online`.
+    ///
+    /// # Errors
+    /// As [`Self::online_choice`].
+    pub fn online(&self) -> Result<OnlineReport> {
+        let rec = Recorder::start(
+            "online".to_owned(),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = self.online_choice();
+        self.finish(rec, result, |online, diag| OnlineReport { online, diag })
+    }
+
+    /// Saves whether the desktop goes online (D-082): `headshell online
+    /// on|off`, and the desktop's settings. [`ONLINE_ENV`] still decides a
+    /// launch that sets it, and the report says so.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read or written, or the variable
+    /// holds anything but `1` or `0`.
+    pub fn set_online(&self, mode: LookupMode) -> Result<OnlineReport> {
+        let word = match mode {
+            LookupMode::Online => "on",
+            LookupMode::Offline => "off",
+        };
+        let rec = Recorder::start(
+            format!("online {word}"),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = (|| {
+            let path = self.config.preferences_path();
+            let mut preferences = crate::preferences::load(&path)?;
+            preferences.lookup = Some(mode);
+            crate::preferences::save(&path, &preferences)?;
+            self.online_choice()
+        })();
+        self.finish(rec, result, |online, diag| OnlineReport { online, diag })
+    }
+
+    /// The music folders and who decided them (D-085): `headshell
+    /// music-dirs`.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read.
+    pub fn music_folders(&self) -> Result<MusicFoldersReport> {
+        let rec = Recorder::start(
+            "music-dirs".to_owned(),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = self.config.music_folders();
+        self.finish(rec, result, |folders, diag| MusicFoldersReport {
+            folders,
+            changed: false,
+            diag,
+        })
+    }
+
+    /// Adds a music folder to the chosen ones (D-085). With nothing chosen
+    /// yet the system's folder stays on the list: adding is adding. The
+    /// folder is read at the next scan.
+    ///
+    /// # Errors
+    /// If the folder does not exist or is not a folder, or `preferences.json`
+    /// cannot be read or written.
+    pub fn add_music_folder(&self, dir: &Path) -> Result<MusicFoldersReport> {
+        let rec = Recorder::start(
+            format!("music-dirs add {}", dir.display()),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = (|| {
+            let dir = absolute_folder(dir)?;
+            match std::fs::metadata(&dir) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Err(folder_error(format!("{} is not a folder", dir.display()))),
+                Err(err) => {
+                    return Err(folder_error(format!(
+                        "{} cannot be opened: {err}",
+                        dir.display()
+                    )));
+                }
+            }
+            let mut chosen = self.chosen_folders()?;
+            let changed = !chosen.contains(&dir);
+            if changed {
+                chosen.push(dir);
+                self.save_folders(chosen)?;
+            }
+            Ok((self.config.music_folders()?, changed))
+        })();
+        self.finish(rec, result, |(folders, changed), diag| MusicFoldersReport {
+            folders,
+            changed,
+            diag,
+        })
+    }
+
+    /// Takes a folder off the chosen ones (D-085); its songs leave the
+    /// catalog at the next scan. Taking the last one off leaves no local
+    /// folders — a choice, not "nothing chosen".
+    ///
+    /// # Errors
+    /// If the folder is not on the list (the list is said), or
+    /// `preferences.json` cannot be read or written.
+    pub fn remove_music_folder(&self, dir: &Path) -> Result<MusicFoldersReport> {
+        let rec = Recorder::start(
+            format!("music-dirs remove {}", dir.display()),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = (|| {
+            let dir = absolute_folder(dir)?;
+            let mut chosen = self.chosen_folders()?;
+            let Some(index) = chosen.iter().position(|each| *each == dir) else {
+                let list: Vec<String> = chosen
+                    .iter()
+                    .map(|each| each.display().to_string())
+                    .collect();
+                return Err(Error::new(
+                    Stage::ConfigLoad,
+                    ErrorKind::NotFound {
+                        what: format!(
+                            "music folder {} (the folders: {})",
+                            dir.display(),
+                            if list.is_empty() {
+                                "none".to_owned()
+                            } else {
+                                list.join(", ")
+                            }
+                        ),
+                    },
+                ));
+            };
+            chosen.remove(index);
+            self.save_folders(chosen)?;
+            Ok((self.config.music_folders()?, true))
+        })();
+        self.finish(rec, result, |(folders, changed), diag| MusicFoldersReport {
+            folders,
+            changed,
+            diag,
+        })
+    }
+
+    /// The folders a change starts from: the chosen ones, or the system's
+    /// when nothing is chosen — never the variable's, which holds one run.
+    fn chosen_folders(&self) -> Result<Vec<PathBuf>> {
+        let folders = self.config.music_folders()?;
+        Ok(folders.saved.unwrap_or(folders.system))
+    }
+
+    fn save_folders(&self, dirs: Vec<PathBuf>) -> Result<()> {
+        let path = self.config.preferences_path();
+        let mut preferences = crate::preferences::load(&path)?;
+        preferences.music_dirs = Some(dirs);
+        crate::preferences::save(&path, &preferences)
+    }
+
     /// Tests a provider: is it up, how many tracks does it see.
     ///
     /// # Errors
@@ -1145,14 +1378,16 @@ impl Session {
             rec.set("catalog.removed", n(write.removed));
             rec.set("catalog.unchanged", n(write.unchanged));
         }
-        let dirs = self.config.music_dirs();
-        self.finish(rec, result, move |(summary, write), diag| ScanReport {
-            dirs,
-            summary,
-            write,
-            scanned: true,
-            reason: "requested".to_owned(),
-            diag,
+        let result = result.and_then(|scanned| Ok((self.config.music_folders()?.dirs, scanned)));
+        self.finish(rec, result, move |(dirs, (summary, write)), diag| {
+            ScanReport {
+                dirs,
+                summary,
+                write,
+                scanned: true,
+                reason: "requested".to_owned(),
+                diag,
+            }
         })
     }
 
@@ -1206,8 +1441,8 @@ impl Session {
 
         if !stale {
             rec.set("scan.skipped", 1);
-            let dirs = self.config.music_dirs();
-            return self.finish(rec, Ok(()), move |(), diag| ScanReport {
+            let dirs = self.config.music_folders().map(|folders| folders.dirs);
+            return self.finish(rec, dirs, move |dirs, diag| ScanReport {
                 dirs,
                 summary: ScanSummary::default(),
                 write: CatalogWriteSummary::default(),
@@ -1226,14 +1461,16 @@ impl Session {
             rec.set("catalog.removed", n(write.removed));
             rec.set("catalog.unchanged", n(write.unchanged));
         }
-        let dirs = self.config.music_dirs();
-        self.finish(rec, result, move |(summary, write), diag| ScanReport {
-            dirs,
-            summary,
-            write,
-            scanned: true,
-            reason,
-            diag,
+        let result = result.and_then(|scanned| Ok((self.config.music_folders()?.dirs, scanned)));
+        self.finish(rec, result, move |(dirs, (summary, write)), diag| {
+            ScanReport {
+                dirs,
+                summary,
+                write,
+                scanned: true,
+                reason,
+                diag,
+            }
         })
     }
 
@@ -2759,6 +2996,17 @@ fn open_archive(path: &Path) -> Result<Box<dyn import::ExportArchive>> {
     }
 }
 
+/// A folder as it is kept: absolute, so a CLI run from another directory
+/// means the same folder (D-085).
+fn absolute_folder(dir: &Path) -> Result<PathBuf> {
+    std::path::absolute(dir)
+        .map_err(|err| folder_error(format!("{} cannot be made absolute: {err}", dir.display())))
+}
+
+fn folder_error(detail: String) -> Error {
+    Error::new(Stage::ConfigLoad, ErrorKind::InvalidInput { detail })
+}
+
 /// Where the identity chain gets its metadata source.
 ///
 /// Going online is **an explicit choice**: `headshell` is a tool that works
@@ -2805,30 +3053,32 @@ pub fn default_lookup() -> Arc<dyn MetadataLookup> {
     Arc::new(OfflineLookup)
 }
 
-/// The variable that is the desktop's `--online` (D-076). It takes `1`
-/// (online) or `0` (offline); unset or empty is offline.
+/// The variable that decides the desktop's lookup mode for one launch,
+/// over the saved choice (D-076, D-082). It takes `1` (online) or `0`
+/// (offline); unset or empty leaves it to the saved choice.
 pub const ONLINE_ENV: &str = "HEADSHELL_ONLINE";
 
-/// The lookup mode [`ONLINE_ENV`] asks for.
-///
-/// A shell without command-line flags (the desktop) reads its `--online`
-/// from here, as the local provider reads `HEADSHELL_MUSIC_DIRS`.
+/// The lookup mode [`ONLINE_ENV`] asks for in this process; `None`: it is
+/// unset or empty.
 ///
 /// # Errors
 /// If the variable holds anything but `1` or `0`: a `true` or `yes` that went
 /// unrecognised would silently leave the user offline (K9).
-pub fn lookup_mode_from_env() -> Result<LookupMode> {
+pub fn lookup_mode_variable() -> Result<Option<LookupMode>> {
     match std::env::var(ONLINE_ENV) {
-        Ok(raw) => lookup_mode_of(Some(&raw)),
-        Err(std::env::VarError::NotPresent) => lookup_mode_of(None),
-        Err(std::env::VarError::NotUnicode(raw)) => lookup_mode_of(Some(&raw.to_string_lossy())),
+        Ok(raw) => lookup_variable_of(Some(&raw)),
+        Err(std::env::VarError::NotPresent) => lookup_variable_of(None),
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            lookup_variable_of(Some(&raw.to_string_lossy()))
+        }
     }
 }
 
-fn lookup_mode_of(raw: Option<&str>) -> Result<LookupMode> {
+fn lookup_variable_of(raw: Option<&str>) -> Result<Option<LookupMode>> {
     match raw.map(str::trim) {
-        None | Some("" | "0") => Ok(LookupMode::Offline),
-        Some("1") => Ok(LookupMode::Online),
+        None | Some("") => Ok(None),
+        Some("0") => Ok(Some(LookupMode::Offline)),
+        Some("1") => Ok(Some(LookupMode::Online)),
         Some(other) => Err(Error::new(
             Stage::ConfigLoad,
             ErrorKind::InvalidInput {
@@ -3080,6 +3330,8 @@ mod tests {
             &session.config.preferences_path(),
             &crate::preferences::Preferences {
                 play_from: Some(ProviderId::new("ytmusic")),
+                lookup: None,
+                music_dirs: None,
             },
         )
         .unwrap();
@@ -3239,15 +3491,140 @@ mod tests {
 
     #[test]
     fn the_online_variable_takes_one_or_zero_and_says_what_else_it_got() {
-        assert_eq!(lookup_mode_of(None).unwrap(), LookupMode::Offline);
-        assert_eq!(lookup_mode_of(Some("")).unwrap(), LookupMode::Offline);
-        assert_eq!(lookup_mode_of(Some("0")).unwrap(), LookupMode::Offline);
-        assert_eq!(lookup_mode_of(Some(" 1 ")).unwrap(), LookupMode::Online);
+        assert_eq!(lookup_variable_of(None).unwrap(), None);
+        assert_eq!(lookup_variable_of(Some("")).unwrap(), None);
+        assert_eq!(
+            lookup_variable_of(Some("0")).unwrap(),
+            Some(LookupMode::Offline)
+        );
+        assert_eq!(
+            lookup_variable_of(Some(" 1 ")).unwrap(),
+            Some(LookupMode::Online)
+        );
 
-        let err = lookup_mode_of(Some("true")).unwrap_err();
+        let err = lookup_variable_of(Some("true")).unwrap_err();
         assert_eq!(err.stage(), Stage::ConfigLoad);
         let text = err.chain_text();
         assert!(text.contains("HEADSHELL_ONLINE is `true`"), "{text}");
         assert!(text.contains("1 (online) or 0 (offline)"), "{text}");
+    }
+
+    /// D-082: the variable holds one launch over the saved choice; nothing
+    /// set is offline, and the report says who decided.
+    #[test]
+    fn the_variable_overrides_the_saved_choice_and_nothing_set_is_offline() {
+        use LookupMode::{Offline, Online};
+        let cases = [
+            (None, None, Offline, OnlineSource::Default),
+            (Some(Online), None, Online, OnlineSource::Saved),
+            (Some(Offline), None, Offline, OnlineSource::Saved),
+            (Some(Online), Some(Offline), Offline, OnlineSource::Variable),
+            (None, Some(Online), Online, OnlineSource::Variable),
+        ];
+        for (saved, variable, mode, source) in cases {
+            let choice = OnlineChoice::decide(saved, variable);
+            assert_eq!(
+                (choice.mode, choice.source),
+                (mode, source),
+                "saved {saved:?}, variable {variable:?}"
+            );
+            assert_eq!((choice.saved, choice.variable), (saved, variable));
+        }
+    }
+
+    /// D-085: adding keeps what was there — the system's folder when nothing
+    /// was chosen — and adding twice changes nothing; taking a folder off
+    /// that is not there is an error that lists the folders; the last one
+    /// off leaves an empty choice. (What the variable of whoever runs the
+    /// tests says is not asserted: only the saved choice.)
+    #[test]
+    fn music_folders_are_added_and_taken_off_the_chosen_ones() {
+        let dir = TempDir::new("music-folders");
+        let config = Config::with_data_dir(dir.path().join("data"));
+        let session = Session::open(config).unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        let first = session.add_music_folder(&a).unwrap();
+        assert!(first.changed);
+        let saved = first.folders.saved.clone().unwrap();
+        assert_eq!(saved.last(), Some(&a));
+        for system in &first.folders.system {
+            assert!(
+                saved.contains(system),
+                "the system's folder stays: {system:?}"
+            );
+        }
+        assert!(
+            !session.add_music_folder(&a).unwrap().changed,
+            "already there"
+        );
+
+        let err = session.remove_music_folder(&b).unwrap_err();
+        assert_eq!(err.stage(), Stage::ConfigLoad);
+        assert!(
+            err.chain_text().contains(&a.display().to_string()),
+            "{}",
+            err.chain_text()
+        );
+
+        let missing = session
+            .add_music_folder(&dir.path().join("nowhere"))
+            .unwrap_err();
+        assert!(
+            missing.chain_text().contains("cannot be opened"),
+            "{}",
+            missing.chain_text()
+        );
+
+        let mut left = session.music_folders().unwrap().folders.saved.unwrap();
+        for folder in left.clone() {
+            left = session
+                .remove_music_folder(&folder)
+                .unwrap()
+                .folders
+                .saved
+                .unwrap();
+        }
+        assert!(
+            left.is_empty(),
+            "the last one off leaves an empty choice, not none"
+        );
+    }
+
+    /// The choice is kept in `preferences.json` beside the play-from one,
+    /// which it leaves alone. (The mode itself is not asserted: it follows
+    /// the variable of whoever runs the tests.)
+    #[test]
+    fn the_online_choice_is_saved_beside_the_others() {
+        let dir = TempDir::new("online-choice");
+        let config = Config::with_data_dir(dir.path());
+        let path = config.preferences_path();
+        let session = Session::open(config).unwrap();
+        crate::preferences::save(
+            &path,
+            &crate::preferences::Preferences {
+                play_from: Some(ProviderId::new("local")),
+                lookup: None,
+                music_dirs: None,
+            },
+        )
+        .unwrap();
+
+        let report = session.set_online(LookupMode::Online).unwrap();
+        assert_eq!(report.online.saved, Some(LookupMode::Online));
+        assert_eq!(report.diag.failed_at, None);
+        let kept = crate::preferences::load(&path).unwrap();
+        assert_eq!(kept.lookup, Some(LookupMode::Online));
+        assert_eq!(kept.play_from, Some(ProviderId::new("local")));
+
+        let off = session.set_online(LookupMode::Offline).unwrap();
+        assert_eq!(off.online.saved, Some(LookupMode::Offline));
+        assert_eq!(
+            session.online().unwrap().online.saved,
+            Some(LookupMode::Offline)
+        );
     }
 }

@@ -199,12 +199,15 @@ async fn a_slash_in_the_artist_name_does_not_break_the_query() {
     };
     // `400` **fails**: Lucene escaping is our job. Only transport-layer
     // errors are skipped.
-    let Some(found) = skip_if_unreachable(
+    let Some(page) = skip_if_unreachable(
         "a_slash_in_the_artist_name",
-        lookup.search_recordings("AC/DC", "Back in Black").await,
+        lookup
+            .search_recordings("AC/DC", "Back in Black", None, 25)
+            .await,
     ) else {
         return;
     };
+    let found = page.candidates;
 
     assert!(
         !found.is_empty(),
@@ -214,6 +217,31 @@ async fn a_slash_in_the_artist_name_does_not_break_the_query() {
         found.iter().any(|c| c.artist.contains("AC/DC")),
         "candidates returned: {:?}",
         found.iter().map(|c| &c.artist).collect::<Vec<_>>()
+    );
+}
+
+/// What D-081 relies on: MusicBrainz scores every exact `Creep` alike — 100,
+/// or 99 where a replica's statistics round it down; 149 of them, measured
+/// 2026-10-02 — so the first 25 end inside the top tier, and the answer has
+/// to say so. If MusicBrainz ever ranks them apart, this fails, and the
+/// tier rule must be looked at again.
+#[tokio::test]
+async fn a_first_page_of_creep_ends_inside_its_top_group() {
+    let Some(lookup) = lookup_or_skip("a_first_page_of_creep") else {
+        return;
+    };
+    let Some(page) = skip_if_unreachable(
+        "a_first_page_of_creep",
+        lookup
+            .search_recordings("Radiohead", "Creep", None, 25)
+            .await,
+    ) else {
+        return;
+    };
+    assert_eq!(page.candidates.len(), 25);
+    assert!(
+        page.top_continues,
+        "the first 25 of 149 alike scored recordings must say the top goes on"
     );
 }
 
@@ -243,12 +271,13 @@ async fn a_live_take_does_not_win_over_the_studio_take() {
         return;
     };
     // The invariant is this: **a live recording cannot win.** No winner at
-    // all does not break this invariant either, and it can happen on the real
-    // catalog — MusicBrainz serves searches from several index replicas, and
-    // the 238-second studio recording is not in the first 25 of every
-    // replica. Then D-046's rule steps in and claims no authority, which is
-    // also the right thing. Writing the test as "a candidate must always come
-    // back" would tie what it measures to whichever replica the network hits.
+    // all does not break this invariant either: two plain recordings of
+    // exactly the same length would be a tie, and the right answer to a tie
+    // is no authority. Since D-081 the search narrows to the length window
+    // (33 recordings, read whole in one response), so on today's catalog the
+    // 238 026 ms studio take wins on every replica —
+    // `the_same_query_with_a_duration_always_yields_the_same_canonical_id`
+    // holds that; this test holds the invariant.
     let Some(matched) = resolution.matched else {
         assert_eq!(
             resolution.method,
@@ -256,8 +285,9 @@ async fn a_live_take_does_not_win_over_the_studio_take() {
             "with no candidate the method must be the local key"
         );
         eprintln!(
-            "chosen: none — {} candidates could not be told apart, no authority claimed",
-            resolution.tied_candidates
+            "chosen: none — {} candidates could not be told apart (unread equals: {}), \
+             no authority claimed",
+            resolution.tied_candidates, resolution.unread_equals
         );
         return;
     };
@@ -276,11 +306,16 @@ async fn a_live_take_does_not_win_over_the_studio_take() {
 /// An ambiguous query without a duration must get **no** authority at all
 /// (D-046).
 ///
-/// `Radiohead — Creep`, with no duration given, leaves 9–10 candidates with
+/// `Radiohead — Creep`, with no duration given, leaves 39 candidates with
 /// the same score and the same rank on the real catalog. Any rule that picks
 /// among them is arbitrary, and since MusicBrainz serves searches from
 /// several index replicas it is **unstable across runs** too. The right
 /// answer: do not make up an identity.
+///
+/// D-081: this test turned CI red when one replica's first page of 25 held a
+/// single plain recording, and the resolver took it for a winner. The
+/// resolver now reads the first hundred while the top tier goes on and the
+/// outcome can still change, so every replica ends at the same tie.
 ///
 /// This test's sibling, `a_live_take_does_not_win_over_the_studio_take`,
 /// asks the same query with a duration, and there an authority is expected —
@@ -300,8 +335,11 @@ async fn an_ambiguous_query_without_duration_claims_no_authority() {
         return;
     };
     eprintln!(
-        "query without a duration: {} ({}, tied {})",
-        resolution.canonical_id, resolution.method, resolution.tied_candidates
+        "query without a duration: {} ({}, tied {}, unread equals {})",
+        resolution.canonical_id,
+        resolution.method,
+        resolution.tied_candidates,
+        resolution.unread_equals
     );
 
     assert_eq!(
@@ -349,6 +387,36 @@ async fn the_same_query_always_yields_the_same_canonical_id() {
         first.canonical_id, second.canonical_id,
         "the same query gave two different identities: the choice among equally \
          scored candidates must have depended on the server's order"
+    );
+}
+
+/// The same, with a duration (D-081): reading the search's later pages made
+/// this flip between an MBID and the local key — the pages came from
+/// different replicas, and only some reads were whole. The length window
+/// reads one response, whole, every time.
+#[tokio::test]
+async fn the_same_query_with_a_duration_always_yields_the_same_canonical_id() {
+    let name = "the_same_query_with_a_duration";
+    let Some(lookup) = lookup_or_skip(name) else {
+        return;
+    };
+    let resolver = Resolver::new(lookup);
+    let track = TrackRef::new("Radiohead", "Creep").with_duration_ms(Some(238_000));
+
+    let (Some(first), Some(second)) = (
+        skip_if_unreachable(name, resolver.resolve(&track).await),
+        skip_if_unreachable(name, resolver.resolve(&track).await),
+    ) else {
+        return;
+    };
+    eprintln!(
+        "with a duration: {} ({}), then {} ({})",
+        first.canonical_id, first.method, second.canonical_id, second.method
+    );
+    assert_eq!(first.canonical_id, second.canonical_id);
+    assert!(
+        !first.unread_equals,
+        "the length window must hold Creep's tier whole"
     );
 }
 

@@ -26,7 +26,8 @@
     "confidence": 0.2,
     "matched": null,
     "method": "local_key",
-    "tied_candidates": 1
+    "tied_candidates": 1,
+    "unread_equals": false
   },
   "title": "Creep"
 }

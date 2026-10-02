@@ -1209,6 +1209,7 @@ mod tests {
             confidence: 0.2,
             matched: None,
             tied_candidates: 1,
+            unread_equals: false,
         };
         library
             .set_resolution(&track_key("Radiohead", "Creep"), &resolution)

@@ -1066,6 +1066,17 @@ confidence". The accuracy set went 97.2% → 100% (72 cases); a new class,
 > stayed at 100%, and the chain now finds **the same** recording the ISRC link
 > gives — before the fix it picked the wrong recording.
 
+> **D-081 — the set is read whole, or nothing is claimed.** Q3 judged a tie
+> within the 25 a replica returned; one replica's 25 held a single plain
+> `Creep`, and the chain claimed it — CI went red. Now a winner counts only
+> when the source's top tier was read whole: the first 25, and if the tier
+> goes on, the first 100 **in one response** (a next page comes from another
+> replica's ranking — measured). A duration narrows the search to ±15 s
+> first (`dur:[…]`), which reads `Creep`'s 33 exact recordings whole and gives
+> the studio take every time. A tier wider than one response claims nothing;
+> `Resolution::unread_equals` says so. At most one more request — D-046's
+> objection to paging was every match, ~9 s a query.
+
 > DECISION POINT: this round's scope and order. **CLOSED — D-045.** The round
 > was opened and covers **all three** (§2.3 + §2.4 + §2.5); the order is §2.3 →
 > §2.4 → §2.5. Inside §2.3 the order is the reverse of what the PLAN wrote:
@@ -2084,7 +2095,8 @@ rows: the core had no covers (§3.9's "not done").
    the album itself — and the Cover Art Archive's front for it or its release
    group. No Spotify (K4), no service that wants a key.
 2. **Online is a choice:** the CLI's `--online`, the desktop's
-   `HEADSHELL_ONLINE=1`. Offline, a cover that was not looked up says so —
+   `HEADSHELL_ONLINE=1` — since §3.15 a setting, the variable deciding one
+   launch over it. Offline, a cover that was not looked up says so —
    "not looked up" and "not found" are different answers (K9). MusicBrainz is
    asked at most once every 1.1 s by identity and covers together.
 3. **The cache** is `<data>/artwork/`: images named by their content and an
@@ -2106,8 +2118,7 @@ rows: the core had no covers (§3.9's "not done").
    The catalog's `soundcloud` 0.3.0 and `ytmusic` 0.5.0 give covers.
 
 **Not done:** covers in the player bar and anywhere else (not asked); an
-in-app switch for online (by D-033 a CLI command first — the variable stands in
-for it); an MP4 fixture (symphonia's `covr` path is read by the same code, but
+in-app switch for online (done in §3.15); an MP4 fixture (symphonia's `covr` path is read by the same code, but
 no fixture holds it).
 
 **Testing:** the chain on canned answers (the namesake-recording trap among
@@ -2333,6 +2344,88 @@ CLI (a snapshot).
 the catalog and from the plugin as a fallback, picked with the pointer and
 the keyboard; adding to an empty and a full queue; choosing the plugin to
 play from.
+
+### 3.15 Settings: the desktop's online choice — DONE (D-082)
+
+**The problem:** the desktop asked MusicBrainz and the Cover Art Archive only
+when it was started with `HEADSHELL_ONLINE=1` (§3.10). Started from its icon it
+never did, and nothing on screen said how to change that but a variable.
+
+**Done:**
+
+1. **A choice kept in `preferences.json`** (`lookup`), offline until chosen.
+   `HEADSHELL_ONLINE` decides one launch over it; who decided is always said.
+2. **`headshell online [on|off]`** shows and writes it. It is the desktop's: the
+   CLI goes online only with `--online`, run by run (the user's choice).
+3. **A settings section**, the system group's third row (`Ctrl`+`0`): what
+   online asks, a switch, and a note on the variable's hold, an online import's
+   cost and the lyrics' and plugins' own rules. The switch takes effect at once
+   — the cover worker starts over in the new mode — and a choice saved from the
+   CLI while the app runs takes effect when the settings are read.
+
+**Testing:** who decides, as a table; the choice beside `play_from`; the CLI's
+four states and a CLI run staying offline with the desktop online (a
+snapshot); `ui_contract.rs`.
+
+**Verification:** the §3.9 container: off → on with a real album's cover
+arriving without a restart, off again, the CLI's change picked up while the app
+ran, a launch held by the variable, the row's menu, the pressed switch, 900×600.
+
+### 3.16 A simpler interface; the debug mode — DONE (D-083)
+
+**The problem:** the interface showed the developer's details to everyone: a
+notice's `STEP:` code first, raw JSON, provider and plugin ids, capability
+flags, `api` versions, hashes, zero counts, decision numbers in a note, and a
+whole diagnostics section.
+
+**Done:**
+
+1. **Three layers:** what the user acts on in front; what explains it — K9's
+   summaries among them — one level deeper for everyone; the developer's
+   details only in the debug mode. Nothing was removed: the debug mode shows
+   what the interface showed before.
+2. **The debug mode:** a switch at the bottom of settings, kept in `ui.json`
+   beside the theme; `DEBUG=1` (exactly `1`) holds a launch on. It also raises
+   the log to `debug`.
+3. **Notices** name their stage in plain words (all 25 of the core's), the code
+   and the chain under "details". Partial-success counts show plainly and only
+   when not zero; the import report leads with what changed in the library.
+4. **The source label** only for tracks not from the local files, by the
+   provider's name.
+
+**Testing:** the shared `ui.json`, the variable's values, every stage's words
+(`ui_contract.rs`).
+
+**Verification:** the §3.9 container, every section before and after, the
+mode on, off and held by the variable, 900×600.
+
+### 3.17 The interface speaks to the listener — DONE (D-084)
+
+**The problem:** after §3.16 the words still explained how the app works — the
+engine, the catalog's repository, the data directory, the CLI — and named
+things as the code does: providers, plugins, consent, secrets, scan.
+
+**Done:** every section says in a warm sentence what it is for; how it works
+is a paragraph for the debug mode. Everyday names (sources, services, keys,
+browse, allow, revoke, check for new music, songs, plays). Notices say what to
+do; the core's cause is in their details. The ids, the theme contract and the
+CLI are unchanged.
+
+**Verification:** the §3.9 container, every section, three layout faults fixed.
+
+### 3.18 Music folders chosen in the app — DONE (D-085)
+
+**The problem:** the local files came only from `HEADSHELL_MUSIC_DIRS` or the
+system's music folder; the interface could only point at a variable.
+
+**Done:** the core keeps the folders (`preferences.json`), the variable still
+decides a run that sets it; `headshell music-dirs [add|remove]`; sources →
+music folders with *add a folder…* and a remove button per folder, a change
+checking for new music at once.
+
+**Testing / verification:** the order and the changes in the core, the CLI end
+to end through a scan, the container — a folder added through the dialog and
+taken off.
 
 ---
 

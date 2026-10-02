@@ -1,0 +1,32 @@
+{
+  "changed": true,
+  "diag": {
+    "command": "<variable>",
+    "counters": {},
+    "env": {
+      "arch": "<variable>",
+      "data_dir": "<variable>",
+      "headshell_version": "<variable>",
+      "os": "<variable>"
+    },
+    "error_chain": [],
+    "failed_at": null,
+    "finished_at": "<variable>",
+    "notes": [],
+    "started_at": "<variable>"
+  },
+  "folders": {
+    "dirs": [
+      "Music",
+      "extra"
+    ],
+    "saved": [
+      "Music",
+      "extra"
+    ],
+    "source": "<variable>",
+    "system": [
+      "Music"
+    ]
+  }
+}

@@ -1,5 +1,5 @@
-//! The user's choices (D-080): today, the provider the play box searches
-//! first.
+//! The user's choices: the provider the play box searches first (D-080),
+//! whether the desktop goes online (D-082), and the music folders (D-085).
 //!
 //! A file of its own, `preferences.json`, not the database: a choice is not
 //! library data — the line D-021 drew for `servers.json`. A missing file is
@@ -7,13 +7,14 @@
 //! that says so (K9), never a silent default that would look like the choice
 //! was lost.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::diag::Stage;
 use crate::error::{Error, ErrorKind, Result, io_err};
 use crate::ids::ProviderId;
+use crate::session::LookupMode;
 
 /// The choices, as they are written.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +23,16 @@ pub struct Preferences {
     /// nothing chosen, the registry's first one that can play (local files).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_from: Option<ProviderId>,
+    /// Whether the desktop asks MusicBrainz and the Cover Art Archive
+    /// (D-082); `None`: nothing chosen — offline. The CLI does not read it:
+    /// every run there chooses with `--online`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<LookupMode>,
+    /// The music folders chosen in the app (D-085); `None`: nothing chosen —
+    /// the system's music folder. An empty list is a choice: no local
+    /// folders. `HEADSHELL_MUSIC_DIRS` still decides a run that sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_dirs: Option<Vec<PathBuf>>,
 }
 
 /// Reads the choices; no file is no choice.
@@ -75,9 +86,25 @@ mod tests {
 
         let chosen = Preferences {
             play_from: Some(ProviderId::new("ytmusic")),
+            lookup: Some(LookupMode::Online),
+            music_dirs: Some(vec![PathBuf::from("/music")]),
         };
         save(&path, &chosen).unwrap();
         assert_eq!(load(&path).unwrap(), chosen);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""lookup": "online""#), "{text}");
+    }
+
+    /// A file written before D-082 has no `lookup`: it reads as nothing
+    /// chosen, and the play-from choice in it survives.
+    #[test]
+    fn a_file_from_before_the_online_choice_still_reads() {
+        let dir = TempDir::new("preferences-old");
+        let path = dir.path().join("preferences.json");
+        std::fs::write(&path, br#"{ "play_from": "local" }"#).unwrap();
+        let read = load(&path).unwrap();
+        assert_eq!(read.play_from, Some(ProviderId::new("local")));
+        assert_eq!(read.lookup, None);
     }
 
     #[test]

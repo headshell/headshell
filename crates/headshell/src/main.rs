@@ -16,15 +16,18 @@
 
 mod commands;
 mod core_thread;
+mod debug;
 mod env;
 mod state;
 mod theme;
+mod ui_settings;
 
 use std::process::ExitCode;
 
 use headshell_core::config::Config;
 use tokio::sync::mpsc;
 
+use crate::debug::{DebugSwitch, Variable};
 use crate::state::{AppState, Core};
 use crate::theme::ThemeStore;
 
@@ -34,7 +37,24 @@ fn main() -> ExitCode {
     // process is born — both after Tauri's setup, so anything after here is
     // too late.
     env::fixup();
-    init_tracing();
+    // The debug mode is known before the log starts: while it is on, the log
+    // is the developer's too (D-083). Where the data directory is comes first;
+    // if it cannot be found, `open_core` says so below.
+    let config = Config::discover();
+    let variable = Variable::read();
+    let held = variable == Variable::On;
+    let saved = config.as_ref().is_ok_and(|config| {
+        DebugSwitch::new(config.data_dir(), false)
+            .mode()
+            .is_ok_and(|mode| mode.saved)
+    });
+    init_tracing(held || saved);
+    if let Variable::Ignored(value) = &variable {
+        tracing::warn!(
+            "{}={value:?} is not 1 — the debug mode follows the setting",
+            debug::DEBUG_ENV
+        );
+    }
 
     // The context is generated once: it embeds the interface files in the
     // binary, and both paths (the app or the error window) use the same one.
@@ -43,7 +63,7 @@ fn main() -> ExitCode {
     // The library is opened **before** the window: if the data directory
     // is missing or the database is corrupt, the user should look at an
     // error that says its stage, not at an empty window.
-    let (core, themes) = match open_core() {
+    let (core, themes, debug) = match open_core(config, held) {
         Ok(opened) => opened,
         Err(text) => {
             report(&text);
@@ -52,7 +72,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(core, themes, context) {
+    match run(core, themes, debug, context) {
         Ok(()) => ExitCode::SUCCESS,
         Err(text) => {
             // If the window could not be opened at all there is no surface to
@@ -68,14 +88,17 @@ fn report(text: &str) {
     eprintln!("\nfor details: headshell diag");
 }
 
-fn open_core() -> Result<(Core, ThemeStore), String> {
-    let config = Config::discover().map_err(|err| err.chain_text())?;
-    // The theme store does not go to the core; it only knows the data directory
-    // (§3.3).
+fn open_core(
+    config: headshell_core::Result<Config>,
+    debug_held: bool,
+) -> Result<(Core, ThemeStore, DebugSwitch), String> {
+    let config = config.map_err(|err| err.chain_text())?;
+    // The theme store and the debug switch do not go to the core; they only
+    // know the data directory (§3.3, D-083).
     let themes = ThemeStore::new(config.data_dir());
-    let lookup = headshell_core::session::lookup_mode_from_env().map_err(|err| err.chain_text())?;
-    let core = Core::open(config, lookup).map_err(|err| err.chain_text())?;
-    Ok((core, themes))
+    let debug = DebugSwitch::new(config.data_dir(), debug_held);
+    let core = Core::open(config).map_err(|err| err.chain_text())?;
+    Ok((core, themes, debug))
 }
 
 /// Shows the error in a window if startup failed (D-070).
@@ -141,7 +164,12 @@ fn encode_fragment(text: &str) -> String {
     out
 }
 
-fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), String> {
+fn run(
+    core: Core,
+    themes: ThemeStore,
+    debug: DebugSwitch,
+    context: tauri::Context,
+) -> Result<(), String> {
     let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
 
     tauri::Builder::default()
@@ -149,7 +177,7 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
         // file is the core — which is why `capabilities/default.json` grants no
         // `fs` permission.
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new(jobs_tx, themes))
+        .manage(AppState::new(jobs_tx, themes, debug))
         .setup(move |app| {
             // The main window is built here rather than from the config alone
             // (`create: false`): the config has no switch for the clipboard. The
@@ -186,6 +214,9 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::provider_use,
             commands::provider_test,
             commands::provider_scan,
+            commands::music_dirs,
+            commands::music_dirs_add,
+            commands::music_dirs_remove,
             commands::servers_list,
             commands::server_add,
             commands::server_remove,
@@ -238,6 +269,10 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
             commands::diag,
             commands::diag_text,
             commands::environment,
+            commands::online,
+            commands::online_set,
+            commands::debug_mode,
+            commands::debug_set,
         ])
         .run(context)
         .map_err(|err| format!("STEP: PLAYBACK_OUTPUT\n  could not open the window: {err}"))
@@ -248,10 +283,12 @@ fn run(core: Core, themes: ThemeStore, context: tauri::Context) -> Result<(), St
 }
 
 /// Logging goes to `stderr`; `println!` was only for user-facing output, and
-/// a GUI has no such output.
-fn init_tracing() {
+/// a GUI has no such output. `RUST_LOG` decides when it is set; otherwise the
+/// debug mode raises the level from warnings to the developer's (D-083).
+fn init_tracing(debug: bool) {
+    let level = if debug { "debug" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("headshell_core=warn,headshell=warn")
+        tracing_subscriber::EnvFilter::new(format!("headshell_core={level},headshell={level}"))
     });
     tracing_subscriber::fmt()
         .with_env_filter(filter)

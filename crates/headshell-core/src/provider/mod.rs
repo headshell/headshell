@@ -487,13 +487,16 @@ pub fn default_registry(config: &crate::config::Config) -> crate::Result<Provide
 /// `http` is `None` only the local provider is set up.
 ///
 /// # Errors
-/// If the server record file cannot be read or is corrupt.
+/// If the server record file or `preferences.json` (the music folders,
+/// D-085) cannot be read or is corrupt.
 pub fn registry_with_http(
     config: &crate::config::Config,
     http: Option<Arc<dyn crate::net::HttpClient>>,
 ) -> crate::Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
-    registry.register(Arc::new(local::LocalProvider::new(config.music_dirs())));
+    registry.register(Arc::new(local::LocalProvider::new(
+        config.music_folders()?.dirs,
+    )));
 
     if let Some(http) = http {
         for server in remote::load_servers(&config.servers_path())? {

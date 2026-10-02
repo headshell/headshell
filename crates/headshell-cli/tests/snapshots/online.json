@@ -1,0 +1,23 @@
+{
+  "diag": {
+    "command": "<variable>",
+    "counters": {},
+    "env": {
+      "arch": "<variable>",
+      "data_dir": "<variable>",
+      "headshell_version": "<variable>",
+      "os": "<variable>"
+    },
+    "error_chain": [],
+    "failed_at": null,
+    "finished_at": "<variable>",
+    "notes": [],
+    "started_at": "<variable>"
+  },
+  "online": {
+    "mode": "online",
+    "saved": "online",
+    "source": "<variable>",
+    "variable": null
+  }
+}
