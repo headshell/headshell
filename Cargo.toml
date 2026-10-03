@@ -13,7 +13,7 @@ exclude = ["spike", "parked"]
 
 [workspace.package]
 # D-005: the license was settled as MIT OR Apache-2.0.
-version = "0.0.3-beta"
+version = "0.0.4-beta"
 edition = "2024"
 # D-069: 1.85 → 1.87. `rquickjs` 0.14 (the plugin engine) needs 1.87. The last version
 # that fits 1.85 was 0.11; rather than missing three versions of QuickJS-NG fixes, the
