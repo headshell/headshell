@@ -486,6 +486,14 @@ pub struct PluginManifest {
     /// is refused before, with its own message ([`Self::parse`]).
     #[serde(default)]
     pub video: bool,
+    /// Does the plugin name songs like one of its items (api 6, D-087)?
+    /// **Required**, as the three above are: `true` makes the engine expect
+    /// a `related(id, limit)` export, which the recommendations ask.
+    ///
+    /// The `default` only lets the struct parse; a manifest without the field
+    /// is refused before, with its own message ([`Self::parse`]).
+    #[serde(default)]
+    pub related: bool,
     /// An optional one-sentence description.
     #[serde(default)]
     pub description: Option<String>,
@@ -562,6 +570,7 @@ impl PluginManifest {
         require_declaration(&value, path, "artwork", ARTWORK_DECLARATION)?;
         require_declaration(&value, path, "lyrics", LYRICS_DECLARATION)?;
         require_declaration(&value, path, "video", VIDEO_DECLARATION)?;
+        require_declaration(&value, path, "related", RELATED_DECLARATION)?;
 
         let manifest: Self = serde_json::from_value(value).map_err(json_err)?;
         manifest.validate(expected_name, path)?;
@@ -655,9 +664,13 @@ const LYRICS_DECLARATION: &str = "a manifest says whether the plugin gives lyric
 const VIDEO_DECLARATION: &str = "a manifest says whether the plugin gives videos: \
      `\"video\": true` (it exports `resolve_video(id)`) or `\"video\": false`";
 
+/// What a missing `related` asks for (api 6, D-087).
+const RELATED_DECLARATION: &str = "a manifest says whether the plugin names similar songs: \
+     `\"related\": true` (it exports `related(id, limit)`) or `\"related\": false`";
+
 /// A yes-or-no a manifest must say — `artwork` (api 3, D-076), `lyrics`
-/// (api 4, D-078), `video` (api 5, D-086): `true` or `false`, nothing
-/// else, and not left out.
+/// (api 4, D-078), `video` (api 5, D-086), `related` (api 6, D-087):
+/// `true` or `false`, nothing else, and not left out.
 /// Whether a plugin gives something is said, never guessed.
 fn require_declaration(
     value: &serde_json::Value,
@@ -872,10 +885,11 @@ mod tests {
                 "name": "soundcloud",
                 "display_name": "SoundCloud",
                 "version": "0.2.0",
-                "api": 5,
+                "api": 6,
                 "artwork": false,
                 "lyrics": false,
                 "video": false,
+                "related": false,
                 "main": "main.js",
                 "capabilities": ["search", "stream"],
                 "permissions": {"net": ["api-v2.soundcloud.com", "*.sndcdn.com"]}
@@ -893,7 +907,7 @@ mod tests {
         let dir = temp_dir("soundcloud");
         write_manifest(
             &dir,
-            r#"{"name":"other","display_name":"X","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#,
+            r#"{"name":"other","display_name":"X","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#,
         );
         let err = PluginManifest::load(&dir).unwrap_err();
         assert_eq!(err.stage(), Stage::PluginLoad);
@@ -931,11 +945,11 @@ mod tests {
     fn api1_fields_are_refused_not_silently_ignored() {
         for (manifest, expected) in [
             (
-                r#"{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js","exec":["x"]}"#,
+                r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","exec":["x"]}"#,
                 "`exec` does not exist in api 2",
             ),
             (
-                r#"{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js",
+                r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js",
                     "permissions":{"net":[],"fs":["/home"]}}"#,
                 "`permissions.fs` does not exist in api 2",
             ),
@@ -960,7 +974,7 @@ mod tests {
             write_manifest(
                 &dir,
                 &format!(
-                    r#"{{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"{main}"}}"#
+                    r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"{main}"}}"#
                 ),
             );
             let err = PluginManifest::load(&dir).unwrap_err();
@@ -974,7 +988,7 @@ mod tests {
         let dir = temp_dir("p");
         write_manifest(
             &dir,
-            r#"{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"./src/main.js"}"#,
+            r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"./src/main.js"}"#,
         );
         assert!(PluginManifest::load(&dir).is_ok());
     }
@@ -1011,7 +1025,7 @@ mod tests {
             write_manifest(
                 &dir,
                 &format!(
-                    r#"{{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js","requires":[{entry}]}}"#
+                    r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","requires":[{entry}]}}"#
                 ),
             );
             let err = PluginManifest::load(&dir).unwrap_err();
@@ -1033,7 +1047,7 @@ mod tests {
         write_manifest(
             &dir,
             &format!(
-                r#"{{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js","requires":[{one},{one}]}}"#
+                r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","requires":[{one},{one}]}}"#
             ),
         );
         let err = PluginManifest::load(&dir).unwrap_err();
@@ -1213,13 +1227,13 @@ mod tests {
     fn a_manifest_must_say_whether_it_gives_lyrics() {
         let origin = Path::new("plugin.json");
         let silent =
-            r#"{"name":"echo","display_name":"E","api":5,"artwork":false,"main":"main.js"}"#;
+            r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
         let text = err.chain_text();
         assert!(text.contains("`lyrics` is missing"), "{text}");
         assert!(text.contains("`\"lyrics\": false`"), "{text}");
 
-        let wrong = r#"{"name":"echo","display_name":"E","api":5,"artwork":false,"lyrics":"yes","main":"main.js"}"#;
+        let wrong = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":"yes","main":"main.js"}"#;
         let err = PluginManifest::parse(wrong, "echo", origin).unwrap_err();
         assert!(
             err.chain_text().contains("must be true or false"),
@@ -1232,20 +1246,39 @@ mod tests {
     #[test]
     fn a_manifest_must_say_whether_it_gives_videos() {
         let origin = Path::new("plugin.json");
-        let silent = r#"{"name":"echo","display_name":"E","api":5,"artwork":false,"lyrics":false,"main":"main.js"}"#;
+        let silent = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
         let text = err.chain_text();
         assert!(text.contains("`video` is missing"), "{text}");
         assert!(text.contains("`\"video\": false`"), "{text}");
 
-        let video = r#"{"name":"echo","display_name":"E","api":5,"artwork":false,"lyrics":false,"video":true,"main":"main.js"}"#;
+        let video = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":true,"related":false,"main":"main.js"}"#;
         assert!(PluginManifest::parse(video, "echo", origin).unwrap().video);
+    }
+
+    /// api 6 (D-087): whether a plugin names similar songs is said, never
+    /// guessed.
+    #[test]
+    fn a_manifest_must_say_whether_it_names_similar_songs() {
+        let origin = Path::new("plugin.json");
+        let silent = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#;
+        let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
+        let text = err.chain_text();
+        assert!(text.contains("`related` is missing"), "{text}");
+        assert!(text.contains("`\"related\": false`"), "{text}");
+
+        let related = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"related":true,"main":"main.js"}"#;
+        assert!(
+            PluginManifest::parse(related, "echo", origin)
+                .unwrap()
+                .related
+        );
     }
 
     #[test]
     fn parse_applies_the_same_rules_as_load() {
         let origin = Path::new("https://catalog.example/index.json");
-        let raw = r#"{"name":"echo","display_name":"E","api":5,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#;
+        let raw = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#;
         assert!(PluginManifest::parse(raw, "echo", origin).is_ok());
 
         let err = PluginManifest::parse(raw, "other", origin).unwrap_err();
@@ -1255,12 +1288,12 @@ mod tests {
             err.chain_text()
         );
 
-        let newer = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#;
+        let newer = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(newer, "echo", origin).unwrap_err();
         assert!(
             matches!(
                 err.kind(),
-                ErrorKind::PluginIncompatible { plugin_api: 6, .. }
+                ErrorKind::PluginIncompatible { plugin_api: 7, .. }
             ),
             "{err:?}"
         );
@@ -1271,7 +1304,7 @@ mod tests {
         let origin = Path::new("plugin.json");
         for (main, expected) in [("main.js", "main.js"), ("./src/main.js", "src/main.js")] {
             let raw = format!(
-                r#"{{"name":"p","display_name":"P","api":5,"artwork":false,"lyrics":false,"video":false,"main":"{main}"}}"#
+                r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"{main}"}}"#
             );
             let manifest = PluginManifest::parse(&raw, "p", origin).unwrap();
             assert_eq!(manifest.main_file(), expected);

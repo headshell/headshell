@@ -46,6 +46,11 @@ pub struct Preferences {
     /// folders. `HEADSHELL_MUSIC_DIRS` still decides a run that sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music_dirs: Option<Vec<PathBuf>>,
+    /// When recommendations were last reset (D-087), in ms: the taste is
+    /// read from the listens after it. `None`: never reset — the whole
+    /// history counts. The listens before it are not deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommend_since: Option<i64>,
 }
 
 /// Reads the choices; no file is no choice.
@@ -103,6 +108,7 @@ mod tests {
             video_from: Some(ProviderId::new("youtube")),
             lookup: Some(LookupMode::Online),
             music_dirs: Some(vec![PathBuf::from("/music")]),
+            recommend_since: Some(1_700_000_000_000),
         };
         save(&path, &chosen).unwrap();
         assert_eq!(load(&path).unwrap(), chosen);

@@ -3495,11 +3495,353 @@ kbd {
   word-break: break-word;
 }
 
+/* ————————————————— for you (D-087)
+ * A card per section, its songs in a grid of rows that reflows from one
+ * column to three with the window. The cover slot is the suggestions' small
+ * record until a cover arrives; on hover a play mark lies over it. */
+
+.for-you-sources {
+  margin: 0 0 20px;
+}
+
+.for-you-sections {
+  transition: opacity var(--headshell-duration) linear;
+}
+
+/* Asking again: the old picks stay, dimmed, until the new ones arrive. */
+.for-you-sections.loading {
+  opacity: 0.55;
+}
+
+.for-you-section {
+  padding: 14px 10px 10px;
+}
+
+.for-you-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 8px 10px;
+}
+
+.for-you-heading {
+  min-width: 0;
+}
+
+.for-you-title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 17px;
+  letter-spacing: -0.012em;
+}
+
+.for-you-heading .hint {
+  margin: 2px 0 0;
+}
+
+.for-you-play-all {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.for-you-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  column-gap: 8px;
+}
+
+.for-you-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
+  column-gap: 12px;
+  align-items: center;
+  min-height: 56px;
+  padding: 6px 8px;
+  border-radius: var(--headshell-radius-sm);
+  outline: none;
+}
+
+.for-you-row:hover,
+.for-you-row:focus-visible {
+  background: var(--headshell-surface-raised);
+}
+
+.for-you-row:focus-visible {
+  box-shadow: 0 0 0 2px var(--headshell-accent);
+}
+
+/* "Not for me": the row folds away after it fades. */
+.for-you-row.leaving {
+  overflow: hidden;
+  min-height: 0;
+  padding-block: 0;
+  pointer-events: none;
+  transition:
+    height 220ms ease-out,
+    padding 220ms ease-out;
+}
+
+.for-you-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background:
+    radial-gradient(circle, var(--headshell-accent) 0 11%, var(--vinyl) 12% 40%, transparent 41%),
+    var(--headshell-bg);
+}
+
+.for-you-art:hover {
+  border: 0;
+}
+
+.for-you-art img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* The play mark: there on hover and focus, over the cover. */
+.for-you-art-play {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background: rgb(0 0 0 / 42%);
+  color: #fff;
+  opacity: 0;
+  transition: opacity var(--headshell-duration) linear;
+}
+
+.for-you-row:hover .for-you-art-play,
+.for-you-row:focus-within .for-you-art-play {
+  opacity: 1;
+}
+
+.for-you-main {
+  display: grid;
+  min-width: 0;
+}
+
+.for-you-song,
+.for-you-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.for-you-song {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.for-you-sub,
+.for-you-genres,
+.for-you-time {
+  color: var(--headshell-text-dim);
+  font-size: 12px;
+}
+
+.for-you-genres {
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.for-you-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.for-you-note {
+  margin-top: 4px;
+}
+
+/* The shelf: the top picks as square tiles in one sideways-scrolling row,
+ * snapping to a tile's edge. The edges fade only where tiles go on; the
+ * arrows page through it. A tile without a cover is a record on a colour of
+ * its artist's (`--tile-hue`, set by the script). */
+.for-you-shelf {
+  margin: 0 0 28px;
+}
+
+.shelf-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+
+.shelf-arrows {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.shelf-track {
+  --shelf-fade: 40px;
+  display: flex;
+  gap: 18px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  padding: 2px 0 6px;
+  outline: none;
+  mask-image: linear-gradient(to right, transparent, #000 var(--shelf-fade), #000 calc(100% - var(--shelf-fade)), transparent);
+}
+
+.shelf-track::-webkit-scrollbar {
+  display: none;
+}
+
+.shelf-track.at-start {
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--shelf-fade)), transparent);
+}
+
+.shelf-track.at-end {
+  mask-image: linear-gradient(to right, transparent, #000 var(--shelf-fade));
+}
+
+.shelf-track.at-start.at-end {
+  mask-image: none;
+}
+
+.shelf-tile {
+  --tile-hue: 30;
+  display: grid;
+  flex: 0 0 168px;
+  min-width: 0;
+  scroll-snap-align: start;
+  border-radius: var(--headshell-radius-lg);
+  outline: none;
+}
+
+.shelf-tile.leaving {
+  overflow: hidden;
+  pointer-events: none;
+  transition: flex-basis 220ms ease-out;
+}
+
+.shelf-art {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  margin: 0 0 9px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--headshell-radius-lg);
+  background:
+    radial-gradient(circle, hsl(var(--tile-hue) 70% 66%) 0 6%, var(--vinyl) 6.5% 33%, transparent 33.5%),
+    linear-gradient(145deg, hsl(var(--tile-hue) 45% 38%), hsl(calc(var(--tile-hue) + 48) 42% 17%));
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 30%),
+    0 8px 18px rgb(0 0 0 / 22%);
+}
+
+.shelf-art:hover {
+  border: 0;
+}
+
+.shelf-tile:focus-visible .shelf-art {
+  box-shadow:
+    0 0 0 2px var(--headshell-accent),
+    0 8px 18px rgb(0 0 0 / 22%);
+}
+
+.shelf-art img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* The play button: rises into the corner on hover and focus. */
+.shelf-play {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--headshell-accent);
+  color: var(--headshell-bg);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+  opacity: 0;
+  translate: 0 6px;
+  transition:
+    opacity var(--headshell-duration) linear,
+    translate 180ms ease-out;
+}
+
+.shelf-play .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.shelf-tile:hover .shelf-play,
+.shelf-tile:focus-within .shelf-play {
+  opacity: 1;
+  translate: 0 0;
+}
+
+.shelf-song,
+.shelf-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-song {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.shelf-sub {
+  color: var(--headshell-text-dim);
+  font-size: 12px;
+}
+
+.setting-action {
+  flex: none;
+}
+
 /* ————————————————— accessibility preferences */
 
 /* Reduce motion: no position or scale motion, loops stop; opacity
  * transitions stay (the same rule for springs is in `motion.js`). */
 @media (prefers-reduced-motion: reduce) {
+  .for-you-row.leaving,
+  .shelf-tile.leaving {
+    transition: none;
+  }
+
+  .shelf-play {
+    translate: none;
+  }
+
   .busy::before,
   .eq i,
   .state.buffering,

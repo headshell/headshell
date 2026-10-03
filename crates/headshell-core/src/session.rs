@@ -1278,6 +1278,7 @@ impl Session {
             .map(|row| crate::provider::ProviderTrack {
                 id: row.id,
                 track: row.track,
+                genres: Vec::new(),
             })
             .collect();
         let (ranked, refused) = crate::video::rank(&item.track, rows);
@@ -1888,6 +1889,7 @@ impl Session {
                         track,
                         from_tags: entry.from_tags,
                         mtime_ms: entry.mtime_ms,
+                        genres: entry.genres,
                     }),
                     None => {
                         if let Some(existing) = library.catalog_get(&entry.id)? {
@@ -2081,6 +2083,286 @@ impl Session {
             query: query.to_owned(),
             play_from,
             steps,
+        })
+    }
+
+    /// Songs recommended from one source (D-087): `headshell recommend`.
+    /// The plan, the asking and the remembering in one — the CLI's way; the
+    /// desktop runs [`Self::recommend_plan`] and the asking apart, off the
+    /// thread that plays.
+    ///
+    /// # Errors
+    /// See [`Self::recommend_plan`]; and if what was learned cannot be
+    /// written.
+    pub async fn recommend(
+        &mut self,
+        registry: &ProviderRegistry,
+        provider: Option<&ProviderId>,
+        mode: LookupMode,
+    ) -> Result<crate::recommend::RecommendReport> {
+        let report = self
+            .recommend_plan(registry, provider, mode)?
+            .finish()
+            .await;
+        self.remember_recommendation_genres(&report)?;
+        Ok(report)
+    }
+
+    /// The first half of [`Self::recommend`]: the taste read from the
+    /// history, the loved songs to start from, the source's catalog when it
+    /// is on the machine, the "not for me" marks. Nothing leaves the
+    /// machine here; [`crate::recommend::RecommendPlan::finish`] asks the
+    /// source.
+    ///
+    /// `provider`: the source to recommend from; `None` — the one music is
+    /// played from. `mode`: online, MusicBrainz is asked for the genres of
+    /// a few loved songs that have none.
+    ///
+    /// # Errors
+    /// If the source is not registered or cannot play, or the library or
+    /// `preferences.json` cannot be read.
+    pub fn recommend_plan(
+        &self,
+        registry: &ProviderRegistry,
+        provider: Option<&ProviderId>,
+        mode: LookupMode,
+    ) -> Result<crate::recommend::RecommendPlan> {
+        use crate::recommend::{
+            MUSICBRAINZ_ASK, MusicBrainzAsk, PoolRow, RecommendPlan, SEEDS, Seed,
+        };
+
+        let id = match provider {
+            Some(id) => id.clone(),
+            None => self.play_from(registry)?.provider.ok_or_else(|| {
+                Error::new(
+                    Stage::Recommend,
+                    ErrorKind::InvalidInput {
+                        detail: "no source can play music — add one with `headshell provider add` \
+                                 or choose music folders with `headshell music-dirs add`"
+                            .to_owned(),
+                    },
+                )
+            })?,
+        };
+        let source = registry
+            .get(&id)
+            .filter(|found| {
+                found
+                    .info()
+                    .capabilities
+                    .contains(crate::provider::Capabilities::STREAM)
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    Stage::Recommend,
+                    ErrorKind::InvalidInput {
+                        detail: format!(
+                            "no source named `{id}` can play music — `headshell provider list` shows the ones that can"
+                        ),
+                    },
+                )
+            })?;
+
+        let preferences = crate::preferences::load(&self.config.preferences_path())?;
+        let since_ms = preferences.recommend_since;
+        let now_ms = jiff::Timestamp::now().as_millisecond();
+        let rule = PlayRule::default();
+        let listens = self.library.all_listens()?;
+        let known_genres = self.library.all_genres()?;
+        let taste = crate::recommend::taste::read(&listens, since_ms, now_ms, rule, &known_genres);
+        let seed_keys = taste.seeds(now_ms, SEEDS);
+        let mut together = crate::recommend::taste::listened_together(
+            &listens, since_ms, now_ms, rule, &seed_keys,
+        );
+        let seeds = seed_keys
+            .iter()
+            .filter_map(|key| {
+                let song = taste.songs.get(key)?;
+                Some(Seed {
+                    key: key.clone(),
+                    artist: song.artist.clone(),
+                    title: song.title.clone(),
+                    neighbours: together.remove(key).unwrap_or_default(),
+                })
+            })
+            .collect();
+        let top_genres = taste.top_genres(crate::recommend::GENRES);
+
+        // A source whose catalog is on the machine is read, not asked.
+        let pool = if self.library.last_scanned_at_ms(&id)?.is_some() {
+            Some(
+                self.library
+                    .catalog_of(&id)?
+                    .into_iter()
+                    .map(|row| {
+                        let key = crate::identity::normalize::track_key(
+                            &row.track.artist,
+                            &row.track.title,
+                        );
+                        let genres = known_genres.get(&key).cloned().unwrap_or_default();
+                        PoolRow {
+                            key,
+                            item: QueueItem {
+                                id: row.id,
+                                track: row.track,
+                            },
+                            genres,
+                        }
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let musicbrainz = match mode {
+            LookupMode::Offline => None,
+            LookupMode::Online => {
+                let asked = self
+                    .library
+                    .genre_keys_from(crate::library::GenreSource::MusicBrainz)?;
+                let mut loved: Vec<(&String, &crate::recommend::taste::Song)> = taste
+                    .songs
+                    .iter()
+                    .filter(|(key, song)| {
+                        song.score > 0.0
+                            && !known_genres.contains_key(*key)
+                            && !asked.contains(*key)
+                    })
+                    .collect();
+                loved.sort_by(|a, b| b.1.score.total_cmp(&a.1.score).then_with(|| a.0.cmp(b.0)));
+                let canonical = self.library.canonical_ids()?;
+                let songs: Vec<(String, String, crate::ids::Mbid)> = loved
+                    .into_iter()
+                    .filter_map(|(key, song)| {
+                        let mbid = canonical
+                            .get(key)?
+                            .as_str()
+                            .strip_prefix("mb:")
+                            .and_then(crate::ids::Mbid::parse)?;
+                        Some((song.artist.clone(), song.title.clone(), mbid))
+                    })
+                    .take(MUSICBRAINZ_ASK)
+                    .collect();
+                if songs.is_empty() {
+                    None
+                } else {
+                    let lookup = crate::net::default_http_client()
+                        .map(|http| {
+                            Arc::new(crate::identity::musicbrainz::MusicBrainzLookup::new(http))
+                        })
+                        .map_err(|err| crate::suggest::SuggestFailure {
+                            provider: ProviderId::new("musicbrainz"),
+                            display_name: "MusicBrainz".to_owned(),
+                            stage: err.stage().as_str().to_owned(),
+                            chain: err.chain_text(),
+                        });
+                    Some(MusicBrainzAsk { lookup, songs })
+                }
+            }
+        };
+
+        Ok(RecommendPlan {
+            provider: source,
+            since_ms,
+            taste,
+            seeds,
+            top_genres,
+            pool,
+            known_genres,
+            dismissed: self.library.dismissed_keys()?,
+            musicbrainz,
+        })
+    }
+
+    /// Writes the genres a recommendation visit learned (D-087): what the
+    /// source named for its tracks and what MusicBrainz named. Returns how
+    /// many songs got genres.
+    ///
+    /// # Errors
+    /// If the library cannot be written.
+    pub fn remember_recommendation_genres(
+        &mut self,
+        report: &crate::recommend::RecommendReport,
+    ) -> Result<usize> {
+        let mut written = 0;
+        for source in [
+            crate::library::GenreSource::Server,
+            crate::library::GenreSource::Plugin,
+            crate::library::GenreSource::MusicBrainz,
+        ] {
+            let songs: Vec<(String, String, Vec<String>)> = report
+                .learned
+                .iter()
+                .filter(|learned| learned.source == source)
+                .map(|learned| {
+                    (
+                        learned.artist.clone(),
+                        learned.title.clone(),
+                        learned.genres.clone(),
+                    )
+                })
+                .collect();
+            if !songs.is_empty() {
+                written += self.library.remember_genres(&songs, source)?;
+            }
+        }
+        Ok(written)
+    }
+
+    /// Marks a song "not for me" (D-087): `headshell recommend dismiss`.
+    /// Recommendations leave it out until they are reset; the history is
+    /// not touched.
+    ///
+    /// # Errors
+    /// If the library cannot be written.
+    pub fn dismiss_recommendation(
+        &mut self,
+        artist: &str,
+        title: &str,
+    ) -> Result<crate::recommend::DismissReport> {
+        let rec = Recorder::start(
+            format!("recommend dismiss {:?}", format!("{artist} - {title}")),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = self.library.dismiss(artist, title);
+        self.finish(rec, result, |newly_marked, diag| {
+            crate::recommend::DismissReport {
+                artist: artist.to_owned(),
+                title: title.to_owned(),
+                newly_marked,
+                diag,
+            }
+        })
+    }
+
+    /// Resets recommendations (D-087): `headshell recommend reset`, and the
+    /// desktop's settings. Every "not for me" mark and every genre learned
+    /// from MusicBrainz is forgotten, and the taste starts over from now —
+    /// the listens before stay in the history and the stats.
+    ///
+    /// # Errors
+    /// If the library or `preferences.json` cannot be written.
+    pub fn reset_recommendations(&mut self) -> Result<crate::recommend::RecommendResetReport> {
+        let rec = Recorder::start(
+            "recommend reset".to_owned(),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = (|| {
+            let forgot = self.library.forget_recommendations()?;
+            let path = self.config.preferences_path();
+            let mut preferences = crate::preferences::load(&path)?;
+            let since_ms = jiff::Timestamp::now().as_millisecond();
+            preferences.recommend_since = Some(since_ms);
+            crate::preferences::save(&path, &preferences)?;
+            Ok((since_ms, forgot))
+        })();
+        self.finish(rec, result, |(since_ms, forgot), diag| {
+            crate::recommend::RecommendResetReport {
+                since_ms,
+                forgot,
+                diag,
+            }
         })
     }
 
@@ -3603,6 +3885,7 @@ mod tests {
                     .map(|(artist, title)| ProviderTrack {
                         id: ProviderTrackId::new(ProviderId::new(self.id), *title),
                         track: TrackRef::new(*artist, *title),
+                        genres: Vec::new(),
                     })
                     .collect())
             })
@@ -3630,6 +3913,7 @@ mod tests {
                 track: TrackRef::new(*artist, *title),
                 from_tags: true,
                 mtime_ms: Some(1),
+                genres: Vec::new(),
             })
             .collect();
         session
@@ -3646,6 +3930,101 @@ mod tests {
 
     fn titles(items: &[QueueItem]) -> Vec<&str> {
         items.iter().map(|item| item.track.title.as_str()).collect()
+    }
+
+    /// Two sittings a day apart: the seed then a neighbour, and the seed
+    /// alone — loved (twice), the neighbour tried once.
+    fn sittings(seed: (&str, &str), neighbour: (&str, &str)) -> Vec<Listen> {
+        let now = jiff::Timestamp::now().as_millisecond();
+        let mut listens = Vec::new();
+        for (day, songs) in [(10_i64, vec![seed, neighbour]), (11, vec![seed])] {
+            for (offset, (artist, title)) in [0_i64, 240_000].into_iter().zip(songs) {
+                listens.push(Listen {
+                    track: TrackRef::new(artist, title),
+                    played_at: jiff::Timestamp::from_millisecond(now - day * 86_400_000 + offset)
+                        .unwrap(),
+                    ms_played: 200_000,
+                    source: crate::model::ListenSource::Playback {
+                        provider: ProviderId::new("local"),
+                    },
+                    canonical_id: None,
+                });
+            }
+        }
+        listens
+    }
+
+    /// D-087 end to end over the session: the local catalog answers, a
+    /// "not for me" leaves a song out, and a reset starts the taste over
+    /// from now without deleting a listen.
+    #[tokio::test]
+    async fn recommendations_come_from_the_catalog_and_a_reset_starts_the_taste_over() {
+        let dir = TempDir::new("recommend-session");
+        let (mut session, registry) = session_with(
+            &dir,
+            &[("Slowdive", "Alison"), ("Ride", "Vapour Trail")],
+            &[],
+        );
+        session
+            .record_listens(&sittings(("Slowdive", "Alison"), ("Ride", "Vapour Trail")))
+            .unwrap();
+
+        let report = session
+            .recommend(&registry, None, LookupMode::Offline)
+            .await
+            .unwrap();
+        assert_eq!(report.provider, ProviderId::new("local"));
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.since_ms, None);
+        let offered: Vec<&str> = report
+            .sections
+            .iter()
+            .flat_map(|section| section.items.iter())
+            .map(|item| item.item.track.title.as_str())
+            .collect();
+        assert_eq!(offered, vec!["Vapour Trail"]);
+
+        let dismissed = session
+            .dismiss_recommendation("Ride", "Vapour Trail")
+            .unwrap();
+        assert!(dismissed.newly_marked);
+        let report = session
+            .recommend(&registry, None, LookupMode::Offline)
+            .await
+            .unwrap();
+        assert!(report.is_empty());
+        assert_eq!(report.summary.left_out_dismissed, 1);
+
+        let reset = session.reset_recommendations().unwrap();
+        assert_eq!(reset.forgot.dismissed, 1);
+        let report = session
+            .recommend(&registry, None, LookupMode::Offline)
+            .await
+            .unwrap();
+        assert_eq!(report.since_ms, Some(reset.since_ms));
+        assert_eq!(report.summary.listens_considered, 0);
+        assert_eq!(report.summary.listens_before_reset, 3);
+        assert!(report.is_empty(), "the taste starts over from the reset");
+    }
+
+    #[test]
+    fn recommending_from_a_source_that_is_not_there_says_where_to_look() {
+        let dir = TempDir::new("recommend-missing");
+        let (session, registry) = session_with(&dir, &[], &[]);
+        let err = session
+            .recommend_plan(
+                &registry,
+                Some(&ProviderId::new("nas")),
+                LookupMode::Offline,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(err.stage(), Stage::Recommend);
+        assert!(
+            err.chain_text().contains("provider list"),
+            "{}",
+            err.chain_text()
+        );
     }
 
     #[tokio::test]
@@ -4077,6 +4456,7 @@ mod tests {
                     .map(|(artist, title)| ProviderTrack {
                         id: ProviderTrackId::new(ProviderId::new("tube"), *title),
                         track: TrackRef::new(*artist, *title),
+                        genres: Vec::new(),
                     })
                     .collect())
             })

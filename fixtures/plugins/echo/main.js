@@ -1,5 +1,5 @@
 // The test plugin: the smallest example that implements the plugin contract
-// (api 5) **in full**. It never goes online and answers from a fixed catalog.
+// (api 6) **in full**. It never goes online and answers from a fixed catalog.
 //
 // There is no misbehaving-plugin act here — the timeout, throwing, unpermitted
 // network and missing export tests write their own small scripts. This file
@@ -13,6 +13,8 @@ const CATALOG = [
     album: "Müptezhel",
     duration_ms: 213000,
     isrc: "TR1234567890",
+    // api 6: the genres the service names, as it writes them.
+    genres: ["Hip-Hop", "Turkish Rap"],
   },
   {
     id: "track-2",
@@ -99,4 +101,15 @@ export function resolve_video(id) {
     return null;
   }
   return { kind: "youtube", video_id: "echoTrack01" };
+}
+
+// api 6: the manifest says `"related": true`, so this export is required.
+// The service's own songs like the item — its radio, its "up next" — for the
+// recommendations. Only the item's id comes in: a plugin never sees the
+// listener's history. An empty list means "none like it".
+export function related(id, limit) {
+  if (!CATALOG.some((track) => track.id === id)) {
+    return [];
+  }
+  return CATALOG.filter((track) => track.id !== id).slice(0, limit);
 }

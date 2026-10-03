@@ -323,6 +323,40 @@ async fn a_song_gives_its_album_art_as_a_real_image() {
     );
 }
 
+/// api 6 (D-087): the song's radio — other songs, each with an artist, the
+/// seed itself left out, at most `limit`.
+#[tokio::test]
+async fn a_song_names_songs_like_it_from_its_radio() {
+    if !prerequisites_met("related") {
+        return;
+    }
+    let config = temp_config("related");
+    let Some(provider) = install(&config, "related").await else {
+        return;
+    };
+    assert!(provider.info().capabilities.contains(Capabilities::RELATED));
+
+    let hits = provider.search("slowdive alison", 3).await.unwrap();
+    assert!(!hits.is_empty(), "the live search came back empty");
+    let similar = match provider.related(&hits[0].id, 10).await {
+        Ok(similar) => similar,
+        Err(err) => panic!("the radio failed:\n{}", err.chain_text()),
+    };
+    assert!(
+        similar.len() >= 5,
+        "{} songs in the radio of {} — the `next` answer may have changed",
+        similar.len(),
+        hits[0].id
+    );
+    assert!(similar.len() <= 10);
+    assert!(similar.iter().all(|track| track.id != hits[0].id));
+    assert!(
+        similar
+            .iter()
+            .all(|track| !track.track.artist.is_empty() && !track.track.title.is_empty())
+    );
+}
+
 /// A song's own lyrics come timed, line by line, with the service's credit
 /// (api 4, D-078). Measured when it was written: asked as the mobile app,
 /// YouTube Music's lyrics page carried timed lines for every song tried, from

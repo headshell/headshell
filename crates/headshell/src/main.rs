@@ -266,6 +266,10 @@ fn run(
             commands::play,
             // Suggestions, exact tracks and adding to the queue (D-080)
             commands::suggest,
+            // Recommendations (D-087)
+            commands::recommend,
+            commands::recommend_dismiss,
+            commands::recommend_reset,
             commands::play_items,
             commands::queue_add,
             commands::queue_add_search,

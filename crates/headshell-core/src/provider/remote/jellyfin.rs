@@ -135,6 +135,31 @@ impl JellyfinProvider {
     }
 }
 
+impl JellyfinProvider {
+    /// A page's items as tracks; the ones without a name or an id are
+    /// counted and logged, not swallowed (K9). A page without the field at
+    /// all has no results.
+    fn tracks_of(&self, page: ItemsPage) -> Vec<ProviderTrack> {
+        let items = page.items.unwrap_or_default();
+        let mut hits = Vec::with_capacity(items.len());
+        let mut skipped = 0usize;
+        for item in items {
+            match item.into_track(&self.server.id) {
+                Some(track) => hits.push(track),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                provider = %self.server.id,
+                skipped,
+                "skipped items without a name or an id"
+            );
+        }
+        hits
+    }
+}
+
 impl Provider for JellyfinProvider {
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
@@ -146,7 +171,9 @@ impl Provider for JellyfinProvider {
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
                 | Capabilities::ARTWORK
-                | Capabilities::LYRICS,
+                | Capabilities::LYRICS
+                | Capabilities::RELATED
+                | Capabilities::GENRE,
         }
     }
 
@@ -226,37 +253,88 @@ impl Provider for JellyfinProvider {
             }
             let user_id = self.user_id().await?;
             let url = format!(
-                "{}/Users/{}/Items?searchTerm={}&IncludeItemTypes=Audio&Recursive=true&Limit={}&Fields=RunTimeTicks",
+                "{}/Users/{}/Items?searchTerm={}&IncludeItemTypes=Audio&Recursive=true&Limit={}&Fields=RunTimeTicks,Genres",
                 self.server.url,
                 net::encode_query(&user_id),
                 net::encode_query(query),
                 limit
             );
             let page: ItemsPage = self.get_json(&url, "jellyfin search").await?;
+            Ok(self.tracks_of(page))
+        })
+    }
 
-            let items = match page.items {
-                Some(items) => items,
-                // If the field is missing altogether there are no results; not a silent
-                // loss.
-                None => return Ok(Vec::new()),
+    /// The server's instant mix from the song (D-087) — Jellyfin's own
+    /// "more like this", worked out from the song's genres and artists.
+    fn related<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(async move {
+            if id.provider != self.server.id {
+                return Err(Error::new(
+                    Stage::ProviderCall,
+                    ErrorKind::InvalidInput {
+                        detail: format!(
+                            "{id} does not belong to this provider ({})",
+                            self.server.id
+                        ),
+                    },
+                ));
+            }
+            let user_id = self.user_id().await?;
+            let url = format!(
+                "{}/Items/{}/InstantMix?UserId={}&Limit={}&Fields=RunTimeTicks,Genres",
+                self.server.url,
+                net::encode_query(&id.id),
+                net::encode_query(&user_id),
+                limit.saturating_add(1)
+            );
+            let page: ItemsPage = self.get_json(&url, "jellyfin instant mix").await?;
+            let mut tracks = self.tracks_of(page);
+            // The mix starts with the song itself.
+            tracks.retain(|track| track.id != *id);
+            tracks.truncate(limit);
+            Ok(tracks)
+        })
+    }
+
+    /// The server's songs in a genre (D-087), in a random order. The genre
+    /// filter wants the server's own spelling, so its music genres are
+    /// listed first; one it does not hold is an empty answer.
+    fn genre_tracks<'a>(
+        &'a self,
+        genre: &'a str,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(async move {
+            let user_id = self.user_id().await?;
+            let list_url = format!(
+                "{}/MusicGenres?UserId={}",
+                self.server.url,
+                net::encode_query(&user_id)
+            );
+            let listed: ItemsPage = self.get_json(&list_url, "jellyfin music genres").await?;
+            let wanted = crate::recommend::genre::normalize_genres(&[genre]);
+            let spelled = listed
+                .items
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| item.name)
+                .find(|name| crate::recommend::genre::normalize_genres(&[name]) == wanted);
+            let Some(spelled) = spelled else {
+                return Ok(Vec::new());
             };
-
-            let mut hits = Vec::with_capacity(items.len());
-            let mut skipped = 0usize;
-            for item in items {
-                match item.into_track(&self.server.id) {
-                    Some(track) => hits.push(track),
-                    None => skipped += 1,
-                }
-            }
-            if skipped > 0 {
-                tracing::warn!(
-                    provider = %self.server.id,
-                    skipped,
-                    "skipped items without a name or an id"
-                );
-            }
-            Ok(hits)
+            let url = format!(
+                "{}/Users/{}/Items?Genres={}&IncludeItemTypes=Audio&Recursive=true&SortBy=Random&Limit={}&Fields=RunTimeTicks,Genres",
+                self.server.url,
+                net::encode_query(&user_id),
+                net::encode_query(&spelled),
+                limit
+            );
+            let page: ItemsPage = self.get_json(&url, "jellyfin genre songs").await?;
+            Ok(self.tracks_of(page))
         })
     }
 
@@ -584,6 +662,9 @@ struct Item {
     /// of its own (D-076).
     #[serde(default)]
     album_id: Option<String>,
+    /// Asked for with `Fields=Genres` (D-087).
+    #[serde(default)]
+    genres: Vec<String>,
 }
 
 impl Item {
@@ -600,6 +681,7 @@ impl Item {
             track: TrackRef::new(artist, title)
                 .with_album(self.album)
                 .with_duration_ms(self.run_time_ticks.map(|ticks| ticks / TICKS_PER_MS)),
+            genres: self.genres,
         })
     }
 }
@@ -627,6 +709,56 @@ mod tests {
          "Artists":["Ezhel"],"RunTimeTicks":2150000000},
         {"Id":"i2","Name":"Felaket","Artists":["Ezhel"]},
         {"Name":"no-id"}],"TotalRecordCount":3}"#;
+
+    /// D-087: the genres come with the search; the instant mix leaves the
+    /// song itself out; a genre is asked in the server's own spelling.
+    #[tokio::test]
+    async fn genres_the_instant_mix_and_songs_by_genre() {
+        let http = Arc::new(
+            FakeHttp::new()
+                .route(
+                    "/Users/u1/Items?searchTerm",
+                    r#"{"Items":[{"Id":"i1","Name":"Geceler","Artists":["Ezhel"],
+                        "Genres":["Hip-Hop","Turkish Rap"]}]}"#,
+                )
+                .route(
+                    "/Items/i1/InstantMix",
+                    r#"{"Items":[{"Id":"i1","Name":"Geceler","Artists":["Ezhel"]},
+                        {"Id":"i9","Name":"Holocaust","Artists":["Ceza"]}]}"#,
+                )
+                .route(
+                    "/MusicGenres",
+                    r#"{"Items":[{"Id":"g1","Name":"Rock"},{"Id":"g2","Name":"Turkish Rap"}]}"#,
+                )
+                .route(
+                    "/Users/u1/Items?Genres",
+                    r#"{"Items":[{"Id":"i1","Name":"Geceler","Artists":["Ezhel"]}]}"#,
+                ),
+        );
+        let provider = JellyfinProvider::new(server(), Arc::clone(&http) as Arc<dyn HttpClient>);
+
+        let hits = provider.search("geceler", 5).await.unwrap();
+        assert_eq!(hits[0].genres, vec!["Hip-Hop", "Turkish Rap"]);
+        assert!(
+            http.last_url().contains("Fields=RunTimeTicks,Genres"),
+            "{}",
+            http.last_url()
+        );
+
+        let id = ProviderTrackId::new(ProviderId::new("jf"), "i1");
+        let mix = provider.related(&id, 5).await.unwrap();
+        assert_eq!(mix.len(), 1);
+        assert_eq!(mix[0].track.title, "Holocaust");
+
+        let songs = provider.genre_tracks("turkish rap", 10).await.unwrap();
+        assert_eq!(songs.len(), 1);
+        assert!(
+            http.last_url().contains("Genres=Turkish%20Rap"),
+            "{}",
+            http.last_url()
+        );
+        assert!(provider.genre_tracks("polka", 10).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn a_track_without_its_own_image_shows_its_albums() {

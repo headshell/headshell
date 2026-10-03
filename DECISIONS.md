@@ -5937,3 +5937,108 @@ YouTube video (the lid shut, the video playing on it) and back (the lid opening,
 second); a local video file on the lid through the server; leaving the player both ways (back to the music;
 the corner window); a YouTube track on *music* in the plinth's corner, then switched to the lid without the
 player reloading; pausing a video from the player bar; the roles in sources.
+
+## D-087 — For you: recommendations worked out on the machine, from one source at a time
+
+**Date:** 2026-10-03 · **Status:** APPLIED (2026-10-03)
+
+**Question:** The user asked for a recommendations page — a main section between *now playing* and the
+*library*, per provider — with an algorithm of our own that uses genres and nearby songs, on two conditions:
+**nobody but the user can reach this data, and it can be reset from settings.** Asked during planning, the
+user chose: new songs from **local signals, the servers' own "similar" calls and a new plugin method**
+(api 6); genres from **the files' tags, the servers' fields, and MusicBrainz when online**; a reset that
+**forgets what was learned and starts the taste over from a date** without deleting a listen; the page at
+**Ctrl+2**, the sections after it moving down one, settings on **Ctrl+,**.
+
+**Decision:**
+
+1. **The taste is read, not stored** (`recommend/taste.rs`, pure functions). Every listen after the last
+   reset adds its weight — halving every 90 days — when it counts as a play (`PlayRule`), and takes back half
+   of it when it is a skip. Artists and genres are the sum of their songs' positive scores, scaled so the
+   most played is 1. Nothing about the taste is written anywhere; it is worked out each visit from the
+   history the library already holds.
+2. **Nearby songs are the ones listened together:** a sitting ends after 30 minutes of silence; inside one,
+   songs up to three apart count, `1/distance`, faded by age; only counted plays take part. Only the seeds'
+   rows are built — the whole graph of a 400k-listen history is never held.
+3. **Seeds** are the best loved songs of the last month, each by a different artist, filled from all time
+   when the month is short; a song played once is a try, not a love (two plays at least). Three seeds give
+   three *because you listened to …* sections; the two genres played most give *more <genre>*; a source
+   whose catalog is on the machine adds *from artists you love* — their songs not in the history yet.
+4. **Scoring** is a weighted sum per kind of section (`AROUND_A_SONG`, `IN_A_GENRE`, `BY_LOVED_ARTISTS`):
+   listened together, the source's own rank, genre closeness, artist closeness, not heard yet. Each song
+   carries its reasons, strongest first — the page says *you play them together*, *a lot like it*, *your
+   kind of sound*, *an artist you love*, *new to you*. Left out: the seeds, songs played in the last week,
+   songs marked "not for me", and a song already in an earlier section.
+5. **The privacy line:** a source is asked only what it would be asked anyway — a search for a song by name,
+   the songs *it* names as like one of *its* tracks **by that track's id**, the songs it holds in a genre.
+   No history, no profile, no score leaves the machine; a plugin still sees only its call's arguments
+   (`host` gives it no library). MusicBrainz is asked, only online, for the genres of at most five loved
+   songs a visit that have none, by their recording id.
+6. **Where songs come from, per source:** a source scanned into the catalog (the local files) is **read, not
+   asked** — the neighbours, the genre's songs and the loved artists' songs come from `provider_tracks`. A
+   server or a plugin is asked: the seed is found by name, then `related(id)`; up to six neighbours are
+   looked up by name; a server with `GENRE` is asked for a genre's songs. A source that fails once is
+   reported with its stage and **not asked again in that visit** (K9) — the page must not wait for each
+   call of a server that is away.
+7. **Provider surface:** `Capabilities::RELATED` and `GENRE`, `Provider::related(id, limit)` and
+   `genre_tracks(genre, limit)`, both `Unsupported` by default. Subsonic: `getSimilarSongs` (by song id;
+   `getSimilarSongs2` takes an artist) and `getSongsByGenre`, the genre spelled the server's way through
+   `getGenres`; songs carry `genre` / OpenSubsonic `genres`. Jellyfin: `/Items/{id}/InstantMix` and
+   `Genres=` over its `/MusicGenres` spelling; the search asks `Fields=…,Genres`. `ProviderTrack.genres`.
+8. **Plugin api 5 → 6** (the D-076/D-078/D-086 precedent): `related` is a **required** yes-or-no in the
+   manifest; `true` requires `related(id, limit)` → `WireTrack[]`, cut to `limit`, the item itself left
+   out. `WireTrack` may carry `genres`. The catalog's plugins republish at api 6.
+9. **What is kept** (schema v3): `track_genres(norm_key, genre, source)` — keyed by the grouping key so the
+   history and the catalog share it; `source` is `tag | server | plugin | musicbrainz`, and an empty genre
+   marks "MusicBrainz names none" so it is not asked again — and `recommend_dismissed`. Genres are folded
+   once (`recommend/genre.rs`: case, spaces, `;`/`/`/`,` split, ID3v1 numbers, noise words). The catalog's
+   stamps are cleared by the migration so the next scan reads every file's genre. `preferences.json`
+   gains `recommend_since`.
+10. **Reset** (`headshell recommend reset`, settings → *recommendations* → *start over*, the two-click
+    button): every "not for me" mark and every genre learned from MusicBrainz is forgotten, `recommend_since`
+    is now. What the files and servers say about themselves stays; **every listen stays**, in the history and
+    the stats — the taste only stops reading the ones before.
+11. **Surfaces:** `Session::recommend_plan` reads the machine; `RecommendPlan::finish` asks the source and
+    ranks without a session — the desktop runs it off the core thread (§3.19 #1/#2 not repeated);
+    `remember_recommendation_genres` writes what was learned. Not a recorded run (the page opens often;
+    `diag` keeps the user's last command); dismiss and reset are. `headshell recommend [--from <provider>]`,
+    `recommend dismiss "<Artist - Title>"`, `recommend reset`; IPC `recommend`, `recommend_dismiss`,
+    `recommend_reset`. A new stage, `RECOMMEND`.
+12. **The page:** *for you* under *listen*, between *now playing* and *library*. A segmented control picks
+    the source (the music source first; hidden with one source), each section a card with *play all*, its
+    songs in a grid of rows that reflows with the window: the cover (the suggestions' small record until one
+    arrives, a play mark on hover), the title, the artist and the strongest reason. Double-click or Enter
+    plays; the song's menu adds *not for me*, which folds the row away at once. Asking again dims the old
+    picks until the new ones arrive. Empty pages say which empty they are: nothing played yet, a fresh start,
+    nothing new from this source.
+
+**Not done:** genres are learned by a server or plugin track only when a recommendation visit sees it, not
+on every search; the list has no paging; MusicBrainz genres are not asked during an import.
+
+**Testing:** the taste (fading, skips, the reset's line, the genre profile), seeds (recent, distinct
+artists, two plays), sittings (the window, the pause, skips), scoring and reasons; a visit end to end over
+fake sources — the local catalog read without a call, a server's similar songs by its own id with their
+genres learned, a week's plays and "not for me" left out, a failing source reported once and not asked
+again, a plugin without a genre section, no history as an empty page; the session (recommend, dismiss,
+reset over the real library); the library (v3 migration, a retag, forgetting what was learned); Subsonic and
+Jellyfin against fake servers; the echo plugin's `related` through QuickJS; the manifest's `related`
+declaration; the CLI end to end with a snapshot.
+
+**Verification:** the §3.9 container (Debian 13, WebKitGTK, Xvfb), 13 tagged MP3s and a 20-listen export in
+sittings: the CLI's local page (two *because you listened to …*, *more shoegaze*, *more dream pop*) and the
+echo plugin's (`related` through QuickJS); the desktop — the page at Ctrl+2, the source switch, a row's menu
+with *not for me* (the row folded away, the notice, the core's mark), settings at Ctrl+, with the two-click
+*start over* and its note, the page after the reset ("You started over"), and the grid at 900 × 600. The
+catalog's api-6 plugins (`ytmusic` 0.8.0 radio, `soundcloud` 0.6.0 related, `youtube` 0.2.0) against a local
+mirror: ytmusic 8/8, soundcloud 7/7, youtube 2/2.
+
+**Addendum — the shelf (2026-10-03):** the user asked for square song tiles at the top of the page, after
+YouTube Music's home, with the lists below. Asked, they chose **the best picks** for the tiles and **a
+sideways-scrolling row**. The core takes them (`RecommendReport.top_picks`, `recommend::top_picks`): the best
+scored songs of every section, at most twelve, two by one artist, every section keeping two; a song moves to
+the shelf and is not listed twice; under four candidates there is no shelf and nothing moves. The page: *Top
+picks for you* — 168 px square tiles in one row that snaps to a tile's edge, back/forward arrows that page
+through it (disabled at the ends), the edges fading only where tiles go on; a tile is its cover at the record
+label's size (320 px), or a small record on a colour of its artist's; a play button rises into the corner on
+hover; the same menu as a row, *not for me* folding the tile sideways. `headshell recommend` prints them as
+*top picks*.

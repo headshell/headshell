@@ -66,6 +66,11 @@ impl Capabilities {
     /// a player the shell embeds. Without `STREAM` a provider's tracks are
     /// video only — the video is all the sound there is.
     pub const VIDEO: Self = Self(1 << 6);
+    /// Can name the songs it holds that are like one of its tracks (D-087):
+    /// a server's "similar songs", a service's radio.
+    pub const RELATED: Self = Self(1 << 7);
+    /// Can list the songs it holds in a genre (D-087).
+    pub const GENRE: Self = Self(1 << 8);
 
     /// No capability at all.
     pub const NONE: Self = Self(0);
@@ -103,6 +108,8 @@ impl Capabilities {
             (Self::ARTWORK, "ARTWORK"),
             (Self::LYRICS, "LYRICS"),
             (Self::VIDEO, "VIDEO"),
+            (Self::RELATED, "RELATED"),
+            (Self::GENRE, "GENRE"),
         ];
         let names: Vec<&str> = all
             .iter()
@@ -191,6 +198,10 @@ pub(crate) mod ahead_of_time {
 pub struct ProviderTrack {
     pub id: ProviderTrackId,
     pub track: TrackRef,
+    /// The genres the provider names for it, as it writes them (D-087).
+    /// Empty when it names none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
 }
 
 /// A cover as a provider hands it over: the image bytes, before the core
@@ -370,6 +381,53 @@ pub trait Provider: Send + Sync {
         ))))
     }
 
+    /// Songs this provider holds that are like one of its tracks (D-087):
+    /// a server's similar songs, a service's radio. Needs the `RELATED` flag.
+    ///
+    /// Only the track's own id is sent — never the history, never a
+    /// profile: what the listener's taste is stays on the machine.
+    /// `Ok(vec![])`: it looked and knows none ("a server without a
+    /// similar-artists source"). Without the flag the default returns
+    /// `Unsupported` (K9).
+    fn related<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        let _ = (id, limit);
+        let info = self.info();
+        Box::pin(std::future::ready(Err(crate::Error::new(
+            crate::diag::Stage::ProviderCall,
+            crate::error::ErrorKind::Unsupported {
+                provider: info.id.as_str().to_owned(),
+                what: "similar songs".to_owned(),
+                capabilities: info.capabilities.describe(),
+            },
+        ))))
+    }
+
+    /// Songs this provider holds in a genre (D-087), the genre as
+    /// recommendations fold it (`indie rock`). Needs the `GENRE` flag.
+    ///
+    /// `Ok(vec![])`: it looked and holds none. Without the flag the default
+    /// returns `Unsupported` (K9).
+    fn genre_tracks<'a>(
+        &'a self,
+        genre: &'a str,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        let _ = (genre, limit);
+        let info = self.info();
+        Box::pin(std::future::ready(Err(crate::Error::new(
+            crate::diag::Stage::ProviderCall,
+            crate::error::ErrorKind::Unsupported {
+                provider: info.id.as_str().to_owned(),
+                what: "songs by genre".to_owned(),
+                capabilities: info.capabilities.describe(),
+            },
+        ))))
+    }
+
     /// Is this a plugin — a provider whose tracks come from an internet
     /// service anyway (D-078)? A plugin track's lyrics are looked up at LRCLIB
     /// the moment it starts; a local file's and a server's only once the user
@@ -399,6 +457,8 @@ pub struct ScannedItem {
     pub track: Option<TrackRef>,
     /// Whether the metadata came from the tags (not from the file name/a guess).
     pub from_tags: bool,
+    /// The genres its own metadata names (D-087), as written there.
+    pub genres: Vec<String>,
 }
 
 pub use local::ScanSummary;

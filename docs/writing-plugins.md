@@ -1,4 +1,4 @@
-# Writing plugins (contract api 5)
+# Writing plugins (contract api 6)
 
 `headshell` plugins are written in **JavaScript** and run in the **QuickJS**
 engine embedded in `headshell` (D-069). No Python, Node or other runtime is
@@ -26,9 +26,17 @@ Three working examples:
   — **a video service**: it finds music videos and hands over YouTube ids;
   the app plays them in YouTube's own player. No stream, no tool.
 - [`fixtures/plugins/echo/main.js`](../fixtures/plugins/echo/main.js) — a test
-  plugin with a fixed catalog, a cover, lyrics and a video (~100 lines). For
+  plugin with a fixed catalog, a cover, lyrics, a video and similar songs
+  (~120 lines). For
   seeing the contract bare.
 
+> **If you're coming from api 5:** api 6 (D-087) adds similar songs, for the
+> app's *for you* page. The manifest **must** say whether the plugin names
+> them — `"related": true` or `"related": false`; an api 5 manifest doesn't,
+> so it no longer loads. With `false`, raising `"api"` to `6` and adding that
+> one line is the whole port. With `true`, export `related(id, limit)` (§3).
+> Tracks may now carry `genres` too.
+>
 > **If you're coming from api 4:** api 5 (D-086) adds videos. The manifest
 > **must** say whether the plugin gives them — `"video": true` or
 > `"video": false`; an api 4 manifest doesn't, so it no longer loads. With
@@ -91,10 +99,11 @@ same as the directory name; if they don't match, the plugin is rejected.
   "name": "soundcloud",
   "display_name": "SoundCloud",
   "version": "0.5.0",
-  "api": 5,
+  "api": 6,
   "artwork": true,
   "lyrics": false,
   "video": false,
+  "related": true,
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {
@@ -110,10 +119,11 @@ same as the directory name; if they don't match, the plugin is rejected.
 | `name` | yes | The same as the directory name. The provider ID. |
 | `display_name` | yes | The name shown to the user. |
 | `version` | yes in the catalog | The plugin's own version. Every plugin in the catalog is versioned: that is what catches an update, and the file addresses are pinned to it (§9). |
-| `api` | yes | The contract version it speaks: `5` today. |
+| `api` | yes | The contract version it speaks: `6` today. |
 | `artwork` | yes | Does the plugin give covers: `true` — it exports `artwork(id, size)` (§3) — or `false`. There is no default: a missing field is rejected, so "it gives none" is always a statement, never a guess. |
 | `lyrics` | yes | Does the plugin give lyrics: `true` — it exports `lyrics(id)` (§3) — or `false`. No default either, for the same reason. |
 | `video` | yes | Does the plugin give videos: `true` — it exports `resolve_video(id)` (§3) — or `false`. No default, for the same reason. A plugin with `video` and without `stream` is a video service: its tracks are videos only. |
+| `related` | yes | Does the plugin name songs like one of its items: `true` — it exports `related(id, limit)` (§3) — or `false`. No default, for the same reason. |
 | `main` | yes | The script's path relative to the plugin directory. It must be `.js` and can't leave the directory (`..` and absolute paths are rejected). |
 | `capabilities` | no | `search`, `stream`. The engine checks that the function of every declared capability is exported. |
 | `permissions.net` | no | The hosts to connect to. See §2. |
@@ -185,6 +195,7 @@ export function resolve_source(id) {
 | `artwork(id, size)` | if the manifest says `"artwork": true` | a cover, or `null` |
 | `lyrics(id)` | if the manifest says `"lyrics": true` | lyrics, or `null` |
 | `resolve_video(id)` | if the manifest says `"video": true` | a video, or `null` |
+| `related(id, limit)` | if the manifest says `"related": true` | an array of tracks |
 
 The names are deliberately the same as api 1's method names and the core's
 `Provider` trait (`resolve_source`, not `resolveSource`). You can write an
@@ -208,7 +219,8 @@ threw.
     title: "Geceler",        // required
     album: "Müptezhel",      // optional
     duration_ms: 213000,     // optional, but important for fuzzy matching
-    isrc: "TRA111700001"     // optional; if the format doesn't fit, it is dropped and counted
+    isrc: "TRA111700001",    // optional; if the format doesn't fit, it is dropped and counted
+    genres: ["Hip-Hop"]      // optional (api 6) — as the service writes them
   }
 ]
 ```
@@ -308,6 +320,27 @@ the plugin only answers "which video".
 
 With `video` and **without** `stream`, the plugin is a video service: its
 tracks have no sound of their own, and the video is what plays.
+
+### `related(id, limit)`
+
+Songs of yours that are like one of your items (D-087) — your service's
+radio, its "up next" — for the app's *for you* page. Return tracks, the same
+shape as `search`'s:
+
+```js
+export async function related(id, limit) {
+  const page = await nextQueue(id); // the service's own "more like this"
+  return page.slice(0, limit).map(toTrack);
+}
+```
+
+**Only the item's id comes in.** The app works the listener's taste out on
+the machine and never hands it to a plugin: no history, no profile, no list
+of favourites — just "what is like this one of yours". The item itself, if
+you list it, is left out, and the answer is cut to `limit`. `[]` means "none
+like it" — an answer, not an error. Give `genres` with your tracks when the
+service names them: the app learns them, and its *more <genre>* sections and
+scoring get better for it.
 
 ### Raising an error
 
@@ -478,7 +511,7 @@ kind: where the plugin runs changed. So was api 2 → 3 (D-076): the manifest
 gained a **required** field (`artwork`), and an api 2 manifest doesn't have
 it — an optional field would have left "gives no covers" and "was written
 before covers" looking the same. api 3 → 4 (D-078) did the same for `lyrics`,
-and api 4 → 5 (D-086) for `video`.
+api 4 → 5 (D-086) for `video`, and api 5 → 6 (D-087) for `related`.
 
 ---
 

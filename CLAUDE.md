@@ -98,6 +98,7 @@ headshell/
 │   │   │   ├── library/        # SQLite + FTS
 │   │   │   ├── lyrics/         # lyrics: the file's .lrc and tags, the provider, LRCLIB; the cache
 │   │   │   ├── provider/       # provider traits + local + remote/{subsonic,jellyfin}
+│   │   │   ├── recommend/      # for you: the taste, sittings, scoring (D-087)
 │   │   │   ├── plugin/         # QuickJS engine (script) + host gates + artifacts + catalog
 │   │   │   ├── playback/       # symphonia + cpal, reading the queue ahead
 │   │   │   ├── net/            # HTTP trait + ureq client + fake
@@ -192,6 +193,7 @@ headshell plugin catalog | update [<name>] | remove <name>
 headshell plugin index <catalog-repo> [--url-template T] [--check]
 headshell secret list | set <namespace> <key> | remove <namespace> <key>
 headshell suggest "<query>"                       # what the play box offers while typed in
+headshell recommend [--from <provider>] | dismiss "<artist> - <title>" | reset   # for you (D-087)
 headshell video "<artist> - <title>" | --file <path>   # the song's video, from the video provider (D-086)
 headshell online [on|off]                        # the desktop's online choice (not the CLI's)
 headshell music-dirs [add <dir> | remove <dir>]  # the local music folders (HEADSHELL_MUSIC_DIRS overrides)

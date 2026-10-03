@@ -172,6 +172,34 @@ async fn a_search_hit_gives_its_cover_as_a_real_image() {
     );
 }
 
+/// api 6 (D-087): SoundCloud's related tracks — other tracks, the seed left
+/// out, at most `limit`.
+#[tokio::test]
+async fn a_track_names_tracks_like_it() {
+    if !prerequisites_met("related") {
+        return;
+    }
+    let config = temp_config("related");
+    let Some(provider) = install(&config, "related").await else {
+        return;
+    };
+    assert!(provider.info().capabilities.contains(Capabilities::RELATED));
+
+    let hits = provider.search("nujabes aruarian dance", 5).await.unwrap();
+    assert!(!hits.is_empty(), "the live search came back empty");
+    let similar = match provider.related(&hits[0].id, 10).await {
+        Ok(similar) => similar,
+        Err(err) => panic!("the related tracks failed:\n{}", err.chain_text()),
+    };
+    assert!(
+        !similar.is_empty(),
+        "no related tracks for {} — the endpoint may have changed",
+        hits[0].id
+    );
+    assert!(similar.len() <= 10);
+    assert!(similar.iter().all(|track| track.id != hits[0].id));
+}
+
 /// The health answer must say which source the client_id came from.
 ///
 /// D-043 allows three sources (secret → cache → discovery); if which one was

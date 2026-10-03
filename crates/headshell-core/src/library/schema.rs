@@ -111,4 +111,37 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         VALUES (new.id, new.artist, new.title, new.album);
     END;
     ",
+    // v3 — what recommendations learn (D-087).
+    //
+    // `track_genres` is keyed by the grouping key (`norm_key`), not by a row
+    // id: the history (`tracks`) and the catalog (`provider_tracks`) share
+    // that key, so a genre a file's tags name is a genre of the song in the
+    // history too. `source` says where it was read — the file's tags, a
+    // server, a plugin, MusicBrainz — so resetting recommendations can drop
+    // what was learned (MusicBrainz) and keep what the files say.
+    //
+    // `recommend_dismissed` is "not for me": a song the recommendations
+    // leave out until they are reset. The history is never touched.
+    //
+    // The catalog's stamps are cleared once: files scanned before this
+    // version were read without their genres, and an unchanged stamp would
+    // keep the next scan from reading them again.
+    r"
+    CREATE TABLE track_genres (
+        norm_key TEXT NOT NULL,
+        genre    TEXT NOT NULL,
+        source   TEXT NOT NULL,
+        PRIMARY KEY (norm_key, genre, source)
+    );
+    CREATE INDEX track_genres_genre ON track_genres(genre);
+
+    CREATE TABLE recommend_dismissed (
+        norm_key TEXT PRIMARY KEY,
+        artist   TEXT NOT NULL,
+        title    TEXT NOT NULL,
+        at       INTEGER NOT NULL
+    );
+
+    UPDATE provider_tracks SET mtime_ms = NULL;
+    ",
 ];

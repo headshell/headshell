@@ -101,6 +101,9 @@ pub struct ScannedFile {
     pub track: Option<TrackRef>,
     /// Whether the metadata came from the tags (not from the file name).
     pub from_tags: bool,
+    /// The genres in the file's tags, as written there (D-087). Empty when
+    /// the tags name none or the file was not read again.
+    pub genres: Vec<String>,
 }
 
 /// The local file provider.
@@ -419,21 +422,23 @@ fn scan_dir_for_catalog(
                     mtime_ms,
                     track: None,
                     from_tags: false,
+                    genres: Vec::new(),
                 });
                 continue;
             }
         }
 
-        match read_track(&path) {
-            Ok((track, from_tags)) => {
-                if !from_tags {
+        match read_track_with_genres(&path) {
+            Ok(read) => {
+                if !read.from_tags {
                     summary.tag_fallback += 1;
                 }
                 out.push(ScannedFile {
                     path,
                     mtime_ms,
-                    track: Some(track),
-                    from_tags,
+                    track: Some(read.track),
+                    from_tags: read.from_tags,
+                    genres: read.genres,
                 });
             }
             Err(err) => {
@@ -491,15 +496,40 @@ pub(crate) fn has_video(path: &Path) -> Result<bool> {
 /// was derived from the file name — not a loss, but a drop that must be
 /// counted (K9).
 pub(crate) fn read_track(path: &Path) -> Result<(TrackRef, bool)> {
+    let read = read_track_with_genres(path)?;
+    Ok((read.track, read.from_tags))
+}
+
+/// What one reading of a file gives: [`read_track`]'s answer plus the
+/// genres its tags name (D-087) — read in the same pass, so a scan opens
+/// each file once.
+pub(crate) struct ReadTrack {
+    pub(crate) track: TrackRef,
+    pub(crate) from_tags: bool,
+    pub(crate) genres: Vec<String>,
+}
+
+/// [`read_track`] with the genres the tags name.
+pub(crate) fn read_track_with_genres(path: &Path) -> Result<ReadTrack> {
     #[cfg(feature = "audio")]
     {
         match tags::read(path) {
-            Ok(Some(track)) => return Ok((track, true)),
+            Ok(Some((track, genres))) => {
+                return Ok(ReadTrack {
+                    track,
+                    from_tags: true,
+                    genres,
+                });
+            }
             Ok(None) => {}
             Err(err) => return Err(err),
         }
     }
-    Ok((track_from_filename(path), false))
+    Ok(ReadTrack {
+        track: track_from_filename(path),
+        from_tags: false,
+        genres: Vec::new(),
+    })
 }
 
 /// Derives metadata from the file name if there are no tags.
@@ -546,7 +576,7 @@ mod tags {
     /// `Ok(None)`: the file opened but there are no usable tags — the caller
     /// falls back to the file name. `Err`: the file could not be opened/is
     /// corrupt.
-    pub(super) fn read(path: &Path) -> Result<Option<TrackRef>> {
+    pub(super) fn read(path: &Path) -> Result<Option<(TrackRef, Vec<String>)>> {
         let file = std::fs::File::open(path)
             .map_err(|source| crate::error::io_err(Stage::PlaybackDecode, path, source))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -581,6 +611,8 @@ mod tags {
         let mut title = None;
         let mut album = None;
         let mut isrc = None;
+        // Every genre tag counts: a file may carry several frames.
+        let mut genres = Vec::new();
 
         let mut collect = |tags: &[symphonia::core::meta::Tag]| {
             for tag in tags {
@@ -600,6 +632,7 @@ mod tags {
                     Some(StandardTag::IdentIsrc(v)) if isrc.is_none() => {
                         isrc = Isrc::parse(v);
                     }
+                    Some(StandardTag::Genre(v)) => genres.push(v.to_string()),
                     _ => {}
                 }
             }
@@ -614,12 +647,13 @@ mod tags {
             return Ok(None);
         };
 
-        Ok(Some(
+        Ok(Some((
             TrackRef::new(artist, title)
                 .with_album(album)
                 .with_duration_ms(duration_ms)
                 .with_isrc(isrc),
-        ))
+            genres,
+        )))
     }
 
     /// Does the container hold a video track (D-086)?
@@ -727,6 +761,7 @@ impl Provider for LocalProvider {
                 .map(|file| ProviderTrack {
                     id: self.track_id(&file.path),
                     track: file.track.clone(),
+                    genres: Vec::new(),
                 })
                 .collect();
             Ok(hits)
@@ -746,6 +781,7 @@ impl Provider for LocalProvider {
                     mtime_ms: file.mtime_ms,
                     track: file.track,
                     from_tags: file.from_tags,
+                    genres: file.genres,
                 })
                 .collect();
             Ok(Some(super::CatalogScan { tracks, summary }))

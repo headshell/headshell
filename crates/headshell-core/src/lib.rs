@@ -22,6 +22,7 @@ pub mod playback;
 pub mod plugin;
 pub mod preferences;
 pub mod provider;
+pub mod recommend;
 pub mod secrets;
 pub mod session;
 pub mod sleeve;

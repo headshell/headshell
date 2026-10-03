@@ -162,6 +162,40 @@ impl SubsonicProvider {
     pub fn stream_url(&self, song_id: &str) -> String {
         self.endpoint("stream", &[("id", song_id)])
     }
+
+    /// The server's songs as tracks; the rows without an id or a title are
+    /// counted and logged, not swallowed (K9).
+    fn tracks_of(&self, songs: Vec<Song>) -> Vec<ProviderTrack> {
+        let mut hits = Vec::with_capacity(songs.len());
+        let mut skipped = 0usize;
+        for song in songs {
+            match song.into_track(&self.server) {
+                Some(track) => hits.push(track),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                provider = %self.server.id,
+                skipped,
+                "skipped tracks without a title or an id"
+            );
+        }
+        hits
+    }
+
+    /// A track id from another provider is a caller's mistake, said plainly.
+    fn check_owner(&self, id: &ProviderTrackId) -> Result<()> {
+        if id.provider == self.server.id {
+            return Ok(());
+        }
+        Err(Error::new(
+            Stage::ProviderCall,
+            ErrorKind::InvalidInput {
+                detail: format!("{id} does not belong to this provider ({})", self.server.id),
+            },
+        ))
+    }
 }
 
 impl Provider for SubsonicProvider {
@@ -177,7 +211,9 @@ impl Provider for SubsonicProvider {
                 | Capabilities::BROWSE
                 | Capabilities::STREAM
                 | Capabilities::ARTWORK
-                | Capabilities::LYRICS,
+                | Capabilities::LYRICS
+                | Capabilities::RELATED
+                | Capabilities::GENRE,
         }
     }
 
@@ -251,24 +287,65 @@ impl Provider for SubsonicProvider {
                 .search_result3
                 .map(|result| result.song)
                 .unwrap_or_default();
+            Ok(self.tracks_of(songs))
+        })
+    }
 
-            let mut hits = Vec::with_capacity(songs.len());
-            let mut skipped = 0usize;
-            for song in songs {
-                match song.into_track(&self.server) {
-                    Some(track) => hits.push(track),
-                    None => skipped += 1,
-                }
-            }
-            if skipped > 0 {
-                // We do not swallow it silently: the count goes to the log (K9).
-                tracing::warn!(
-                    provider = %self.server.id,
-                    skipped,
-                    "skipped tracks without a title or an id"
-                );
-            }
-            Ok(hits)
+    /// `getSimilarSongs`, by the song's own id (D-087). The server answers
+    /// from its own similar-artists source (Last.fm, for Navidrome); a
+    /// server without one answers with an empty list, and so do we.
+    fn related<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(async move {
+            self.check_owner(id)?;
+            let count = limit.to_string();
+            let body = self
+                .call("getSimilarSongs", &[("id", &id.id), ("count", &count)])
+                .await?;
+            let songs = body.similar_songs.map(|list| list.song).unwrap_or_default();
+            let mut tracks = self.tracks_of(songs);
+            tracks.retain(|track| track.id != *id);
+            tracks.truncate(limit);
+            Ok(tracks)
+        })
+    }
+
+    /// `getSongsByGenre` (D-087). The server wants the genre spelled its own
+    /// way (`Indie Rock`), so `getGenres` is asked first for the spelling
+    /// that folds to the one given; a genre the server does not hold is an
+    /// empty answer, not an error.
+    fn genre_tracks<'a>(
+        &'a self,
+        genre: &'a str,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(async move {
+            let listed = self.call("getGenres", &[]).await?;
+            let wanted = crate::recommend::genre::normalize_genres(&[genre]);
+            let spelled = listed
+                .genres
+                .map(|list| list.genre)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|entry| entry.value)
+                .find(|value| crate::recommend::genre::normalize_genres(&[value]) == wanted);
+            let Some(spelled) = spelled else {
+                return Ok(Vec::new());
+            };
+            let count = limit.to_string();
+            let body = self
+                .call("getSongsByGenre", &[("genre", &spelled), ("count", &count)])
+                .await?;
+            let songs = body
+                .songs_by_genre
+                .map(|list| list.song)
+                .unwrap_or_default();
+            let mut tracks = self.tracks_of(songs);
+            tracks.truncate(limit);
+            Ok(tracks)
         })
     }
 
@@ -447,6 +524,32 @@ struct SubsonicBody {
     open_subsonic_extensions: Vec<Extension>,
     /// `getLyricsBySongId` (D-078).
     lyrics_list: Option<LyricsList>,
+    /// `getSimilarSongs` (D-087).
+    similar_songs: Option<SongList>,
+    /// `getSongsByGenre` (D-087).
+    songs_by_genre: Option<SongList>,
+    /// `getGenres` (D-087).
+    genres: Option<GenreList>,
+}
+
+/// A bare list of songs: `similarSongs`, `songsByGenre`.
+#[derive(Debug, Default, Deserialize)]
+struct SongList {
+    #[serde(default)]
+    song: Vec<Song>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GenreList {
+    #[serde(default)]
+    genre: Vec<GenreEntry>,
+}
+
+/// One `getGenres` entry: the server's own spelling is in `value`.
+#[derive(Debug, Deserialize)]
+struct GenreEntry {
+    #[serde(default)]
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -553,6 +656,18 @@ struct Song {
     /// An OpenSubsonic extension; if present, the first link of the identity
     /// chain (K6).
     isrc: Option<Vec<String>>,
+    /// The plain Subsonic genre: one string (D-087).
+    #[serde(default)]
+    genre: Option<String>,
+    /// OpenSubsonic's list: `[{"name": "Rock"}]` (D-087).
+    #[serde(default)]
+    genres: Vec<NamedGenre>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NamedGenre {
+    #[serde(default)]
+    name: String,
 }
 
 impl Song {
@@ -565,6 +680,10 @@ impl Song {
             .as_ref()
             .and_then(|list| list.first())
             .and_then(|raw| crate::ids::Isrc::parse(raw));
+        let mut genres: Vec<String> = self.genres.into_iter().map(|g| g.name).collect();
+        if genres.is_empty() {
+            genres.extend(self.genre);
+        }
 
         Some(ProviderTrack {
             id: ProviderTrackId::new(server.id.clone(), id),
@@ -575,6 +694,7 @@ impl Song {
             .with_album(self.album)
             .with_duration_ms(self.duration.map(|secs| secs.saturating_mul(1000)))
             .with_isrc(isrc),
+            genres,
         })
     }
 }
@@ -715,6 +835,76 @@ mod tests {
             "{}",
             http.last_url()
         );
+    }
+
+    /// D-087: a song's genres — OpenSubsonic's list, or the plain field.
+    #[tokio::test]
+    async fn genres_are_read_from_the_list_or_the_plain_field() {
+        let body = r#"{"subsonic-response":{"status":"ok","searchResult3":{"song":[
+            {"id":"a1","title":"Geceler","artist":"Ezhel","genre":"Rap",
+             "genres":[{"name":"Hip-Hop"},{"name":"Turkish Rap"}]},
+            {"id":"a2","title":"Felaket","artist":"Ezhel","genre":"Rap"}]}}}"#;
+        let http = Arc::new(FakeHttp::new().route("/rest/search3", body));
+        let provider = SubsonicProvider::new(server(), http as Arc<dyn HttpClient>);
+        let hits = provider.search("Ezhel", 10).await.unwrap();
+        assert_eq!(hits[0].genres, vec!["Hip-Hop", "Turkish Rap"]);
+        assert_eq!(hits[1].genres, vec!["Rap"]);
+    }
+
+    /// D-087: similar songs are asked by the song's own id; the song
+    /// itself is not offered back.
+    #[tokio::test]
+    async fn similar_songs_are_asked_by_the_songs_own_id() {
+        let body = r#"{"subsonic-response":{"status":"ok","similarSongs":{"song":[
+            {"id":"a1","title":"Geceler","artist":"Ezhel"},
+            {"id":"b7","title":"Bi Tek Ben Anlarım","artist":"Ceza"}]}}}"#;
+        let http = Arc::new(FakeHttp::new().route("/rest/getSimilarSongs", body));
+        let provider = SubsonicProvider::new(server(), Arc::clone(&http) as Arc<dyn HttpClient>);
+        let id = ProviderTrackId::new(ProviderId::new("ev"), "a1");
+        let similar = provider.related(&id, 5).await.unwrap();
+        assert_eq!(similar.len(), 1);
+        assert_eq!(similar[0].track.title, "Bi Tek Ben Anlarım");
+        assert!(http.last_url().contains("id=a1"), "{}", http.last_url());
+
+        let empty = Arc::new(FakeHttp::new().route(
+            "/rest/getSimilarSongs",
+            r#"{"subsonic-response":{"status":"ok","similarSongs":{}}}"#,
+        ));
+        let provider = SubsonicProvider::new(server(), empty as Arc<dyn HttpClient>);
+        assert!(
+            provider.related(&id, 5).await.unwrap().is_empty(),
+            "none known is not an error"
+        );
+
+        let other = ProviderTrackId::new(ProviderId::new("jf"), "a1");
+        assert!(provider.related(&other, 5).await.is_err());
+    }
+
+    /// D-087: the genre is asked in the server's own spelling.
+    #[tokio::test]
+    async fn songs_by_genre_use_the_servers_own_spelling() {
+        let http = Arc::new(
+            FakeHttp::new()
+                .route(
+                    "/rest/getGenres",
+                    r#"{"subsonic-response":{"status":"ok","genres":{"genre":[
+                        {"value":"Rock","songCount":3},{"value":"Turkish Rap","songCount":2}]}}}"#,
+                )
+                .route(
+                    "/rest/getSongsByGenre",
+                    r#"{"subsonic-response":{"status":"ok","songsByGenre":{"song":[
+                        {"id":"a1","title":"Geceler","artist":"Ezhel"}]}}}"#,
+                ),
+        );
+        let provider = SubsonicProvider::new(server(), Arc::clone(&http) as Arc<dyn HttpClient>);
+        let songs = provider.genre_tracks("turkish rap", 10).await.unwrap();
+        assert_eq!(songs.len(), 1);
+        assert!(
+            http.last_url().contains("genre=Turkish%20Rap"),
+            "{}",
+            http.last_url()
+        );
+        assert!(provider.genre_tracks("polka", 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

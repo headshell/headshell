@@ -139,6 +139,10 @@ pub struct CatalogTrack {
     /// The file's last modification time (ms) — if unchanged, it is not read
     /// again.
     pub mtime_ms: Option<i64>,
+    /// The genres the file's tags name (D-087). Written to `track_genres`
+    /// when the row is written; a row read back carries none — they are
+    /// asked for by key ([`SqliteLibrary::genres_of`]).
+    pub genres: Vec<String>,
 }
 
 /// A summary of a persistent catalog write.
@@ -763,6 +767,7 @@ impl CatalogStore for SqliteLibrary {
                         ],
                     )
                     .map_err(db_err(Stage::LibraryWrite))?;
+                    write_genres(&tx, &key, &entry.genres, GenreSource::Tag)?;
                     summary.updated += 1;
                 }
                 None => {
@@ -786,6 +791,7 @@ impl CatalogStore for SqliteLibrary {
                         ],
                     )
                     .map_err(db_err(Stage::LibraryWrite))?;
+                    write_genres(&tx, &key, &entry.genres, GenreSource::Tag)?;
                     summary.inserted += 1;
                 }
             }
@@ -935,7 +941,293 @@ fn catalog_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogTrack> {
             .with_isrc(isrc.as_deref().and_then(Isrc::parse)),
         from_tags: from_tags != 0,
         mtime_ms,
+        genres: Vec::new(),
     })
+}
+
+/// Where a genre was read (D-087). Resetting recommendations drops what was
+/// learned — [`GenreSource::MusicBrainz`] — and keeps what the files and the
+/// servers say about themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenreSource {
+    /// The file's own tags.
+    Tag,
+    /// A Subsonic or Jellyfin server's answer.
+    Server,
+    /// A plugin's answer.
+    Plugin,
+    /// Looked up at MusicBrainz, online.
+    MusicBrainz,
+}
+
+impl GenreSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tag => "tag",
+            Self::Server => "server",
+            Self::Plugin => "plugin",
+            Self::MusicBrainz => "musicbrainz",
+        }
+    }
+}
+
+/// Replaces what one source says a song's genres are. The values are folded
+/// first ([`crate::recommend::genre`]); an empty list clears that source's
+/// genres for the song — a retagged file that names none names none.
+fn write_genres(
+    tx: &rusqlite::Transaction<'_>,
+    norm_key: &str,
+    raw: &[String],
+    source: GenreSource,
+) -> Result<usize> {
+    tx.execute(
+        "DELETE FROM track_genres WHERE norm_key = ?1 AND source = ?2",
+        rusqlite::params![norm_key, source.as_str()],
+    )
+    .map_err(db_err(Stage::LibraryWrite))?;
+    let genres = crate::recommend::genre::normalize_genres(raw);
+    if genres.is_empty() && source == GenreSource::MusicBrainz {
+        // "Asked, and it names none": an empty marker, so the same song is
+        // not asked again every visit. Readers skip it.
+        tx.execute(
+            "INSERT OR IGNORE INTO track_genres (norm_key, genre, source) VALUES (?1, '', ?2)",
+            rusqlite::params![norm_key, source.as_str()],
+        )
+        .map_err(db_err(Stage::LibraryWrite))?;
+    }
+    for genre in &genres {
+        tx.execute(
+            "INSERT OR IGNORE INTO track_genres (norm_key, genre, source) VALUES (?1, ?2, ?3)",
+            rusqlite::params![norm_key, genre, source.as_str()],
+        )
+        .map_err(db_err(Stage::LibraryWrite))?;
+    }
+    Ok(genres.len())
+}
+
+/// What resetting recommendations removed (D-087).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecommendForgetSummary {
+    /// "Not for me" marks taken off.
+    pub dismissed: usize,
+    /// Genres learned from MusicBrainz dropped.
+    pub learned_genres: usize,
+}
+
+/// What recommendations know about the songs (D-087): the genres and the
+/// "not for me" marks. Kept apart from the listening history — resetting it
+/// never touches a listen.
+impl SqliteLibrary {
+    /// Writes what `source` says the genres of these songs are, each by its
+    /// artist and title. Returns how many songs were given at least one.
+    ///
+    /// # Errors
+    /// If the database cannot be written.
+    pub fn remember_genres(
+        &mut self,
+        songs: &[(String, String, Vec<String>)],
+        source: GenreSource,
+    ) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(db_err(Stage::LibraryWrite))?;
+        let mut written = 0;
+        for (artist, title, genres) in songs {
+            if write_genres(&tx, &track_key(artist, title), genres, source)? > 0 {
+                written += 1;
+            }
+        }
+        tx.commit().map_err(db_err(Stage::LibraryWrite))?;
+        Ok(written)
+    }
+
+    /// Every song's genres, by grouping key, every source merged.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn all_genres(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT norm_key, genre FROM track_genres WHERE genre <> '' ORDER BY norm_key, genre",
+            )
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (key, genre) = row.map_err(db_err(Stage::LibraryQuery))?;
+            let list = out.entry(key).or_default();
+            if !list.contains(&genre) {
+                list.push(genre);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One song's genres, every source merged.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn genres_of(&self, artist: &str, title: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT genre FROM track_genres
+                 WHERE norm_key = ?1 AND genre <> '' ORDER BY genre",
+            )
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([track_key(artist, title)], |row| row.get::<_, String>(0))
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_err(Stage::LibraryQuery))?);
+        }
+        Ok(out)
+    }
+
+    /// The songs one source has said anything about — genres or, for
+    /// MusicBrainz, "none" — by key.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn genre_keys_from(
+        &self,
+        source: GenreSource,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT norm_key FROM track_genres WHERE source = ?1")
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([source.as_str()], |row| row.get::<_, String>(0))
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row.map_err(db_err(Stage::LibraryQuery))?);
+        }
+        Ok(out)
+    }
+
+    /// The canonical identity of every resolved song in the history, by key.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn canonical_ids(&self) -> Result<std::collections::HashMap<String, CanonicalId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT norm_key, canonical_id FROM tracks WHERE canonical_id IS NOT NULL")
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (key, id) = row.map_err(db_err(Stage::LibraryQuery))?;
+            out.insert(key, CanonicalId::from_stored(id));
+        }
+        Ok(out)
+    }
+
+    /// A provider's whole catalog (D-087): what recommendations pick from
+    /// for the local files. In the catalog's own order.
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn catalog_of(&self, provider: &ProviderId) -> Result<Vec<CatalogTrack>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT provider, provider_ref, artist, title, album,
+                        duration_ms, isrc, from_tags, mtime_ms
+                 FROM provider_tracks
+                 WHERE provider = ?1
+                 ORDER BY id",
+            )
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([provider.as_str()], catalog_row)
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_err(Stage::LibraryQuery))?);
+        }
+        Ok(out)
+    }
+
+    /// Marks a song "not for me": recommendations leave it out until they
+    /// are reset. Returns `false` when it was marked already.
+    ///
+    /// # Errors
+    /// If the database cannot be written.
+    pub fn dismiss(&mut self, artist: &str, title: &str) -> Result<bool> {
+        let now = jiff::Timestamp::now().as_millisecond();
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO recommend_dismissed (norm_key, artist, title, at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![track_key(artist, title), artist, title, now],
+            )
+            .map_err(db_err(Stage::LibraryWrite))?;
+        Ok(changed > 0)
+    }
+
+    /// The grouping keys of the songs marked "not for me".
+    ///
+    /// # Errors
+    /// If the database cannot be read.
+    pub fn dismissed_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT norm_key FROM recommend_dismissed")
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_err(Stage::LibraryQuery))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row.map_err(db_err(Stage::LibraryQuery))?);
+        }
+        Ok(out)
+    }
+
+    /// Forgets what recommendations learned: every "not for me" mark and
+    /// every genre looked up at MusicBrainz. What the files and servers say
+    /// stays; so does every listen.
+    ///
+    /// # Errors
+    /// If the database cannot be written.
+    pub fn forget_recommendations(&mut self) -> Result<RecommendForgetSummary> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(db_err(Stage::LibraryWrite))?;
+        let dismissed = tx
+            .execute("DELETE FROM recommend_dismissed", [])
+            .map_err(db_err(Stage::LibraryWrite))?;
+        let learned_genres = tx
+            .execute(
+                "DELETE FROM track_genres WHERE source = ?1",
+                [GenreSource::MusicBrainz.as_str()],
+            )
+            .map_err(db_err(Stage::LibraryWrite))?;
+        tx.commit().map_err(db_err(Stage::LibraryWrite))?;
+        Ok(RecommendForgetSummary {
+            dismissed,
+            learned_genres,
+        })
+    }
 }
 
 /// Reads a `ResolveMethod` back from text — for the reporting layer.
@@ -1231,6 +1523,7 @@ mod tests {
             track: TrackRef::new(artist, title).with_album(Some("Album".to_owned())),
             from_tags: true,
             mtime_ms: Some(mtime),
+            genres: Vec::new(),
         }
     }
 
@@ -1402,6 +1695,7 @@ mod tests {
                     track: TrackRef::new("B", "2"),
                     from_tags: true,
                     mtime_ms: None,
+                    genres: Vec::new(),
                 }],
             )
             .unwrap();
@@ -1468,7 +1762,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2, "the schema must be upgraded to v2");
+        assert_eq!(version, 3, "the schema must be upgraded to the latest");
 
         // The old history is still there.
         assert_eq!(library.all_listens().unwrap().len(), 1);
@@ -1481,5 +1775,118 @@ mod tests {
             )
             .unwrap();
         assert_eq!(library.catalog_len(&provider).unwrap(), 1);
+    }
+
+    /// v3 (D-087): files scanned before were read without their genres, so
+    /// their stamps are cleared and the next scan reads them again.
+    #[test]
+    fn the_genre_migration_makes_the_next_scan_read_every_file_again() {
+        let dir = crate::test_support::TempDir::new("library-v3");
+        let db = dir.path().join("library.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(schema::MIGRATIONS[0]).unwrap();
+            conn.execute_batch(schema::MIGRATIONS[1]).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(
+                "INSERT INTO provider_tracks
+                     (provider, provider_ref, norm_key, artist, title, from_tags, mtime_ms, scanned_at)
+                 VALUES ('local', '/m/a.flac', 'k', 'A', 'B', 1, 42, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let library = SqliteLibrary::open(&db).unwrap();
+        assert!(
+            library
+                .catalog_stamps(&ProviderId::new("local"))
+                .unwrap()
+                .is_empty(),
+            "no stamp survives: every file is read again"
+        );
+    }
+
+    #[test]
+    fn a_files_genres_are_written_with_its_row_and_follow_a_retag() {
+        let mut library = SqliteLibrary::open_in_memory().unwrap();
+        let provider = ProviderId::new("local");
+        let mut entry = catalog_entry("/m/a.flac", "Slowdive", "Alison", 1);
+        entry.genres = vec!["Shoegaze; Dream Pop".to_owned()];
+        library
+            .replace_catalog(&provider, &[entry.clone()])
+            .unwrap();
+        assert_eq!(
+            library.genres_of("Slowdive", "Alison").unwrap(),
+            vec!["dream pop", "shoegaze"]
+        );
+
+        entry.mtime_ms = Some(2);
+        entry.genres = vec!["Alternative".to_owned()];
+        library.replace_catalog(&provider, &[entry]).unwrap();
+        assert_eq!(
+            library.genres_of("Slowdive", "Alison").unwrap(),
+            vec!["alternative"]
+        );
+    }
+
+    /// Resetting forgets what was learned and keeps what the files say —
+    /// and never a listen.
+    #[test]
+    fn forgetting_recommendations_keeps_the_files_genres_and_the_history() {
+        let mut library = SqliteLibrary::open_in_memory().unwrap();
+        library
+            .insert_listens(&[listen(
+                "Radiohead",
+                "Creep",
+                "2023-01-01T00:00:00Z",
+                200_000,
+            )])
+            .unwrap();
+        let mut entry = catalog_entry("/m/a.flac", "Radiohead", "Creep", 1);
+        entry.genres = vec!["Alternative Rock".to_owned()];
+        library
+            .replace_catalog(&ProviderId::new("local"), &[entry])
+            .unwrap();
+        library
+            .remember_genres(
+                &[
+                    (
+                        "Radiohead".to_owned(),
+                        "Creep".to_owned(),
+                        vec!["Grunge".to_owned()],
+                    ),
+                    ("Portishead".to_owned(), "Roads".to_owned(), Vec::new()),
+                ],
+                GenreSource::MusicBrainz,
+            )
+            .unwrap();
+        assert!(library.dismiss("Radiohead", "Creep").unwrap());
+        assert!(
+            !library.dismiss("radiohead", "creep").unwrap(),
+            "marked already"
+        );
+        assert_eq!(library.dismissed_keys().unwrap().len(), 1);
+        assert_eq!(
+            library
+                .genre_keys_from(GenreSource::MusicBrainz)
+                .unwrap()
+                .len(),
+            2,
+            "\"names none\" is remembered too"
+        );
+        assert_eq!(
+            library.genres_of("Radiohead", "Creep").unwrap(),
+            vec!["alternative rock", "grunge"]
+        );
+
+        let forgot = library.forget_recommendations().unwrap();
+        assert_eq!(forgot.dismissed, 1);
+        assert_eq!(forgot.learned_genres, 2);
+        assert!(library.dismissed_keys().unwrap().is_empty());
+        assert_eq!(
+            library.genres_of("Radiohead", "Creep").unwrap(),
+            vec!["alternative rock"]
+        );
+        assert_eq!(library.all_listens().unwrap().len(), 1);
     }
 }

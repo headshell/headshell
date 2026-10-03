@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use headshell_core::config::Config;
 use headshell_core::ids::ProviderId;
-use headshell_core::model::PlayRule;
+use headshell_core::model::{PlayRule, TrackRef};
 use headshell_core::playback::LiveSession;
 use headshell_core::provider;
 use headshell_core::session::{self, LookupMode, Session};
@@ -285,8 +285,38 @@ enum Command {
         #[command(subcommand)]
         action: Option<MusicDirsCommand>,
     },
+    /// Songs picked for you from one source (D-087).
+    ///
+    /// Worked out here, from your own history: songs played around the
+    /// ones you love lately, the genres you play most, and — for the local
+    /// files — your favourite artists' songs you haven't heard. The source
+    /// is asked only for songs like one of its own tracks, by that track's
+    /// id; your history never leaves this machine. With `--online`,
+    /// MusicBrainz is asked for the genres of a few loved songs.
+    Recommend {
+        #[command(subcommand)]
+        action: Option<RecommendCommand>,
+        /// The source to recommend from; the one music plays from when
+        /// left out.
+        #[arg(long, value_name = "PROVIDER")]
+        from: Option<String>,
+    },
     /// The diagnostics report of the last run.
     Diag,
+}
+
+#[derive(Debug, Subcommand)]
+enum RecommendCommand {
+    /// Mark a song "not for me": it is left out until recommendations are
+    /// reset. Your history is not touched.
+    Dismiss {
+        /// `Artist - Title`.
+        query: String,
+    },
+    /// Start recommendations over: every "not for me" mark and every genre
+    /// learned online is forgotten, and your taste is read again from now
+    /// on. Your history and stats stay as they are.
+    Reset,
 }
 
 #[derive(Debug, Subcommand)]
@@ -887,6 +917,29 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
                 output::music_folders(&report, action.is_some())
             })
         }
+        Command::Recommend { action, from } => match action {
+            None => {
+                let registry = provider::default_registry(session.config())?;
+                let from = from.as_deref().map(ProviderId::new);
+                let report = session
+                    .recommend(&registry, from.as_ref(), lookup_mode)
+                    .await?;
+                // "Could not ask" is a partial failure, not silence (K9).
+                if !report.failures.is_empty() {
+                    *succeeded = false;
+                }
+                render(cli.json, &report, || output::recommend(&report))
+            }
+            Some(RecommendCommand::Dismiss { query }) => {
+                let track = TrackRef::parse_query(query)?;
+                let report = session.dismiss_recommendation(&track.artist, &track.title)?;
+                render(cli.json, &report, || output::recommend_dismiss(&report))
+            }
+            Some(RecommendCommand::Reset) => {
+                let report = session.reset_recommendations()?;
+                render(cli.json, &report, || output::recommend_reset(&report))
+            }
+        },
         Command::Diag => {
             let report = session.last_diag()?;
             match report {

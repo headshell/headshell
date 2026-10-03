@@ -107,6 +107,10 @@ pub enum Stage {
     /// The video being shown: handing the sound between the audio engine and
     /// the shell's video player, and the player's reports (D-086).
     VideoPlayback,
+    /// Working out recommendations (D-087): the taste read from the
+    /// history, the songs gathered, what is left out. A provider that could
+    /// not be asked keeps its own stage.
+    Recommend,
 }
 
 impl Stage {
@@ -141,6 +145,7 @@ impl Stage {
             Self::LyricsStore => "LYRICS_STORE",
             Self::VideoLookup => "VIDEO_LOOKUP",
             Self::VideoPlayback => "VIDEO_PLAYBACK",
+            Self::Recommend => "RECOMMEND",
         }
     }
 }

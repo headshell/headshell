@@ -2430,6 +2430,105 @@ checking for new music at once.
 to end through a scan, the container — a folder added through the dialog and
 taken off.
 
+### 3.19 Performance and network debts — TODO (measured 2026-10-02)
+
+A test round on `cbbe2b3` (release build; CLI, TUI under tmux, the desktop in
+the Xvfb container; a fake Subsonic server, a CONNECT proxy that slows, stalls
+and cuts real services, hand-made bad plugins). Nothing here is fixed yet; each
+item is a measured debt, its likely cause and a direction, not a decision. The
+raw notes are outside the repository (`/srv/rust/hs-perf/RESULTS.md` on the
+machine they were taken on).
+
+**Freezes the user feels — first:**
+
+1. **One core thread holds every desktop command.** A play search against an
+   unreachable server (an away-from-home NAS: 30 s timeout) held a stats view
+   that takes ~3 s for **32.5 s**; pause and next wait in the same line. The
+   busy notice shows, the waiting view says nothing. Long or network-bound
+   work (play search, provider test, import, stats) needs to leave
+   `core_thread` or be cancellable (`state.rs`, `commands.rs`).
+2. **Slow suggestions starve every IPC command.** `SuggestPlan::finish` runs
+   off the core thread, but a server's or plugin's search blocks a Tauri
+   worker synchronously (ureq; a plugin call even runs when its future is
+   created). With the play-from source hanging, six typing pauses left a stats
+   view at **28.8 s** (one pause: 2.2 s) — 4 cores, 4 workers. Run them on a
+   blocking pool, cancel the stale ones, cap how many are in flight.
+3. **A lost audio device hangs playback.** With the sound server killed
+   mid-track, `play` never returned, the TUI showed `▶ (playing) 0:02`
+   forever, no error, no recovery when the server came back (Bluetooth or USB
+   output going away, PipeWire restarting). The cpal error callback only
+   records an error; nothing reads it as "the output is gone".
+4. **A stalled stream blocks next and quit.** `HttpMediaSource::read` waits
+   without looking at a stop flag and `AudioEngine::drop` joins the decoder:
+   next 5 s into a stall waited **17.6 s**, quit 9.2 s (worst case the 30 s
+   idle timeout). After the timeout the rest of the track is skipped silently;
+   the decode error only reaches `tracing::warn!`, not the screen or `diag`.
+5. **The TUI freezes during a slow suggestion.** `tui.rs` awaits `suggest`
+   inside its draw loop: ~21 s without redraw or keys against a plugin that
+   times out; ticks (track hand-over, listens) wait too.
+
+**Data and time:**
+
+6. **`import --online` is all or nothing.** `Resolver::resolve_all` is
+   sequential and its first error aborts the import before anything is
+   written: a MusicBrainz stall at track 19 of 40 saved **0** listens (offline
+   all 80 would have been). ~1.24 s per distinct track → ~7 h for 20,000.
+   Write what is resolved, fall back to the local key on failure, resume.
+7. **The offline import waits on the disk.** 400k listens: 211 s wall, 41 s
+   CPU, 387 MB; importing the same file again (all duplicates) 202 s. 50k:
+   26.7 s on ext4, 4.3 s on tmpfs. `set_resolution` runs one autocommit
+   `UPDATE` per distinct track (`library/mod.rs`) — one transaction, and skip
+   rows that did not change.
+8. **A zip bomb takes the memory.** A 2 MB zip holding 2 GB of JSON peaked at
+   2,059 MB RSS (`ZipArchive::read_entry` reads an entry whole, no cap). A
+   per-entry limit well above a real export file (~15 MB) is enough.
+9. **A second writer fails at once.** While an import holds the write lock
+   (~4 min for 400k) every other writer gets `database is locked` in 0.0 s —
+   no busy timeout; the CLI importing while the desktop records listens is
+   the everyday case.
+10. **Stats load the whole history.** `all_listens` into memory for every
+    view, a year filter too: 1.1–1.7 s and ~190 MB for 400k (the desktop's
+    view: ~3 s, peak 368 MB) with no loading sign on the page.
+
+**Plugins:**
+
+11. **Three timeouts kill a plugin for the session.** `MAX_STARTS` counts the
+    whole session and never resets: after three timeouts a query the plugin
+    answers at once fails with `PLUGIN_START` until restart, and "fell over
+    every time" is not true. Count consecutive failures, or within a window.
+12. **`host.http` ignores the call's budget.** A fixed 15 s timeout per
+    request: two 12 s requests overran the 20 s call, the caller gave up at
+    22 s and the engine was dropped. Bound each request by the time left.
+13. **A provider's answer is not clamped to `limit`.** A plugin returning
+    200,000 rows made a 200,000-track queue (`hits_from`); suggest took 2.5 s
+    and 346 MB.
+14. **QuickJS running out of memory reads as `threw a value that is not an
+    error object: Null"null"`** — it should say "out of memory (128 MB)".
+15. When the chosen source fails, suggest asks every other provider — a
+    misbehaving plugin among them runs on every failed keystroke.
+
+**Smaller:**
+
+16. The TUI exits when the queue ends even while the search line is open.
+17. Idle desktop with nothing played: 7.6 % CPU in `headshell-desktop`, 15.8 %
+    in the web process (Xvfb, software painting — re-measure on a real
+    session); the decode thread polls every 5 ms while idle.
+18. Covers online: ~6 s and ~420 KB of MusicBrainz JSON per album; a slow
+    link (30 KB/s + 300 ms) took 21 s for one cover.
+19. A read-only data directory refuses even `stats`.
+20. A WAV starts ~1–1.5 s after play (FLAC: 0.05 s) — the codec's packets,
+    not the network.
+
+**Measured and fine** (to keep that way): corrupt `library.db`,
+`preferences.json`, `servers.json`, truncated and noisy audio, a server's
+500/401/HTML/oversized/reset/refused/DNS answers — all fast, staged errors;
+search 10–40 ms, local suggestions 20–30 ms, a 20,000-file scan 7 s (0.7 s
+unchanged), next/previous with the read-ahead 10–30 ms, the window in 0.5 s.
+
+**Not measured yet:** the YouTube Music plugin and the catalog install under a
+bad network, a session left open for hours (leaks), Windows/macOS, the desktop
+redrawing a very long queue.
+
 ### 3.20 Music videos — DONE (D-086)
 
 **The problem:** a song's video was out of scope (§1.4), and the only way to
@@ -2450,6 +2549,27 @@ The settings are grouped — listening, internet, advanced.
 contract; the CLI end to end; the shell's server and ACL list; the plugins
 live against a mirror; the container — the lid both ways, YouTube and a local
 file, the plinth's corner, the window's corner.
+
+### 3.21 For you: recommendations — DONE (D-087)
+
+**The problem:** the history said what the listener loves, and nothing used it to say what to play next.
+The ask was a page of songs per source, worked out by an algorithm of our own from genres and nearby songs —
+reachable by nobody but the user, and resettable from settings.
+
+**Done:** *for you* between *now playing* and *library* (Ctrl+2; settings moved to Ctrl+,). The taste is
+read from the history each visit — plays fading over 90 days, skips taking back half — never stored; songs
+played in the same sittings as the loved ones, the genres played most, and the favourite artists' unheard
+songs — the best of them on a shelf of square tiles at the top, scrolled sideways. A scanned source is read,
+not asked; a server is asked for similar songs (`getSimilarSongs`, Jellyfin's
+instant mix) and a genre's songs, a plugin for `related(id)` (api 6) — only by its own track's id. Genres from
+the tags, the servers, and MusicBrainz when online (schema v3, `track_genres`). "Not for me" in a song's
+menu; settings → *recommendations* → *start over* forgets what was learned and reads the taste from now on,
+deleting no listen. `headshell recommend [--from] | dismiss | reset`.
+
+**Testing / verification:** the pure taste, sittings and scoring; visits over fake sources (catalog, server,
+plugin, a failing one); the session's dismiss and reset; the library's migration; Subsonic and Jellyfin fakes;
+the echo plugin through QuickJS; the CLI end to end; the container — the page per source, covers, "not for me",
+the reset in settings.
 
 ---
 

@@ -212,6 +212,39 @@ impl MusicBrainzLookup {
         Ok(Some(collect_releases(payload.releases, recording.as_str())))
     }
 
+    /// A recording's genres (D-087): MusicBrainz's curated genres first,
+    /// and when it has none, the folksonomy tags voted for at least twice.
+    /// `Ok(None)`: MusicBrainz does not know the recording.
+    ///
+    /// Asked only online, only by the recommendations, and only for the
+    /// few songs that shape the taste and carry no genre of their own.
+    ///
+    /// # Errors
+    /// If the request fails or the answer does not parse.
+    pub(crate) async fn genres_of(&self, recording: &Mbid) -> Result<Option<Vec<String>>> {
+        let url = format!(
+            "{}/recording/{}?inc=genres+tags&fmt=json",
+            self.base_url,
+            encode_query(recording.as_str())
+        );
+        let Some(payload) = self
+            .get_json::<RecordingGenres>(&url, "musicbrainz recording genres")
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut genres: Vec<String> = payload.genres.into_iter().map(|g| g.name).collect();
+        if genres.is_empty() {
+            genres = payload
+                .tags
+                .into_iter()
+                .filter(|tag| tag.count >= 2)
+                .map(|tag| tag.name)
+                .collect();
+        }
+        Ok(Some(genres))
+    }
+
     /// The releases titled like `album` by `artist` (D-076): the cover
     /// chain's way in when the recording it matched is not on the album —
     /// a well-known song has dozens of namesake recordings on compilations
@@ -551,6 +584,23 @@ impl MbRecording {
 }
 
 #[derive(Debug, Deserialize)]
+struct RecordingGenres {
+    #[serde(default)]
+    genres: Vec<MbGenre>,
+    #[serde(default)]
+    tags: Vec<MbGenre>,
+}
+
+/// A genre or a tag: the name, and for a tag how many voted for it.
+#[derive(Debug, Deserialize)]
+struct MbGenre {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    count: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct RecordingReleases {
     #[serde(default)]
     releases: Vec<MbRelease>,
@@ -859,6 +909,32 @@ mod tests {
 
     /// Odd names must not break the query — unescaped, MusicBrainz returns
     /// `400`.
+    #[tokio::test]
+    async fn a_recordings_genres_come_first_and_voted_tags_stand_in() {
+        let mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
+        let with_genres = lookup(FakeHttp::new().route(
+            "/recording/",
+            r#"{"genres":[{"name":"alternative rock","count":3}],"tags":[{"name":"90s","count":9}]}"#,
+        ));
+        let id = Mbid::parse(mbid).unwrap();
+        assert_eq!(
+            with_genres.genres_of(&id).await.unwrap(),
+            Some(vec!["alternative rock".to_owned()])
+        );
+
+        let tags_only = lookup(FakeHttp::new().route(
+            "/recording/",
+            r#"{"genres":[],"tags":[{"name":"britpop","count":2},{"name":"seen live","count":1}]}"#,
+        ));
+        assert_eq!(
+            tags_only.genres_of(&id).await.unwrap(),
+            Some(vec!["britpop".to_owned()])
+        );
+
+        let unknown = lookup(FakeHttp::new().route_status("/recording/", 404, ""));
+        assert_eq!(unknown.genres_of(&id).await.unwrap(), None);
+    }
+
     #[test]
     fn lucene_special_characters_are_escaped() {
         let query = build_query("AC/DC", "Where Is My Mind?");

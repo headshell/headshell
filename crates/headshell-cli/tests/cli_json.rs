@@ -1823,3 +1823,74 @@ fn video_finds_a_files_own_video_and_searches_for_a_song() {
     assert!(ok, "{stderr}");
     assert!(stdout.contains("youtube echoTrack01"), "{stdout}");
 }
+
+/// D-087: recommendations come from the history on the machine; a source
+/// that is not there says where to look; "not for me" and a reset are kept.
+#[test]
+fn recommend_reads_the_history_and_dismiss_and_reset_are_kept() {
+    let dir = temp_dir("recommend");
+    let music = audio_fixtures();
+    let zip = fixtures().join("spotify_extended_mini.zip");
+    let (_, stderr, ok) = run(&dir, &["import", zip.to_str().unwrap()]);
+    assert!(ok, "{stderr}");
+    let (_, stderr, ok) = run_with_music(&dir, Some(&music), &["provider", "scan"]);
+    assert!(ok, "{stderr}");
+
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&music),
+        &["--json", "recommend", "--from", "local"],
+    );
+    assert!(ok, "{stderr}");
+    let report = json(&stdout);
+    assert_eq!(report["provider"], "local");
+    assert!(
+        report["summary"]["listens_considered"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{stdout}"
+    );
+    assert!(
+        report.get("learned").is_none(),
+        "what was learned is not part of the answer"
+    );
+    assert_snapshot("recommend", &stdout);
+
+    let (stdout, stderr, ok) = run_with_music(&dir, Some(&music), &["recommend"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("for you, from Local files:"), "{stdout}");
+    assert!(stdout.contains("read from "), "{stdout}");
+
+    let (_, stderr, ok) = run(&dir, &["recommend", "--from", "nas"]);
+    assert!(!ok);
+    assert!(stderr.contains("STEP: RECOMMEND"), "{stderr}");
+    assert!(stderr.contains("provider list"), "{stderr}");
+
+    let (stdout, stderr, ok) = run(&dir, &["--json", "recommend", "dismiss", "Ezhel - Geceler"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(json(&stdout)["newly_marked"], true);
+    let (stdout, _, ok) = run(&dir, &["recommend", "dismiss", "Ezhel - Geceler"]);
+    assert!(ok);
+    assert!(stdout.contains("was marked already"), "{stdout}");
+
+    let (stdout, stderr, ok) = run(&dir, &["--json", "recommend", "reset"]);
+    assert!(ok, "{stderr}");
+    let reset = json(&stdout);
+    assert_eq!(reset["forgot"]["dismissed"], 1);
+    let since = reset["since_ms"].as_i64().expect("a reset time");
+
+    let (stdout, stderr, ok) = run_with_music(
+        &dir,
+        Some(&music),
+        &["--json", "recommend", "--from", "local"],
+    );
+    assert!(ok, "{stderr}");
+    let after = json(&stdout);
+    assert_eq!(after["since_ms"].as_i64(), Some(since));
+    assert_eq!(after["summary"]["listens_considered"], 0);
+    assert_eq!(
+        after["summary"]["listens_before_reset"], report["summary"]["listens_considered"],
+        "a reset deletes no listen"
+    );
+}

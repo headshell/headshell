@@ -130,6 +130,10 @@ pub struct PluginEntry {
     /// `None` when the manifest could not be read.
     #[serde(default)]
     pub video: Option<bool>,
+    /// Does it name similar songs (api 6, D-087) — what its manifest
+    /// declares. `None` when the manifest could not be read.
+    #[serde(default)]
+    pub related: Option<bool>,
     /// Why it cannot load, if it cannot — one line, copyable.
     pub problem: Option<String>,
 }
@@ -343,6 +347,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
                 artwork: None,
                 lyrics: None,
                 video: None,
+                related: None,
                 problem: Some(problem),
             };
         }
@@ -368,6 +373,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
         artwork: Some(manifest.artwork),
         lyrics: Some(manifest.lyrics),
         video: Some(manifest.video),
+        related: Some(manifest.related),
         problem,
     }
 }
@@ -615,6 +621,12 @@ impl PluginProvider {
         } else {
             capabilities
         };
+        // Similar songs: api 6, D-087.
+        let capabilities = if manifest.related {
+            capabilities | Capabilities::RELATED
+        } else {
+            capabilities
+        };
 
         let spec = ScriptSpec {
             plugin: manifest.name.clone(),
@@ -831,9 +843,43 @@ impl PluginProvider {
             export::SEARCH,
             vec![serde_json::json!(query), serde_json::json!(limit)],
         )?;
+        self.tracks_from(export::SEARCH, value)
+    }
+
+    /// The songs like an item (api 6, D-087). Only the item's id goes in.
+    /// The item itself, if the plugin names it, is left out; the answer is
+    /// cut to `limit` — a plugin's long list must not become a long queue.
+    fn related_now(&self, id: &ProviderTrackId, limit: usize) -> Result<Vec<ProviderTrack>> {
+        if !self.capabilities.contains(Capabilities::RELATED) {
+            return Err(self.unsupported("similar songs"));
+        }
+        if id.provider != self.id {
+            return Err(Error::new(
+                Stage::ProviderCall,
+                ErrorKind::InvalidInput {
+                    detail: format!(
+                        "a {} id cannot be asked of the {} plugin",
+                        id.provider, self.id
+                    ),
+                },
+            ));
+        }
+        let value = self.call(
+            export::RELATED,
+            vec![serde_json::json!(id.id), serde_json::json!(limit)],
+        )?;
+        let mut tracks = self.tracks_from(export::RELATED, value)?;
+        tracks.retain(|track| track.id != *id);
+        tracks.truncate(limit);
+        Ok(tracks)
+    }
+
+    /// An export's array of tracks as core tracks; malformed ISRCs are
+    /// dropped and counted (K9).
+    fn tracks_from(&self, name: &str, value: serde_json::Value) -> Result<Vec<ProviderTrack>> {
         let wires: Vec<WireTrack> = serde_json::from_value(value).map_err(|err| {
             self.contract(
-                export::SEARCH,
+                name,
                 format!("expected an array of `{{ id, artist, title, … }}`: {err}"),
             )
         })?;
@@ -1087,6 +1133,14 @@ impl Provider for PluginProvider {
         id: &'a ProviderTrackId,
     ) -> ProviderFuture<'a, Option<crate::video::VideoSource>> {
         Box::pin(std::future::ready(self.video_now(id)))
+    }
+
+    fn related<'a>(
+        &'a self,
+        id: &'a ProviderTrackId,
+        limit: usize,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(std::future::ready(self.related_now(id, limit)))
     }
 
     /// A plugin's tracks come from the internet anyway: their lyrics are

@@ -197,6 +197,7 @@ mod tests {
         ProviderTrack {
             id: ProviderTrackId::new(ProviderId::new("youtube"), id),
             track: TrackRef::new(artist, title).with_duration_ms(duration_ms),
+            genres: Vec::new(),
         }
     }
 

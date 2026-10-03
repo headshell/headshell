@@ -9,6 +9,9 @@ use headshell_core::library::SearchHit;
 use headshell_core::lyrics::{LyricsFit, LyricsReport, LyricsSource, LyricsStatus};
 use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
 use headshell_core::plugin::catalog::UpdateOutcome;
+use headshell_core::recommend::{
+    DismissReport, Reason, RecommendReport, RecommendResetReport, SectionKind,
+};
 use headshell_core::session::{
     ImportReport, LookupMode, MusicFoldersReport, OnlineReport, OnlineSource, PlayFrom, PlayReport,
     PluginCatalogReport, PluginConsentReport, PluginIndexReport, PluginInstallReport,
@@ -764,6 +767,136 @@ pub fn suggest(report: &SuggestReport) -> String {
         );
     }
     out
+}
+
+/// Songs recommended from one source (D-087): each section with its
+/// songs, why each is there, what went in, and what could not be asked.
+pub fn recommend(report: &RecommendReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "for you, from {}:", report.display_name);
+    if !report.top_picks.is_empty() {
+        let _ = writeln!(out, "\ntop picks");
+        for item in &report.top_picks {
+            let _ = writeln!(
+                out,
+                "  {} · {}",
+                item.item.track.title, item.item.track.artist
+            );
+        }
+    }
+    for section in &report.sections {
+        let title = match &section.kind {
+            SectionKind::BecauseYouListened { artist, title } => {
+                format!("because you listened to {title} · {artist}")
+            }
+            SectionKind::Genre { genre } => format!("more {genre}"),
+            SectionKind::FromArtistsYouLove => "from artists you love".to_owned(),
+        };
+        let _ = writeln!(out, "\n{title}");
+        for item in &section.items {
+            let why = item
+                .reasons
+                .first()
+                .map_or("", |reason| reason_text(*reason));
+            let _ = writeln!(
+                out,
+                "  {} · {}{}",
+                item.item.track.title,
+                item.item.track.artist,
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({why})")
+                }
+            );
+        }
+    }
+    let summary = &report.summary;
+    if report.is_empty() {
+        let _ = writeln!(
+            out,
+            "{}",
+            if summary.listens_considered == 0 {
+                "nothing yet — play or import a few songs first"
+            } else {
+                "nothing new to offer from this source right now"
+            }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nread from {} listens ({} songs, {} with a genre){}",
+        summary.listens_considered,
+        summary.songs_in_taste,
+        summary.songs_with_genre,
+        if report.since_ms.is_some() {
+            ", since you last reset recommendations"
+        } else {
+            ""
+        }
+    );
+    if summary.left_out_dismissed + summary.left_out_recent > 0 {
+        let _ = writeln!(
+            out,
+            "left out: {} marked not for me, {} played this week",
+            summary.left_out_dismissed, summary.left_out_recent
+        );
+    }
+    if summary.genres_learned_online > 0 {
+        let _ = writeln!(
+            out,
+            "MusicBrainz named the genres of {} songs",
+            summary.genres_learned_online
+        );
+    }
+    // "Nothing to offer" and "could not ask" are different answers (K9).
+    for failure in &report.failures {
+        let first_line = failure
+            .chain
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("STEP:"))
+            .unwrap_or(&failure.chain);
+        let _ = writeln!(
+            out,
+            "could not ask {} — STEP: {} — {}",
+            failure.display_name, failure.stage, first_line
+        );
+    }
+    out
+}
+
+const fn reason_text(reason: Reason) -> &'static str {
+    match reason {
+        Reason::ListenedTogether => "played alongside it",
+        Reason::SimilarAtSource => "the source says it's alike",
+        Reason::SharedGenre => "your genres",
+        Reason::ArtistYouLove => "an artist you love",
+        Reason::NotHeardYet => "new to you",
+    }
+}
+
+/// A song marked "not for me".
+pub fn recommend_dismiss(report: &DismissReport) -> String {
+    if report.newly_marked {
+        format!(
+            "{} · {} won't be recommended again until you reset recommendations\n",
+            report.title, report.artist
+        )
+    } else {
+        format!("{} · {} was marked already\n", report.title, report.artist)
+    }
+}
+
+/// Recommendations started over.
+pub fn recommend_reset(report: &RecommendResetReport) -> String {
+    format!(
+        "recommendations start over from now\n\
+         forgotten: {} not-for-me marks, {} genres learned online\n\
+         your history and stats are untouched\n",
+        report.forgot.dismissed, report.forgot.learned_genres
+    )
 }
 
 /// The plugin list.

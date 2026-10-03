@@ -164,6 +164,7 @@ const STAGE_TEXT = {
   LYRICS_STORE: "The lyrics couldn't be saved",
   VIDEO_LOOKUP: "The video couldn't be found",
   VIDEO_PLAYBACK: "The video couldn't be played",
+  RECOMMEND: "Your picks couldn't be worked out",
 };
 
 /// What the listener can do about it (D-084), where there is something to
@@ -401,11 +402,13 @@ function filePath(picked) {
 // this order (`ui_contract.rs` checks that the two name the same set). A new
 // section is added here, to a group in the sidebar and to `ON_OPEN`.
 
-const PANELS = ["now", "library", "stats", "sleeve", "import", "providers", "plugins", "theme", "diag", "settings"];
+const PANELS = ["now", "foryou", "library", "stats", "sleeve", "import", "providers", "plugins", "theme", "diag", "settings"];
 
 /// A section's shortcut: `Ctrl`+its place in the sidebar, the tenth on `0`
-/// — the key after `9` on the number row.
+/// — the key after `9` on the number row. Settings is past the tenth: it
+/// takes `Ctrl+,`, the key settings answer to in most desktop apps (D-087).
 function panelShortcut(panel) {
+  if (panel === "settings") return "Ctrl+,";
   const slot = PANELS.indexOf(panel) + 1;
   return `Ctrl+${slot % 10}`;
 }
@@ -413,6 +416,10 @@ function panelShortcut(panel) {
 // The work done when a section opens. All of it is local reading: nothing
 // here goes online — the catalog is only read with the button (D-071).
 const ON_OPEN = {
+  foryou: () => {
+    forYouPicker?.placeThumb(true);
+    if (!forYou.report) refreshForYou();
+  },
   stats: () => {
     if (!stats.loaded) runStats(null);
   },
@@ -434,6 +441,7 @@ const ON_OPEN = {
     videosSwitch.placeThumb(true);
     refreshOnline();
     refreshVideoAway();
+    mountRecommendReset();
   },
 };
 
@@ -2203,11 +2211,16 @@ document.addEventListener("keydown", (event) => {
     else if (nowOpen) setNowOpen(false);
     return;
   }
-  // Ctrl+1…9, 0: sections. It works in a text box too — pressing a number
-  // key with Ctrl is not typing.
+  // Ctrl+1…9, 0: sections; Ctrl+, settings. It works in a text box too —
+  // pressing a number key with Ctrl is not typing.
   if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+    if (event.key === ",") {
+      event.preventDefault();
+      openPanel("settings");
+      return;
+    }
     const slot = event.key === "0" ? 10 : Number(event.key);
-    if (Number.isInteger(slot) && slot >= 1 && slot <= PANELS.length) {
+    if (Number.isInteger(slot) && slot >= 1 && slot <= Math.min(10, PANELS.length)) {
       event.preventDefault();
       openPanel(PANELS[slot - 1]);
     }
@@ -3134,6 +3147,419 @@ function armedButton(label, action) {
   return button;
 }
 
+// ————————————————————————————————————— for you (D-087)
+//
+// Songs picked from the listener's own history, one source at a time. The
+// core works them out (`recommend`) — the taste never leaves the machine —
+// and this page draws them: a section per loved song, per genre, and the
+// favourite artists' unheard songs. Opening the page asks once; "pick
+// again" and switching sources ask again. A song marked "not for me" leaves
+// at once and stays away until recommendations are reset in settings.
+
+const forYou = { source: null, report: null, asked: 0, sourcesKey: "" };
+let forYouPicker = null;
+let forYouRows = [];
+const forYouThumbs = new Map();
+
+/// Why a song is offered, in the listener's words (D-084).
+const REASON_TEXT = {
+  listened_together: "you play them together",
+  similar_at_source: "a lot like it",
+  shared_genre: "your kind of sound",
+  artist_you_love: "an artist you love",
+  not_heard_yet: "new to you",
+};
+
+/// The sources a page can be for: the ones that can play and be searched.
+async function forYouSources() {
+  const list = await call("providers");
+  if (!list) return [];
+  takeProviders(list);
+  const sources = list.providers.filter(
+    (info) => (info.capabilities & SEARCH) !== 0 && (info.capabilities & STREAM) !== 0,
+  );
+  const first = list.roles?.music?.provider ?? list.play_from?.provider ?? sources[0]?.id ?? null;
+  if (!sources.some((info) => info.id === forYou.source)) forYou.source = first;
+
+  const box = $("forYouSources");
+  const key = sources.map((info) => info.id).join("\u0001");
+  if (key !== forYou.sourcesKey) {
+    forYou.sourcesKey = key;
+    const thumb = box.querySelector(".segmented-thumb");
+    box.replaceChildren(
+      thumb,
+      ...sources.map((info) =>
+        h("button", {
+          type: "button",
+          role: "radio",
+          class: "segment",
+          dataset: { provider: info.id },
+          "aria-checked": String(info.id === forYou.source),
+          text: info.display_name,
+        }),
+      ),
+    );
+    forYouPicker = segmented(box, (segment) => {
+      forYou.source = segment.dataset.provider;
+      refreshForYou({ keepSources: true });
+    });
+  }
+  // One source is no choice: the control is not drawn.
+  box.hidden = sources.length < 2;
+  requestAnimationFrame(() => forYouPicker?.placeThumb(true));
+  return sources;
+}
+
+async function refreshForYou({ keepSources = false } = {}) {
+  const asked = ++forYou.asked;
+  const button = $("btnForYouAgain");
+  const sections = $("forYouSections");
+  button.disabled = true;
+  sections.setAttribute("aria-busy", "true");
+  sections.classList.add("loading");
+  try {
+    const sources = keepSources ? null : await forYouSources();
+    if (asked !== forYou.asked) return;
+    if (sources && sources.length === 0) {
+      renderForYou(null, "Add a music folder or a server in sources, and picks for you will show up here.");
+      return;
+    }
+    const report = await call("recommend", { provider: forYou.source });
+    if (asked !== forYou.asked) return;
+    if (!report) {
+      renderForYou(null, "Your picks couldn't be worked out this time — try again in a moment.");
+      return;
+    }
+    forYou.report = report;
+    renderForYou(report);
+  } finally {
+    if (asked === forYou.asked) {
+      button.disabled = false;
+      sections.removeAttribute("aria-busy");
+      sections.classList.remove("loading");
+    }
+  }
+}
+
+/// The empty page's sentence: "nothing yet" and "nothing new" are different
+/// answers (K9), and a fresh start says so.
+function forYouEmptyText(report) {
+  const summary = report.summary;
+  if (summary.listens_considered === 0 && report.since_ms !== null) {
+    return "You started over — play a few songs and new picks will show up here.";
+  }
+  if (summary.listens_considered === 0) {
+    return "Play or import a few songs, and picks for you will show up here.";
+  }
+  return `Nothing new to suggest from ${report.display_name} right now. Try another source, or come back after a few more songs.`;
+}
+
+function renderForYou(report, emptyText = null) {
+  const idle = $("forYouIdle");
+  const box = $("forYouLists");
+  const note = $("forYouNote");
+  const summary = $("forYouSummary");
+  forYouRows = [];
+
+  const picks = report?.top_picks ?? [];
+  const sections = report?.sections ?? [];
+  renderShelf(picks);
+  box.replaceChildren(...sections.map(forYouSection));
+  const anything = picks.length > 0 || sections.length > 0;
+  idle.hidden = anything;
+  idle.textContent = anything ? "" : (emptyText ?? forYouEmptyText(report));
+
+  // A source that couldn't be asked is said plainly; its details are the
+  // debug mode's (D-084).
+  const failed = report?.failures ?? [];
+  note.hidden = failed.length === 0;
+  note.textContent = failed.length
+    ? `Couldn't reach ${[...new Set(failed.map((failure) => failure.display_name))].join(" or ")}, so some picks may be missing.`
+    : "";
+
+  summary.hidden = !report;
+  if (report) {
+    const s = report.summary;
+    summary.textContent =
+      `read from ${s.listens_considered} listens (${s.songs_in_taste} songs, ${s.songs_with_genre} with a genre)` +
+      (s.listens_before_reset ? `, ${s.listens_before_reset} before the reset` : "") +
+      ` · ${s.seeds} seeds · found: ${s.found_listened_together} together, ${s.found_at_source} at the source, ` +
+      `${s.found_by_genre} by genre, ${s.found_by_artist} by artist · left out: ${s.left_out_dismissed} not for me, ` +
+      `${s.left_out_recent} played this week` +
+      (s.genres_learned_online ? ` · MusicBrainz named ${s.genres_learned_online}` : "") +
+      (s.top_genres.length ? ` · top genres: ${s.top_genres.join(", ")}` : "") +
+      failed.map((failure) => ` · ${failure.display_name}: STEP ${failure.stage}`).join("");
+  }
+
+  // The shelf and the sections arrive one after another, from below: where
+  // the eye goes next.
+  const arriving = [...(picks.length > 0 ? [$("forYouShelf")] : []), ...box.children];
+  arriving.forEach((section, index) => {
+    // A later section starts a little further down, so they settle in turn.
+    animate(section, { y: 0, opacity: 1 }, { from: { y: 12 + index * 8, opacity: 0 }, responseScale: 0.8 });
+  });
+  coverForYou(forYou.asked);
+}
+
+function forYouHeading(section) {
+  switch (section.kind) {
+    case "because_you_listened":
+      return { title: `Because you listened to ${section.title}`, sub: section.artist };
+    case "genre":
+      return { title: `More ${section.genre}`, sub: "from the sounds you play most" };
+    default:
+      return { title: "From artists you love", sub: "songs of theirs you haven't heard yet" };
+  }
+}
+
+function forYouSection(section) {
+  const heading = forYouHeading(section);
+  const items = section.items.map((entry) => entry.item);
+  const title = h("h2", { class: "for-you-title", text: heading.title });
+  return h(
+    "section",
+    { class: "card for-you-section" },
+    h(
+      "header",
+      { class: "for-you-head" },
+      h("div", { class: "for-you-heading" }, title, h("p", { class: "hint", text: heading.sub })),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "for-you-play-all",
+          title: "play all of these",
+          onclick: () => playItems(items),
+        },
+        icon("play"),
+        "play all",
+      ),
+    ),
+    h("div", { class: "for-you-list", role: "list" }, ...section.items.map(forYouRow)),
+  );
+}
+
+function forYouRow(entry) {
+  const item = entry.item;
+  const track = item.track;
+  const why = REASON_TEXT[entry.reasons[0]] ?? "";
+  const notForMe = { label: "not for me", run: () => dismissForYou(row, track) };
+  const row = h(
+    "div",
+    {
+      class: "for-you-row",
+      role: "listitem",
+      tabindex: "0",
+      menu: () => songMenu(track, { item, extra: [notForMe] }),
+      ondblclick: () => playItems([item]),
+      onkeydown: (event) => {
+        if (event.key === "Enter") playItems([item]);
+      },
+    },
+    h(
+      "button",
+      { type: "button", class: "for-you-art", title: `play ${track.title}`, "aria-label": `play ${track.title}`, onclick: () => playItems([item]) },
+      h("span", { class: "for-you-art-play", "aria-hidden": "true" }, icon("play")),
+    ),
+    h(
+      "span",
+      { class: "for-you-main" },
+      h("span", { class: "for-you-song", text: track.title }),
+      h("span", { class: "for-you-sub", text: [track.artist, why].filter(Boolean).join(" · ") }),
+    ),
+    h(
+      "span",
+      { class: "for-you-genres debug-only", text: entry.genres.slice(0, 2).join(", ") },
+    ),
+    h("span", { class: "for-you-time", text: track.duration_ms ? clock(track.duration_ms) : "" }),
+  );
+  forYouRows.push({ el: row, item, key: null, variant: "thumb", slot: ".for-you-art" });
+  return row;
+}
+
+// ————— the shelf: the top picks as square tiles
+
+/// A tile's colour while it has no cover: one hue per artist, so a shelf of
+/// local files without art still reads as different records.
+function hueOf(text) {
+  let hash = 0;
+  for (const char of text) hash = (hash * 31 + char.codePointAt(0)) % 360;
+  return hash;
+}
+
+function renderShelf(picks) {
+  const shelf = $("forYouShelf");
+  const track = $("forYouShelfTrack");
+  shelf.hidden = picks.length === 0;
+  track.replaceChildren(...picks.map(forYouTile));
+  track.scrollLeft = 0;
+  requestAnimationFrame(updateShelfEdges);
+}
+
+function forYouTile(entry) {
+  const item = entry.item;
+  const track = item.track;
+  const why = REASON_TEXT[entry.reasons[0]] ?? "";
+  const notForMe = { label: "not for me", run: () => dismissForYou(tile, track) };
+  const tile = h(
+    "div",
+    {
+      class: "shelf-tile",
+      role: "listitem",
+      tabindex: "0",
+      title: why ? `${track.title} · ${track.artist} — ${why}` : `${track.title} · ${track.artist}`,
+      menu: () => songMenu(track, { item, extra: [notForMe] }),
+      ondblclick: () => playItems([item]),
+      onkeydown: (event) => {
+        if (event.key === "Enter") playItems([item]);
+      },
+    },
+    h(
+      "button",
+      { type: "button", class: "shelf-art", "aria-label": `play ${track.title}`, onclick: () => playItems([item]) },
+      h("span", { class: "shelf-play", "aria-hidden": "true" }, icon("play")),
+    ),
+    h("span", { class: "shelf-song", text: track.title }),
+    h("span", { class: "shelf-sub", text: track.artist }),
+  );
+  tile.style.setProperty("--tile-hue", String(hueOf(track.artist)));
+  forYouRows.push({ el: tile, item, key: null, variant: "label", slot: ".shelf-art" });
+  return tile;
+}
+
+/// The arrows say whether there is more that way; the edges fade only
+/// where tiles go on.
+function updateShelfEdges() {
+  const track = $("forYouShelfTrack");
+  const start = track.scrollLeft <= 1;
+  const end = track.scrollLeft + track.clientWidth >= track.scrollWidth - 1;
+  track.classList.toggle("at-start", start);
+  track.classList.toggle("at-end", end);
+  $("btnShelfBack").disabled = start;
+  $("btnShelfForward").disabled = end;
+}
+
+/// A page of tiles at a time, landing on a tile's edge (the track snaps).
+function pageShelf(direction) {
+  const track = $("forYouShelfTrack");
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  track.scrollBy({ left: direction * track.clientWidth * 0.85, behavior: reduce ? "auto" : "smooth" });
+}
+
+$("forYouShelfTrack").addEventListener("scroll", updateShelfEdges, { passive: true });
+$("btnShelfBack").addEventListener("click", () => pageShelf(-1));
+$("btnShelfForward").addEventListener("click", () => pageShelf(1));
+window.addEventListener("resize", updateShelfEdges);
+
+/// "Not for me": the row leaves at once — the answer is the listener's, the
+/// core only keeps it. A failure brings it back.
+async function dismissForYou(row, track) {
+  const list = row.parentElement;
+  const tile = row.classList.contains("shelf-tile");
+  const height = row.offsetHeight;
+  const width = row.offsetWidth;
+  row.classList.add("leaving");
+  animate(row, { opacity: 0, scale: 0.98 }, { responseScale: 0.6 });
+  const report = await call("recommend_dismiss", { artist: track.artist, title: track.title });
+  if (!report) {
+    row.classList.remove("leaving");
+    animate(row, { opacity: 1, scale: 1 });
+    return;
+  }
+  // A row folds up, a tile folds sideways — each along its own list.
+  if (tile) row.style.flexBasis = `${width}px`;
+  else row.style.height = `${height}px`;
+  requestAnimationFrame(() => {
+    if (tile) row.style.flexBasis = "0px";
+    else row.style.height = "0px";
+  });
+  setTimeout(() => {
+    row.remove();
+    forYouRows = forYouRows.filter((entry) => entry.el !== row);
+    // A section or a shelf left empty goes too.
+    if (list && list.childElementCount === 0) {
+      list.closest(".for-you-section")?.remove();
+      if (tile) $("forYouShelf").hidden = true;
+    }
+    updateShelfEdges();
+    if ($("forYouLists").childElementCount === 0 && $("forYouShelf").hidden) {
+      $("forYouIdle").hidden = false;
+      $("forYouIdle").textContent = "That's everything for now — pick again for more.";
+    }
+  }, 260);
+  toast(`Got it — we won't suggest ${track.title} again.`, true);
+}
+
+// The covers: the cache's at once, the rest as the cover worker finds them,
+// announced by the tick — the suggestions' way (D-080).
+async function coverForYou(asked) {
+  if (forYouRows.length === 0) return;
+  const rows = forYouRows;
+  const report = await call("artwork_shown", { items: rows.map((row) => row.item) });
+  if (!report || asked !== forYou.asked) return;
+  report.items.forEach((entry, index) => {
+    if (rows[index]) rows[index].key = entry.key;
+  });
+  const onScreen = new Set(rows.map((row) => `${row.variant}:${row.key}`));
+  for (const id of forYouThumbs.keys()) if (!onScreen.has(id)) forYouThumbs.delete(id);
+  await paintForYouCovers(report.items.filter((entry) => entry.status === "found").map((entry) => entry.key));
+}
+
+/// The covers of the keys given: a list row's small one, a tile's large
+/// one (the record label's size), each asked for once.
+async function paintForYouCovers(keys) {
+  const found = new Set(keys);
+  for (const variant of ["thumb", "label"]) {
+    const wanted = [
+      ...new Set(
+        forYouRows
+          .filter((row) => row.variant === variant && row.key && found.has(row.key))
+          .map((row) => row.key)
+          .filter((key) => !forYouThumbs.has(`${variant}:${key}`)),
+      ),
+    ];
+    if (wanted.length === 0) continue;
+    for (const picture of (await call("artwork_images", { keys: wanted, variant })) ?? []) {
+      forYouThumbs.set(`${variant}:${picture.key}`, picture.uri);
+    }
+  }
+  for (const row of forYouRows) {
+    const uri = row.key ? forYouThumbs.get(`${row.variant}:${row.key}`) : undefined;
+    const slot = row.el.querySelector(row.slot);
+    if (!uri || slot.querySelector("img")) continue;
+    const img = h("img", { alt: "", src: uri });
+    slot.prepend(img);
+    if (!coversSeen.has(row.key)) {
+      animate(img, { opacity: 1 }, { from: { opacity: 0 } });
+      coversSeen.add(row.key);
+    }
+  }
+}
+
+$("btnForYouAgain").addEventListener("click", () => refreshForYou());
+
+/// Settings → recommendations: the two-click reset, made once.
+let recommendResetMounted = false;
+function mountRecommendReset() {
+  if (recommendResetMounted) return;
+  recommendResetMounted = true;
+  $("recommendResetSlot").append(
+    armedButton("start over", async () => {
+      const report = await call("recommend_reset");
+      if (!report) return;
+      const note = $("recommendResetNote");
+      const marks = report.forgot.dismissed;
+      note.hidden = false;
+      note.textContent =
+        marks > 0
+          ? `Done — ${marks} “not for me” ${marks === 1 ? "song is" : "songs are"} welcome again, and your taste starts fresh from today.`
+          : "Done — your taste starts fresh from today.";
+      // The page is worked out again the next time it opens.
+      forYou.report = null;
+    }),
+  );
+}
+
 // ————————————————————————————————————— plugins (the Phase 2 surface)
 //
 // Three things are shown **separately**, and none of them suppresses the
@@ -3882,7 +4308,7 @@ function trackItems(track) {
 /// the menu keeps its shape when they come, and they cannot be picked.
 /// "Play next" needs the queue to take a track between the playing one and
 /// the one already handed to the engine for a gapless start (D-077).
-function songMenu(track, { item = null, queueIndex = null, current = false } = {}) {
+function songMenu(track, { item = null, queueIndex = null, current = false, extra = [] } = {}) {
   const query = `${track.artist} ${track.title}`;
   const name = trackTitle(track);
   let playNow;
@@ -3903,6 +4329,8 @@ function songMenu(track, { item = null, queueIndex = null, current = false } = {
       { label: "start a radio from it", disabled: true, key: "soon" },
       { label: "like", disabled: true, key: "soon" },
       "-",
+      ...extra,
+      ...(extra.length > 0 ? ["-"] : []),
       ...trackItems(track),
     ],
   };
@@ -4061,6 +4489,15 @@ async function copyDiagReport() {
 /// first. What shows its result in the section opens the section.
 const SECTION_ITEMS = {
   now: () => [{ label: lyricsToggleLabel(), key: "L", run: toggleLyrics }],
+  foryou: () => [
+    {
+      label: "pick again",
+      run: () => {
+        openPanel("foryou");
+        refreshForYou();
+      },
+    },
+  ],
   library: () => [
     {
       label: "search your library",
@@ -4279,6 +4716,8 @@ listen("headshell://tick", async (event) => {
   }
   // A suggestion's cover found while the list is up (D-080).
   if (report.artwork_ready?.length > 0 && suggestUp) paintSuggestCovers(report.artwork_ready);
+  // A recommendation's cover found while the page is up (D-087).
+  if (report.artwork_ready?.length > 0 && basePanel === "foryou") paintForYouCovers(report.artwork_ready);
   if (report.lyrics_ready) {
     // The playing track's lyrics changed: a new track, an answer, a shift.
     refreshLyrics();

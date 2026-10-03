@@ -1,0 +1,23 @@
+{
+  "display_name": "Local files",
+  "failures": [],
+  "provider": "local",
+  "sections": [],
+  "since_ms": null,
+  "summary": {
+    "found_at_source": 0,
+    "found_by_artist": 0,
+    "found_by_genre": 0,
+    "found_listened_together": 0,
+    "genres_learned_online": 0,
+    "left_out_dismissed": 0,
+    "left_out_recent": 0,
+    "listens_before_reset": 0,
+    "listens_considered": 60,
+    "seeds": 3,
+    "songs_in_taste": 6,
+    "songs_with_genre": 0,
+    "top_genres": []
+  },
+  "top_picks": []
+}

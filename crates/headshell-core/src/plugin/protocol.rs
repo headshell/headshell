@@ -1,11 +1,12 @@
-//! The **data format** of the plugin contract (api 4; D-069, D-076, D-078).
+//! The **data format** of the plugin contract (api 6; D-069, D-076, D-078,
+//! D-086, D-087).
 //!
 //! api 1 was a wire protocol: line-based JSON-RPC, a subprocess, a handshake.
 //! In api 2 there is no wire — the plugin runs in QuickJS inside the core and
 //! the contract is **the exported functions**. Values cross between JS and
 //! Rust as JSON; this file is the Rust-side shape of that JSON.
 //!
-//! ## The functions of api 4
+//! ## The functions of api 6
 //!
 //! | Function | Required | Returns | Counterpart |
 //! |---|---|---|---|
@@ -15,6 +16,7 @@
 //! | `artwork(id, size)` | if the manifest says `"artwork": true` | [`WireArtwork`] or `null` | [`crate::provider::Provider::artwork`] |
 //! | `lyrics(id)` | if the manifest says `"lyrics": true` | [`WireLyrics`] or `null` | [`crate::provider::Provider::lyrics`] |
 //! | `resolve_video(id)` | if the manifest says `"video": true` | [`crate::video::VideoSource`] (`{ kind: "youtube", video_id }`) or `null` | [`crate::provider::Provider::resolve_video`] |
+//! | `related(id, limit)` | if the manifest says `"related": true` | an array of [`WireTrack`] | [`crate::provider::Provider::related`] |
 //!
 //! The function names are deliberately the same as api 1's method names
 //! (`resolve_source`, not `resolveSource`): when the document, the provider
@@ -52,6 +54,13 @@
 //! player shows (a YouTube video id; the app embeds YouTube's player). A
 //! plugin with `video` and without `stream` is a video service: its tracks
 //! are videos only, and the video is their sound.
+//!
+//! api 5 → 6 (D-087), the user's decision again: every manifest **must**
+//! declare `related` — `true` or `false`. `true` makes the engine expect a
+//! `related(id, limit)` export: the service's own songs like the item (its
+//! radio, its "up next"), for the recommendations. Only the item's id is
+//! passed: a plugin never sees the history or the taste worked out from it.
+//! A [`WireTrack`] may now carry `genres`, which the recommendations learn.
 
 use crate::ids::{Isrc, ProviderId, ProviderTrackId};
 use crate::model::TrackRef;
@@ -60,7 +69,7 @@ use crate::provider::{AudioSource, Capabilities};
 use serde::{Deserialize, Serialize};
 
 /// The version of the plugin contract the core speaks.
-pub const PLUGIN_API: u32 = 5;
+pub const PLUGIN_API: u32 = 6;
 
 /// The names of the functions a plugin exports. Identifiers are in English
 /// (D-036).
@@ -74,6 +83,8 @@ pub mod export {
     pub const LYRICS: &str = "lyrics";
     /// api 5 (D-086).
     pub const RESOLVE_VIDEO: &str = "resolve_video";
+    /// api 6 (D-087).
+    pub const RELATED: &str = "related";
 }
 
 /// Turns capability names into a bit mask.
@@ -126,6 +137,9 @@ pub struct WireTrack {
     /// silently accepted (K6: the first link of the chain must not be corrupted).
     #[serde(default)]
     pub isrc: Option<String>,
+    /// The genres the service names for it (api 6, D-087), as it writes them.
+    #[serde(default)]
+    pub genres: Vec<String>,
 }
 
 impl WireTrack {
@@ -147,7 +161,14 @@ impl WireTrack {
             isrc,
             provider_track_id: Some(id.clone()),
         };
-        (crate::provider::ProviderTrack { id, track }, dropped_isrc)
+        (
+            crate::provider::ProviderTrack {
+                id,
+                track,
+                genres: self.genres,
+            },
+            dropped_isrc,
+        )
     }
 }
 
@@ -243,6 +264,7 @@ mod tests {
             album: None,
             duration_ms: Some(1000),
             isrc: Some("USRC17607839".to_owned()),
+            genres: vec!["Rock".to_owned()],
         };
         let provider = ProviderId::new("soundcloud");
         let (track, dropped) = wire.into_provider_track(&provider);
@@ -250,6 +272,7 @@ mod tests {
         assert_eq!(track.id.provider, provider);
         assert_eq!(track.id.id, "12345");
         assert!(track.track.isrc.is_some());
+        assert_eq!(track.genres, vec!["Rock".to_owned()]);
     }
 
     #[test]
@@ -261,6 +284,7 @@ mod tests {
             album: None,
             duration_ms: None,
             isrc: Some("bogus".to_owned()),
+            genres: Vec::new(),
         };
         let (track, dropped) = wire.into_provider_track(&ProviderId::new("p"));
         assert!(dropped, "a malformed ISRC must be counted");

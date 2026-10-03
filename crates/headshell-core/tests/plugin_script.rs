@@ -148,6 +148,15 @@ async fn a_script_plugin_answers_health_search_and_resolve() {
         provider.lyrics(&other).await.unwrap().is_none(),
         "no lyrics is an answer: the chain goes on"
     );
+
+    // api 6 (D-087): the manifest says `"related": true`; only the item's
+    // id goes in, the item itself is not offered back, and the genres the
+    // service names cross with each track.
+    assert!(provider.info().capabilities.contains(Capabilities::RELATED));
+    let similar = provider.related(&other, 5).await.unwrap();
+    assert_eq!(similar.len(), 1);
+    assert_eq!(similar[0].id, id);
+    assert_eq!(similar[0].genres, vec!["Hip-Hop", "Turkish Rap"]);
 }
 
 /// api 1's Python plugin is refused **without crashing** and the user is told
@@ -265,7 +274,8 @@ async fn a_hanging_plugin_times_out_instead_of_freezing_the_core() {
          export function resolve_source() { return null; }\n\
          export function artwork() { return null; }\n\
          export function lyrics() { return null; }\n\
-         export function resolve_video() { return null; }\n",
+         export function resolve_video() { return null; }\n\
+         export function related() { return []; }\n",
     )
     .unwrap();
 

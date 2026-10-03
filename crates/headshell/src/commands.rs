@@ -31,6 +31,7 @@ use headshell_core::playback::{
     PlayState, PlaybackAnchor, PrefetchReport, QueueItem, QueueView, RepeatMode,
 };
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
+use headshell_core::recommend::{DismissReport, RecommendReport, RecommendResetReport};
 use headshell_core::session::{
     self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, MusicFoldersReport,
     OnlineReport, PlayFromReport, PlayOptions, PluginCatalogReport, PluginConsentReport,
@@ -479,6 +480,80 @@ pub async fn suggest(state: State<'_, AppState>, query: String) -> CommandResult
         })
         .await?;
     Ok(plan.finish().await)
+}
+
+/// Songs picked for the listener from one source (D-087) — `headshell
+/// recommend`. `provider`: `None` — the one music plays from.
+///
+/// Three steps, like the suggestions: the history is read on the core
+/// thread; the source (and MusicBrainz, online) is asked **off** it, so the
+/// player's rounds and controls never wait on a slow server; what was
+/// learned on the way is written back on the core thread. The busy notice
+/// covers the whole visit — the page waits on it.
+#[tauri::command]
+pub async fn recommend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: Option<String>,
+) -> CommandResult<RecommendReport> {
+    let _ = app.emit(BUSY_EVENT, Some("recommend"));
+    let result = async {
+        let plan = state
+            .run_on_core(move |core| {
+                Box::pin(async move {
+                    let provider = provider.map(ProviderId::new);
+                    core.live.session().recommend_plan(
+                        &core.registry,
+                        provider.as_ref(),
+                        core.lookup,
+                    )
+                })
+            })
+            .await?;
+        let report = plan.finish().await;
+        state
+            .run_on_core(move |core| {
+                Box::pin(async move {
+                    core.live
+                        .session_mut()
+                        .remember_recommendation_genres(&report)?;
+                    Ok(report)
+                })
+            })
+            .await
+    }
+    .await;
+    let _ = app.emit(BUSY_EVENT, None::<&str>);
+    result
+}
+
+/// Marks a song "not for me" (D-087) — `headshell recommend dismiss`.
+#[tauri::command]
+pub async fn recommend_dismiss(
+    state: State<'_, AppState>,
+    artist: String,
+    title: String,
+) -> CommandResult<DismissReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live
+                    .session_mut()
+                    .dismiss_recommendation(&artist, &title)
+            })
+        })
+        .await
+}
+
+/// Starts recommendations over (D-087) — `headshell recommend reset`, the
+/// settings' *reset recommendations*.
+#[tauri::command]
+pub async fn recommend_reset(state: State<'_, AppState>) -> CommandResult<RecommendResetReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move { core.live.session_mut().reset_recommendations() })
+        })
+        .await
 }
 
 /// Plays exactly these tracks — a picked suggestion, a song's "play now"

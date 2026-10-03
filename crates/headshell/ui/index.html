@@ -56,6 +56,10 @@
       <symbol id="i-now" viewBox="0 0 24 24">
         <path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4" />
       </symbol>
+      <!-- For you (D-087): a sparkle — picked, not searched. -->
+      <symbol id="i-foryou" viewBox="0 0 24 24">
+        <path d="M11 3.5l1.9 5.1 5.1 1.9-5.1 1.9L11 17.5l-1.9-5.1L4 10.5l5.1-1.9z M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z" />
+      </symbol>
       <symbol id="i-library" viewBox="0 0 24 24">
         <path d="M5 4.5v15M9 4.5v15M13.2 5.4l3.9-1 3.6 14.3-3.9 1z" />
       </symbol>
@@ -98,6 +102,12 @@
       </symbol>
       <symbol id="i-chevron" viewBox="0 0 24 24">
         <path d="M6 14.5l6-6 6 6" />
+      </symbol>
+      <symbol id="i-back" viewBox="0 0 24 24">
+        <path d="M14.5 6l-6 6 6 6" />
+      </symbol>
+      <symbol id="i-forward" viewBox="0 0 24 24">
+        <path d="M9.5 6l6 6-6 6" />
       </symbol>
       <symbol id="i-copy" viewBox="0 0 24 24">
         <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
@@ -149,30 +159,33 @@
           <button class="nav" data-panel="now" aria-current="true" title="now playing (Ctrl+1)">
             <svg class="icon" aria-hidden="true"><use href="#i-now" /></svg><span class="nav-label">now playing</span>
           </button>
-          <button class="nav" data-panel="library" title="library (Ctrl+2)">
+          <button class="nav" data-panel="foryou" title="for you (Ctrl+2)">
+            <svg class="icon" aria-hidden="true"><use href="#i-foryou" /></svg><span class="nav-label">for you</span>
+          </button>
+          <button class="nav" data-panel="library" title="library (Ctrl+3)">
             <svg class="icon" aria-hidden="true"><use href="#i-library" /></svg><span class="nav-label">library</span>
           </button>
         </div>
 
         <div class="nav-group" role="group" aria-labelledby="navGroupHistory">
           <p id="navGroupHistory" class="nav-group-title">history</p>
-          <button class="nav" data-panel="stats" title="stats (Ctrl+3)">
+          <button class="nav" data-panel="stats" title="stats (Ctrl+4)">
             <svg class="icon" aria-hidden="true"><use href="#i-stats" /></svg><span class="nav-label">stats</span>
           </button>
-          <button class="nav" data-panel="sleeve" title="your sleeve (Ctrl+4)">
+          <button class="nav" data-panel="sleeve" title="your sleeve (Ctrl+5)">
             <svg class="icon" aria-hidden="true"><use href="#i-sleeve" /></svg><span class="nav-label">sleeve</span>
           </button>
-          <button class="nav" data-panel="import" title="import (Ctrl+5)">
+          <button class="nav" data-panel="import" title="import (Ctrl+6)">
             <svg class="icon" aria-hidden="true"><use href="#i-import" /></svg><span class="nav-label">import</span>
           </button>
         </div>
 
         <div class="nav-group" role="group" aria-labelledby="navGroupSources">
           <p id="navGroupSources" class="nav-group-title">connect</p>
-          <button class="nav" data-panel="providers" title="sources (Ctrl+6)">
+          <button class="nav" data-panel="providers" title="sources (Ctrl+7)">
             <svg class="icon" aria-hidden="true"><use href="#i-providers" /></svg><span class="nav-label">sources</span>
           </button>
-          <button class="nav" data-panel="plugins" title="services (Ctrl+7)">
+          <button class="nav" data-panel="plugins" title="services (Ctrl+8)">
             <svg class="icon" aria-hidden="true"><use href="#i-plugins" /></svg><span class="nav-label">services</span>
             <span id="navPluginBadge" class="nav-badge" hidden></span>
           </button>
@@ -180,13 +193,13 @@
 
         <div class="nav-group" role="group" aria-labelledby="navGroupSystem">
           <p id="navGroupSystem" class="nav-group-title">system</p>
-          <button class="nav" data-panel="theme" title="appearance (Ctrl+8)">
+          <button class="nav" data-panel="theme" title="appearance (Ctrl+9)">
             <svg class="icon" aria-hidden="true"><use href="#i-theme" /></svg><span class="nav-label">appearance</span>
           </button>
-          <button class="nav debug-only" data-panel="diag" title="diagnostics (Ctrl+9)">
+          <button class="nav debug-only" data-panel="diag" title="diagnostics (Ctrl+0)">
             <svg class="icon" aria-hidden="true"><use href="#i-diag" /></svg><span class="nav-label">diagnostics</span>
           </button>
-          <button class="nav" data-panel="settings" title="settings (Ctrl+0)">
+          <button class="nav" data-panel="settings" title="settings (Ctrl+,)">
             <svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg><span class="nav-label">settings</span>
           </button>
         </div>
@@ -229,6 +242,55 @@
 
       <main id="content" class="content">
         <!-- ————————————————— library -->
+        <!-- ————————————————— for you (D-087)
+             Songs picked from the listener's own history, one source at a
+             time. Worked out on this machine: a source is asked only for
+             songs like one of its own tracks. -->
+        <section id="panel-foryou" class="panel" aria-labelledby="titleForYou" hidden>
+          <header class="panel-head">
+            <h1 id="titleForYou" class="panel-title">for you</h1>
+            <p class="panel-lede">Songs picked from what you love — worked out right here, on your computer.</p>
+            <p class="hint debug-only">
+              Read from your listening history (D-087): songs played around the ones you love lately, the genres
+              you play most, and — for the local files — songs by your favourite artists you haven't heard. A server
+              or service is only asked for songs like one of its own tracks, by that track's id; nothing about your
+              taste leaves this machine. Reset in settings.
+            </p>
+            <div class="panel-actions">
+              <button id="btnForYouAgain" type="button" title="pick again">pick again</button>
+            </div>
+          </header>
+          <div id="forYouSources" class="segmented for-you-sources" role="radiogroup" aria-label="recommend from" hidden>
+            <span class="segmented-thumb" aria-hidden="true"></span>
+          </div>
+          <p id="forYouIdle" class="empty" hidden></p>
+          <div id="forYouSections" class="for-you-sections">
+            <!-- The shelf (D-087 addendum): the best of every section as square
+                 tiles, scrolled sideways like YouTube Music's — the arrows page
+                 through it, the edges fade where tiles go on. -->
+            <section id="forYouShelf" class="for-you-shelf" aria-labelledby="forYouShelfTitle" hidden>
+              <header class="shelf-head">
+                <div class="for-you-heading">
+                  <h2 id="forYouShelfTitle" class="for-you-title">Top picks for you</h2>
+                  <p class="hint">the best of everything below</p>
+                </div>
+                <div class="shelf-arrows">
+                  <button id="btnShelfBack" type="button" class="icon-button" title="back" aria-label="scroll back" aria-controls="forYouShelfTrack">
+                    <svg class="icon" aria-hidden="true"><use href="#i-back" /></svg>
+                  </button>
+                  <button id="btnShelfForward" type="button" class="icon-button" title="more" aria-label="scroll for more" aria-controls="forYouShelfTrack">
+                    <svg class="icon" aria-hidden="true"><use href="#i-forward" /></svg>
+                  </button>
+                </div>
+              </header>
+              <div id="forYouShelfTrack" class="shelf-track" role="list" tabindex="-1"></div>
+            </section>
+            <div id="forYouLists" class="for-you-lists"></div>
+          </div>
+          <p id="forYouNote" class="hint for-you-note" hidden></p>
+          <p id="forYouSummary" class="hint debug-only" hidden></p>
+        </section>
+
         <section id="panel-library" class="panel" aria-labelledby="titleLibrary" hidden>
           <header class="panel-head">
             <h1 id="titleLibrary" class="panel-title">library</h1>
@@ -793,6 +855,31 @@
 
           <!-- Advanced, at the very bottom: the debug mode (D-083) — the
                developer's details, only while it is on. -->
+          <!-- Recommendations (D-087): what the "for you" page learned, and a
+               way to start it over. The history is never touched. -->
+          <section class="settings-group" aria-labelledby="groupRecommend">
+            <h2 id="groupRecommend" class="settings-group-title">recommendations</h2>
+            <div class="card settings-list">
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="recommendResetTitle" class="setting-title">start recommendations over</h3>
+                    <p id="recommendResetHint" class="hint">
+                      Forget the songs you marked “not for me” and start learning your taste from today. Your
+                      history and stats stay just as they are.
+                    </p>
+                    <p class="hint debug-only">
+                      Clears <code>recommend_dismissed</code> and the genres learned from MusicBrainz, and saves
+                      <code>recommend_since</code> — the listens before it stay in the library (D-087).
+                    </p>
+                  </div>
+                  <span id="recommendResetSlot" class="setting-action"></span>
+                </div>
+                <p id="recommendResetNote" class="hint setting-note" hidden></p>
+              </div>
+            </div>
+          </section>
+
           <section class="settings-group" aria-labelledby="groupAdvanced">
             <h2 id="groupAdvanced" class="settings-group-title">advanced</h2>
             <div class="card settings-list">
@@ -1094,6 +1181,7 @@
           <li><span><kbd>↓</kbd> <kbd>↑</kbd></span> move through the suggestions (Enter plays one)</li>
           <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> play every match</li>
           <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>0</kbd></span> jump to a section</li>
+          <li><span><kbd>Ctrl</kbd>+<kbd>,</kbd></span> open settings</li>
           <li><span><kbd>Shift</kbd>+<kbd>F10</kbd></span> open the menu for what's selected</li>
           <li><span><kbd>Esc</kbd></span> close whatever is on top</li>
           <li><span><kbd>?</kbd></span> show this list</li>
