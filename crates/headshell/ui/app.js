@@ -24,6 +24,7 @@
 import { positionAt, clock } from "./anchor.js";
 import { lineAt, readingTop } from "./lyrics.js";
 import { contextMenus } from "./menu.js";
+import { diag, numberFormat, t, translatePage, useWords } from "./words.js";
 import {
   animate,
   currentMotion,
@@ -165,6 +166,7 @@ const STAGE_TEXT = {
   VIDEO_LOOKUP: "The video couldn't be found",
   VIDEO_PLAYBACK: "The video couldn't be played",
   RECOMMEND: "Your picks couldn't be worked out",
+  LOCALE_LOAD: "The language couldn't be set up",
 };
 
 /// What the listener can do about it (D-084), where there is something to
@@ -440,6 +442,7 @@ const ON_OPEN = {
     videoAwaySwitch.placeThumb(true);
     videosSwitch.placeThumb(true);
     refreshOnline();
+    refreshLanguages();
     refreshVideoAway();
     mountRecommendReset();
   },
@@ -702,6 +705,85 @@ function paintOnline(choice) {
     paintEnvironment();
   }
 }
+
+// ————————————————————————————————————— language (D-089)
+//
+// The language the app speaks: the saved choice, the system's, or English.
+// The list is what the languages folder holds, English built in. Choosing
+// one saves it in the core, and the page asks for its words again.
+
+let languages = null;
+
+async function refreshLanguages() {
+  const report = await call("languages");
+  if (report) paintLanguages(report);
+}
+
+function paintLanguages(report) {
+  languages = report;
+  const { choice, languages: list } = report;
+  const select = $("languageSelect");
+  const percent = numberFormat({ style: "percent", maximumFractionDigits: 0 });
+  const nameOf = (code) => list.available.find((info) => info.code === code)?.name ?? code;
+
+  // "Same as the system" names what that means right now.
+  const systemCode = choice.saved === null ? choice.active : null;
+  const system = h("option", {
+    value: "",
+    text: systemCode
+      ? t("ui.settings.language.system_named", { name: nameOf(systemCode) })
+      : t("ui.settings.language.system"),
+  });
+  const options = list.available.map((info) => {
+    const whole = info.total === 0 || info.translated >= info.total;
+    const text = whole
+      ? info.name
+      : t("ui.settings.language.partial", {
+          name: info.name,
+          percent: percent.format(info.translated / info.total),
+        });
+    return h("option", { value: info.code, text });
+  });
+  select.replaceChildren(system, ...options);
+  select.value = choice.saved === null ? "" : choice.active;
+
+  // For the listener what changed for them; the files and their reasons are
+  // the debug mode's (D-084).
+  const plain = [];
+  if (choice.unavailable) {
+    plain.push(t("ui.settings.language.lost", { code: choice.unavailable, name: nameOf(choice.active) }));
+  }
+  if (list.problems.length > 0) {
+    plain.push(t("ui.settings.language.problems", { count: list.problems.length }));
+  }
+  const note = $("languageNote");
+  note.textContent = plain.join(" ");
+  note.hidden = plain.length === 0;
+
+  const details = [t("ui.settings.language.debug", { folder: list.folder })];
+  for (const problem of list.problems) {
+    const file = problem.path.split(/[\\/]/).pop();
+    // The kind's tag names its key (the core's test holds them together).
+    const { kind, ...args } = problem.kind;
+    details.push(`${file} — ${diag(`locale.problem.${kind}`, args)}`);
+  }
+  $("languageDebug").replaceChildren(...details.map((line) => h("p", { text: line })));
+}
+
+$("languageSelect").addEventListener("change", async (event) => {
+  const code = event.target.value || null;
+  const report = await call("language_set", { code });
+  if (!report) {
+    // The notice said why; the list goes back to what holds.
+    if (languages) paintLanguages(languages);
+    return;
+  }
+  useWords(await call("locale_bundle"));
+  translatePage();
+  paintLanguages(report);
+});
+
+$("languageFolderButton").addEventListener("click", () => call("locales_folder_open"));
 
 /// The environment block in diagnostics: constants asked once, and the
 /// online mode as it stands.
@@ -5219,6 +5301,10 @@ async function chooseRole(role, id) {
   // The theme **first**: drawing a frame with the default colours and then
   // jumping to the theme would flash on every start.
   applyTheme(await call("theme_active"));
+  // The words before anything is drawn (D-089): the language the app speaks,
+  // from the core's language files.
+  useWords(await call("locale_bundle"));
+  translatePage();
   // The debug mode before anything is drawn: its details stay hidden until
   // it says so (D-083).
   paintDebug(await call("debug_mode"));

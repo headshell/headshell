@@ -136,6 +136,14 @@ impl Config {
         self.data_dir.join("preferences.json")
     }
 
+    /// The languages folder (D-089): one file per language the app can
+    /// speak besides the built-in English. The language list is what it
+    /// holds; it doesn't have to exist.
+    #[must_use]
+    pub fn locales_dir(&self) -> PathBuf {
+        self.data_dir.join("locales")
+    }
+
     /// The namespaced secret store (D-042). Written as `0600` on Unix.
     ///
     /// Separate from `servers.json`, and deliberately so: what lives there is a

@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use headshell_core::config::Config;
+use headshell_core::i18n::Translator;
 use headshell_core::ids::ProviderId;
 use headshell_core::model::{PlayRule, TrackRef};
 use headshell_core::playback::LiveSession;
@@ -275,6 +276,18 @@ enum Command {
         #[arg(value_enum)]
         state: Option<Switch>,
     },
+    /// The language the app speaks (D-089).
+    ///
+    /// Without a subcommand it says which language is spoken and who
+    /// decided — the choice saved here, the system's language, or English —
+    /// and lists every language the app can speak: English, built in, and a
+    /// file per language in the languages folder, with how much of it is
+    /// translated. A file there that can't be used is listed with the
+    /// reason.
+    Language {
+        #[command(subcommand)]
+        action: Option<LanguageCommand>,
+    },
     /// The folders the local files come from (D-085).
     ///
     /// Without a subcommand it lists them and says who decided: the
@@ -317,6 +330,18 @@ enum RecommendCommand {
     /// learned online is forgotten, and your taste is read again from now
     /// on. Your history and stats stay as they are.
     Reset,
+}
+
+#[derive(Debug, Subcommand)]
+enum LanguageCommand {
+    /// Speak this language: a code from the list (`tr`, `pt-BR`).
+    Use {
+        /// The language's code.
+        code: String,
+    },
+    /// Follow the system's language again — English when there is no file
+    /// for it.
+    System,
 }
 
 #[derive(Debug, Subcommand)]
@@ -907,6 +932,17 @@ async fn run(cli: &Cli, succeeded: &mut bool) -> headshell_core::Result<String> 
             };
             render(cli.json, &report, || output::online(&report))
         }
+        Command::Language { action } => {
+            let report = match action {
+                None => session.languages()?,
+                Some(LanguageCommand::Use { code }) => session.set_language(Some(code))?,
+                Some(LanguageCommand::System) => session.set_language(None)?,
+            };
+            let words = translator(&session);
+            render(cli.json, &report, || {
+                output::language(&report, &words, action.is_some())
+            })
+        }
         Command::MusicDirs { action } => {
             let report = match action {
                 None => session.music_folders()?,
@@ -1091,6 +1127,22 @@ fn read_secret() -> headshell_core::Result<String> {
 
 /// If `--json` was given, serialises the data; otherwise uses the human
 /// format.
+/// What speaks the app's language for this run (D-089). If it can't be
+/// set up — `preferences.json` unreadable — the run goes on in English and
+/// says why on stderr, rather than failing a command over its words (K9).
+fn translator(session: &Session) -> Translator {
+    match session.translator() {
+        Ok(translator) => translator,
+        Err(err) => {
+            eprintln!(
+                "warning: speaking English — the language could not be set up: {}",
+                err.chain_text().replace('\n', " ")
+            );
+            Translator::english().unwrap_or_else(|_| Translator::fallback())
+        }
+    }
+}
+
 fn render<T: serde::Serialize>(
     json: bool,
     value: &T,

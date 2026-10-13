@@ -752,6 +752,49 @@
                group is a `settings-group`; a choice is a `setting` with its
                `setting-row`. -->
 
+          <!-- Language (D-089), first: someone who can't read the language
+               the app speaks finds it without reading the page. The list is
+               what the languages folder holds; English is built in. Every
+               word here comes from the language files (`words.js`). -->
+          <section class="settings-group" aria-labelledby="groupLanguage">
+            <h2 id="groupLanguage" class="settings-group-title" data-i18n="ui.settings.language.group">language</h2>
+            <div class="card settings-list">
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="languageTitle" class="setting-title" data-i18n="ui.settings.language.title">language</h3>
+                    <p id="languageHint" class="hint" data-i18n="ui.settings.language.hint">The language headshell speaks.</p>
+                  </div>
+                  <select
+                    id="languageSelect"
+                    aria-labelledby="languageTitle"
+                    aria-describedby="languageHint languageNote"
+                  ></select>
+                </div>
+                <p id="languageNote" class="hint setting-note" hidden></p>
+                <div id="languageDebug" class="hint setting-note debug-only"></div>
+              </div>
+              <div class="setting">
+                <div class="setting-row">
+                  <div class="setting-text">
+                    <h3 id="languageAddTitle" class="setting-title" data-i18n="ui.settings.language.add_title">add a language</h3>
+                    <p id="languageAddHint" class="hint" data-i18n="ui.settings.language.add_hint">
+                      Put a language file in the languages folder and it shows up here.
+                    </p>
+                  </div>
+                  <span class="setting-action">
+                    <button
+                      id="languageFolderButton"
+                      type="button"
+                      aria-describedby="languageAddHint"
+                      data-i18n="ui.settings.language.open_folder"
+                    >open the folder</button>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <!-- Listening: what plays and how (D-086). -->
           <section class="settings-group" aria-labelledby="groupListening">
             <h2 id="groupListening" class="settings-group-title">listening</h2>

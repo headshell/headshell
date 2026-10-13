@@ -330,6 +330,10 @@ fn run(
             commands::environment,
             commands::online,
             commands::online_set,
+            commands::languages,
+            commands::language_set,
+            commands::locale_bundle,
+            commands::locales_folder_open,
             commands::debug_mode,
             commands::debug_set,
         ])

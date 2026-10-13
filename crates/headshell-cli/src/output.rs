@@ -5,6 +5,7 @@
 
 use headshell_core::artwork::{ArtworkReport, ArtworkSource, ArtworkStatus};
 use headshell_core::config::FolderSource;
+use headshell_core::i18n::{Args, LanguageOrigin, LanguageSource, Translator};
 use headshell_core::library::SearchHit;
 use headshell_core::lyrics::{LyricsFit, LyricsReport, LyricsSource, LyricsStatus};
 use headshell_core::playback::{PlanReason, PrefetchReport, PrefetchStatus};
@@ -13,12 +14,12 @@ use headshell_core::recommend::{
     DismissReport, Reason, RecommendReport, RecommendResetReport, SectionKind,
 };
 use headshell_core::session::{
-    ImportReport, LookupMode, MusicFoldersReport, OnlineReport, OnlineSource, PlayFrom, PlayReport,
-    PluginCatalogReport, PluginConsentReport, PluginIndexReport, PluginInstallReport,
-    PluginListReport, PluginRemoveReport, PluginUpdateReport, ProviderListReport, ProviderRoles,
-    ProviderTestReport, ResolveReport, ScanReport, SearchReport, SecretListReport,
-    SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport, SleeveResponse,
-    StatsResponse, VideoReport,
+    ImportReport, LanguagesReport, LookupMode, MusicFoldersReport, OnlineReport, OnlineSource,
+    PlayFrom, PlayReport, PluginCatalogReport, PluginConsentReport, PluginIndexReport,
+    PluginInstallReport, PluginListReport, PluginRemoveReport, PluginUpdateReport,
+    ProviderListReport, ProviderRoles, ProviderTestReport, ResolveReport, ScanReport, SearchReport,
+    SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport, ServerRemoveReport,
+    SleeveResponse, StatsResponse, VideoReport,
 };
 use headshell_core::stats::StatsReport;
 use headshell_core::suggest::SuggestReport;
@@ -666,6 +667,116 @@ pub fn online(report: &OnlineReport) -> String {
          online asks MusicBrainz (identities, covers) and the Cover Art Archive\n",
         switch(choice.mode)
     )
+}
+
+/// The language the app speaks and the ones it can (D-089); after a change,
+/// what it speaks now.
+pub fn language(report: &LanguagesReport, words: &Translator, changing: bool) -> String {
+    use std::fmt::Write as _;
+    let choice = &report.choice;
+    let languages = &report.languages;
+    let active = languages
+        .available
+        .iter()
+        .find(|info| info.code == choice.active);
+    let name = active.map_or(choice.active.as_str(), |info| info.name.as_str());
+
+    let mut out = String::new();
+    if let Some(code) = &choice.unavailable {
+        let args = Args::new().text("code", code).text("name", name);
+        let _ = writeln!(out, "{}", words.diag("locale.unavailable", &args));
+    }
+    if changing {
+        let key = match choice.saved {
+            Some(_) => "cli.language.now_saved",
+            None => "cli.language.now_system",
+        };
+        let _ = writeln!(out, "{}", words.text(key, &Args::new().text("name", name)));
+    }
+    let source = match (choice.source, &choice.system) {
+        (LanguageSource::Saved, _) => words.text("cli.language.source.saved", &Args::new()),
+        (LanguageSource::System, _) => words.text("cli.language.source.system", &Args::new()),
+        (LanguageSource::Default, Some(system)) => words.text(
+            "cli.language.source.default_no_file",
+            &Args::new().text("system", system),
+        ),
+        (LanguageSource::Default, None) => words.text("cli.language.source.default", &Args::new()),
+    };
+    let speaking = Args::new()
+        .text("name", name)
+        .text("code", &choice.active)
+        .text("source", &source);
+    let _ = writeln!(out, "{}", words.text("cli.language.speaking", &speaking));
+    let folder = languages.folder.display().to_string();
+    let _ = writeln!(
+        out,
+        "{}",
+        words.text("cli.language.folder", &Args::new().text("folder", &folder))
+    );
+
+    let width = languages
+        .available
+        .iter()
+        .map(|info| info.code.chars().count())
+        .max()
+        .unwrap_or(2);
+    for info in &languages.available {
+        let marker = if info.code == choice.active { '*' } else { ' ' };
+        let title = if info.name == info.english_name {
+            info.name.clone()
+        } else {
+            format!("{} ({})", info.name, info.english_name)
+        };
+        let origin = match &info.origin {
+            LanguageOrigin::BuiltIn => words.text("cli.language.built_in", &Args::new()),
+            LanguageOrigin::Folder { path } => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+        };
+        let mut notes = vec![
+            origin,
+            words.text(
+                "cli.language.coverage",
+                &Args::new()
+                    .number("translated", i64::from(info.translated))
+                    .number("total", i64::from(info.total)),
+            ),
+        ];
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        if !info.unknown_keys.is_empty() {
+            notes.push(words.text(
+                "cli.language.unknown_keys",
+                &Args::new().number("count", count(info.unknown_keys.len())),
+            ));
+        }
+        if !info.placeholder_mismatches.is_empty() {
+            notes.push(words.text(
+                "cli.language.placeholder_mismatches",
+                &Args::new().number("count", count(info.placeholder_mismatches.len())),
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "{marker} {code:<width$}  {title} — {notes}",
+            code = info.code,
+            notes = notes.join(" · ")
+        );
+    }
+
+    if !languages.problems.is_empty() {
+        let _ = writeln!(out, "{}", words.text("cli.language.problems", &Args::new()));
+        for problem in &languages.problems {
+            let file = problem.path.file_name().map_or_else(
+                || problem.path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let reason = words.diag(problem.kind.key(), &problem.kind.args());
+            let _ = writeln!(out, "  {file} — {reason}");
+        }
+    }
+    let _ = writeln!(out, "{}", words.text("cli.language.add_hint", &Args::new()));
+    out
 }
 
 /// The music folders and who decided them (D-085); after a change, when

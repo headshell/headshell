@@ -190,6 +190,38 @@ silently dropped.
 **Ask before** adding a new dependency; the tree must stay small (mobile
 binary size).
 
+## Adding a language
+
+Every word headshell shows comes from a language file (D-089). English is
+the source, built in: `crates/headshell-core/locales/en.json`. Another
+language is one file, named by its code — `tr.json`, `pt-BR.json` — in the
+data directory's `locales/` folder (`~/.local/share/headshell/locales` on
+Linux; `headshell language` prints the folder, and settings → language has
+an *open the folder* button). Dropping the file there is the whole install:
+the language appears in the list.
+
+```json
+{
+  "language": { "code": "tr", "name": "Türkçe", "english_name": "Turkish" },
+  "strings": {
+    "ui.settings.language.title": "dil",
+    "cli.language.unknown_keys": { "one": "İngilizcede olmayan {count} anahtar", "other": "İngilizcede olmayan {count} anahtar" }
+  }
+}
+```
+
+- Copy the keys from `en.json`; a key you leave out is said in English.
+- Keep every `{placeholder}` English has. A text that loses or renames one
+  is not shown — English stands in — and `headshell language` counts it.
+- Plurals use CLDR's forms (`zero one two few many other`) for your
+  language; `other` is always there.
+- `headshell language` lists what it found: how much of English you have,
+  keys English doesn't have (a typo, or a key the app dropped), and any file
+  it couldn't read, with the reason.
+
+Shipping translations with the app is not decided yet; for now a language
+file lives in the user's folder.
+
 ## Identity accuracy
 
 `fixtures/identity/cases.json` is a hand-labelled accuracy set, and the rate

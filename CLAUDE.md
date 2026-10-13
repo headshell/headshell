@@ -75,6 +75,11 @@ If you need to break a rule, **stop and ask** — PLAN.md §0.1.
 > session held in Turkish still writes English code, comments, messages and
 > commit messages. Real names (artists, the `Müzik` folder) stay as they are;
 > the full list of what stays is in PLAN.md §2.
+>
+> Since D-089 a word the app **shows** is not written in the code but in
+> `crates/headshell-core/locales/en.json`, by key; a translation is a file
+> of its own. New interface or CLI text means a new key there — a literal
+> sentence in a surface is a gap the language files can't reach.
 
 ---
 
@@ -103,8 +108,10 @@ headshell/
 │   │   │   ├── playback/       # symphonia + cpal, reading the queue ahead
 │   │   │   ├── net/            # HTTP trait + ureq client + fake
 │   │   │   ├── diag/           # diagnostics, see below
+│   │   │   ├── i18n/           # the language engine: language files, plurals, two-voice diagnostics (D-089)
 │   │   │   ├── video.rs        # music videos: sources, matching (D-086)
 │   │   │   └── session.rs      # the outward command surface (Session)
+│   │   ├── locales/en.json     # the source language, built in; every word the app shows (D-089)
 │   │   ├── examples/           # probes run by hand (fingerprint, mb, playback)
 │   │   └── tests/              # integration tests over fixtures/
 │   ├── headshell-cli/               # thin shell (binary name: `headshell`)
@@ -197,6 +204,7 @@ headshell recommend [--from <provider>] | dismiss "<artist> - <title>" | reset  
 headshell video "<artist> - <title>" | --file <path>   # the song's video, from the video provider (D-086)
 headshell online [on|off]                        # the desktop's online choice (not the CLI's)
 headshell music-dirs [add <dir> | remove <dir>]  # the local music folders (HEADSHELL_MUSIC_DIRS overrides)
+headshell language [use <code> | system]         # the language the app speaks; the list is the locales/ folder (D-089)
 headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues
 headshell diag                                   # the last run's diagnostics report
 ```

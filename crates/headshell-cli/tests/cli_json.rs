@@ -1141,6 +1141,99 @@ fn the_desktops_online_choice_is_kept_and_who_decided_is_said() {
     );
 }
 
+/// D-089: the language is chosen with `language`, kept in the data
+/// directory, and the list is what the languages folder holds — English
+/// built in, a file per language — with a file that can't be used listed
+/// with its reason, in the user's language and in English.
+#[test]
+fn the_language_is_chosen_kept_and_the_folder_makes_the_list() {
+    let dir = temp_dir("language");
+    let language = |args: &[&str], lang: &str| {
+        // The developer's own locale must not leak into the test.
+        let output = cli_command()
+            .arg("--data-dir")
+            .arg(&*dir)
+            .args(args)
+            .env("LANG", lang)
+            .env_remove("LANGUAGE")
+            .env_remove("LC_ALL")
+            .env_remove("LC_MESSAGES")
+            .output()
+            .expect("the headshell binary must run");
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.success(),
+        )
+    };
+
+    let (stdout, stderr, ok) = language(&["language", "--json"], "C");
+    assert!(ok, "{stderr}");
+    let fresh = json(&stdout);
+    // The folder is the temporary directory's, and a language's key counts
+    // grow with every text the app gains: the snapshot keeps the shape, the
+    // asserts the meaning.
+    let mut shape = fresh.clone();
+    shape["languages"]["folder"] = "<folder>".into();
+    for info in shape["languages"]["available"].as_array_mut().unwrap() {
+        info["translated"] = "<count>".into();
+        info["total"] = "<count>".into();
+    }
+    assert_snapshot("language", &shape.to_string());
+    assert_eq!(fresh["choice"]["active"], "en");
+    assert_eq!(fresh["choice"]["source"], "default");
+    assert_eq!(fresh["choice"]["system"], serde_json::Value::Null);
+    let english = &fresh["languages"]["available"][0];
+    assert_eq!(english["translated"], english["total"], "English is whole");
+
+    let locales = dir.join("locales");
+    std::fs::create_dir_all(&locales).unwrap();
+    std::fs::write(
+        locales.join("tr.json"),
+        r#"{ "language": { "code": "tr", "name": "Türkçe", "english_name": "Turkish" },
+             "strings": {
+               "cli.language.source.system": "sistemin dili",
+               "locale.problem.not_a_language_file": "bir dil dosyası değil: {detail}"
+             } }"#,
+    )
+    .unwrap();
+    std::fs::write(locales.join("de.json"), "{ broken").unwrap();
+
+    // A Turkish system speaks the file it finds; the broken one is listed
+    // in both voices, not skipped.
+    let (stdout, stderr, ok) = language(&["language"], "tr_TR.UTF-8");
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("Türkçe (tr) — sistemin dili"), "{stdout}");
+    assert!(
+        stdout.contains("de.json — bir dil dosyası değil:")
+            && stdout.contains(" ‖ is not a language file"),
+        "{stdout}"
+    );
+
+    let (stdout, stderr, ok) = language(&["language", "use", "tr", "--json"], "C");
+    assert!(ok, "{stderr}");
+    let chosen = json(&stdout);
+    assert_eq!(chosen["choice"]["active"], "tr");
+    assert_eq!(chosen["choice"]["source"], "saved");
+    let kept = std::fs::read_to_string(dir.join("preferences.json")).unwrap();
+    assert!(kept.contains(r#""language": "tr""#), "{kept}");
+
+    // A language with no file is refused with its stage and where the file
+    // goes — not saved as a choice that can't hold.
+    let (_, stderr, ok) = language(&["language", "use", "fr"], "C");
+    assert!(!ok);
+    assert!(
+        stderr.contains("LOCALE_LOAD") && stderr.contains("fr.json"),
+        "{stderr}"
+    );
+
+    let (stdout, stderr, ok) = language(&["language", "system", "--json"], "C");
+    assert!(ok, "{stderr}");
+    let back = json(&stdout);
+    assert_eq!(back["choice"]["saved"], serde_json::Value::Null);
+    assert_eq!(back["choice"]["active"], "en");
+}
+
 /// D-085: the music folders are chosen with `music-dirs`, kept in the data
 /// directory, and read by the next scan — a folder taken off leaves the
 /// catalog with its songs.

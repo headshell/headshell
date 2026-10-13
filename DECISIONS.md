@@ -6042,3 +6042,174 @@ through it (disabled at the ends), the edges fading only where tiles go on; a ti
 label's size (320 px), or a small record on a colour of its artist's; a play button rises into the corner on
 hover; the same menu as a row, *not for me* folding the tile sideways. `headshell recommend` prints them as
 *top picks*.
+
+## D-088 — YouTube Music's fast path: the address from InnerTube, yt-dlp as the fallback
+
+**Date:** 2026-10-10 · **Status:** APPLIED (2026-10-10)
+
+**Question:** The user found the music low in quality and slow to start, both put down to yt-dlp, and asked
+for research "against the main plan": how could good audio come from Spotify and Deezer? Shown the findings
+below, they asked whether letting listeners sign in and play with **their own subscriptions** would change
+the picture, and then chose three directions: **YouTube Music — the fast path and Premium**, **a Qobuz
+plugin**, and **Spotify through librespot** — the last one meaning D-026 is rewritten for Spotify, its plugin
+living in the `headshell/plugins` catalog. This decision is the first of them: the fast path.
+
+**What the research found (2026-10-09)** — kept here because the next two decisions start from it:
+
+- **Spotify.** Lossless (since September 2025) sits behind a separate white-box DRM, PlayPlay; no third
+  party opens it, and Spotify wrote to librespot's maintainers in November 2025, who locked the discussion.
+  librespot still plays Ogg Vorbis 320 with Premium, but since November 2025 some accounts — new ones above
+  all, still in August 2026 — get "audio key 0 1" and play nothing (librespot #1649, open). The Widevine
+  road (votify) needs a device key pulled out of an Android phone. The official roads: Connect control
+  (the audio stays in Spotify's own app) and the Web Playback SDK (Widevine — not in WebKitGTK). Development
+  mode allows five users per app; extended access needs a company with 250k monthly users, so an open
+  project's users would each register their own client id. The developer policy forbids segueing Spotify
+  audio into other audio and deriving listening metrics from the API — the export (K2) is outside both.
+- **Deezer.** Every paid plan has FLAC 16/44.1, but the stream is Blowfish-encrypted (D-026), and since
+  September 2026 Deezer accepts no new applications and its JS SDK is gone: there is no official road at all.
+  Its public API still answers by ISRC (`/track/isrc:…`, 0.5 s, measured) — useful for identity (K6).
+- **Tidal**'s SDK player is the only allowed road and plays 30-second previews to third parties; **Apple
+  Music**'s MusicKit needs FairPlay/Widevine, which WebKitGTK lacks; **Qobuz** serves unencrypted FLAC to
+  its subscribers and gives partners an app id on request.
+- **The user's own subscription** settles the licence to listen, not the circumvention (DMCA §1201, EU
+  2001/29 art. 6 apply even with the right to the work — D-026's own reasoning), and it moves the ban risk
+  onto the listener's account.
+- **Most of the slowness was not YouTube's but yt-dlp's process.** That turned the work toward the fast path
+  first.
+
+**Measured before the change** (yt-dlp 2026.08.19, the plugin's pinned binary, a home connection):
+
+| | time |
+|---|---|
+| `yt-dlp_linux --version` — the onefile binary unpacking 40 MB into `/tmp` | 1.1 s |
+| yt-dlp resolving format 140 from the shell | 4.5–5.5 s |
+| ytmusic 0.8.0's `resolve_source` inside the engine | **3.4–4.1 s** |
+| one InnerTube `player` call as the visionOS client, inside the engine | **0.2–0.3 s** |
+
+- Without a JS runtime yt-dlp uses one client, `visionos` (`_DEFAULT_JSLESS_CLIENTS`), and its addresses
+  carry neither a signature to solve nor an `n` parameter: yt-dlp spends its seconds around a single POST.
+- **The visitor id decides the bot wall.** Without one, 9 tracks out of 9 got "Sign in to confirm you're not
+  a bot"; with one, 9 out of 9 passed. The wall's own answer carries a fresh visitor id
+  (`responseContext.visitorData`), and asking again with it passed — no extra request is needed.
+- The call works on `music.youtube.com`, which the plugin already may reach: **no new permission.**
+- The address lives six hours (as yt-dlp's does), is not tied to the user agent, and still needs
+  `Range: bytes=0-` — without it, 27 KB/s (D-048's 32 KB/s).
+
+**Decision:**
+
+1. **`resolve_source` asks the fast path first:** one POST to `music.youtube.com/youtubei/v1/player` as the
+   visionOS client, with the context yt-dlp sends; the first of itag 140, 139 that has an address. The
+   format choice is the same as before (`AUDIO_ITAGS` mirrors `AUDIO_FORMAT`); opus is still never picked.
+2. **The visitor id** is sent when one is known, kept in the module for the session and in `host.storage`
+   across sessions. On `LOGIN_REQUIRED` with a fresh id in the answer, the call is made once more with it; an
+   id the wall still stops is forgotten.
+3. **yt-dlp stays, as the fallback, with the last word.** Any failure of the fast path — a status other than
+   `OK`, a format without an address (a signature to solve), an HTTP error — sends the track to yt-dlp,
+   exactly as before. When yt-dlp also says no, the error carries **yt-dlp's words first and the fast path's
+   reason after them** (K9): `yt-dlp: ERROR: … This video is unavailable (the fast path: ERROR: This video is
+   unavailable)`. A track the user asked for while a call made ahead of time gave way is not affected: the
+   core reads its own flag (D-077), and yt-dlp's start throws at once.
+4. **`health()` probes three things:** the search, the fast path (on the first search hit), yt-dlp. The fast
+   path failing is a note — "yt-dlp is asked instead" — not "unreachable".
+5. **No cookies on the fast path.** InnerTube wants a signed `SAPISIDHASH` header for a signed-in call; the
+   cookies keep going to yt-dlp, which a data-centre address (D-061) reaches through the fallback.
+6. `ytmusic` **0.9.0**, api 6 unchanged; the core is untouched.
+
+**Not done:** YouTube Music Premium's 256 kbps formats (141 AAC, 774 opus) — yt-dlp gives them only with the
+`web_music` client and Premium cookies, and that client needs a JS runtime; next, with the user's account.
+An opus decoder for the 136 kbps opus (251) — a new dependency, to be asked. The Qobuz and Spotify
+directions above.
+
+**Testing:** a new live test, `a_search_hit_resolves_without_ytdlp_through_the_fast_path`: the plugin is
+installed **without yt-dlp**, so a resolved stream has one explanation; the bot wall alone skips it.
+`a_missing_track_fails_with_the_tools_own_words` now also asks for the fast path's reason. Against a local
+mirror of the catalog (ytmusic 0.9.0): 9/9, none skipped — a first run lost four to the line itself (search
+timeouts at 616 ms average ping), the rerun passed all.
+
+**Verification:** an in-engine probe (QuickJS and the core's HTTP client) over five searches: 0.8.0 resolved
+in 3,363–4,121 ms, 0.9.0 in 203–301 ms, the same visionOS address. With the client's name broken by hand,
+every track fell back to yt-dlp and played (4.2 s), and `health` said so; a missing id failed in both
+voices.
+
+## D-089 — The language engine: every word from a language file
+
+**Date:** 2026-10-12 · **Status:** step A APPLIED (2026-10-12); B–E planned (PLAN §3.24)
+
+**Question:** Planning the quality choice D-088 left for Premium, the user asked for more than a setting:
+**a source's quality options must be a required part of the plugin contract** — how many there are,
+whether they have names of their own, what each does, and, if named, in which languages and which file.
+That asks where the words of the app live at all, so they asked for localisation first. Asked during
+planning, they chose: **a language engine where every word comes from a local folder**, and the language
+list shows the files that folder holds; **the data directory's `locales/`**; **one JSON file per
+language**; **English only for now**; **the system's language, changeable in the settings**; and
+**everything translated — but every diagnostic message (the error chain, `diag`, warnings) written in
+both the user's language and English, a separator between them**, so a report sent to us carries both.
+
+**Decision:**
+
+1. **The file.** `{ "language": { code, name, english_name }, "strings": { key: text | { zero one two
+   few many other } } }`. `{name}` is filled by the argument of that name; a plural's form is picked by
+   the argument `count`, by CLDR's whole-number rules (`i18n/plural.rs`: English's for most languages, and
+   French, East Slavic, Polish, Czech, Arabic and the languages without plurals written out). The desktop
+   asks its webview's `Intl.PluralRules`, which knows every language.
+2. **Where the words live.** English is **built in** — `crates/headshell-core/locales/en.json`, compiled
+   into the core — as the source and the fallback for every key, so a missing or broken folder never
+   leaves the app without words. Every other language is a file in `<data dir>/locales/`, named by its
+   code; the list is what the folder holds. A folder file with the code `en` replaces the built-in text
+   for its keys.
+3. **Nothing silent (K9).** A file that can't be read, isn't the shape above, names another code than
+   its file, has no name or repeats a language is **listed as a problem** — a kind with its arguments, not
+   a sentence, since the folder is read before the language is known — and left out. A language's report
+   counts English's keys it has, the keys English doesn't (`unknown_keys`), and the texts whose
+   placeholders differ from English's (`placeholder_mismatches`); such a text is **not shown** — English
+   stands in for it. A key English lacks too comes out as `⟦key⟧`.
+4. **The choice.** The saved code (`preferences.json`'s `language`), then the system's language
+   (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG` — gettext's order; `tr_TR.UTF-8` → `tr-TR` → `tr`), then
+   English. A saved language whose file is gone falls back and **says so** (`unavailable`). Saving a code
+   with no file is refused, with where the file goes (`LOCALE_LOAD`, a new stage).
+5. **Two voices.** `Translator::diag` writes the user's language, `" ‖ "`, English — once when the
+   language is English or the two read the same. Used for the language list's problems now; the error
+   chain and `diag` follow in step D.
+6. **Surfaces.** `Session::languages`, `set_language`, `translator`, `locale_bundle`, `locales_folder`.
+   `headshell language [use <code> | system]`; the CLI falls back to English and says why on stderr if
+   its words can't be set up, rather than failing a command over them. The window's `languages`,
+   `language_set`, `locale_bundle`, `locales_folder_open` (the shell opens the folder with the system's
+   file manager — `xdg-open`, `open`, `explorer` — no new dependency). `ui/words.js`: `t`, `diag`,
+   `numberFormat`, and `data-i18n` / `data-i18n-attr` in the markup filled by `translatePage`.
+7. **The bundle keeps the language's own words apart from English's**, so the page knows which fell
+   back and marks them `lang="en"`. Measured in the container: with the page in Turkish, the English
+   group titles came out as "LİSTENİNG" and "İNTERNET" — the Turkish uppercase applied to English words.
+8. **The settings' language group comes first on the page**: someone who can't read the language the
+   app speaks finds it without reading. A native `<select>` (the familiar control for a long list): *same
+   as the system (Türkçe)*, then every language by its own name, a partial one with how much is
+   translated. *Add a language* opens the folder. The listener sees a lost choice and how many files
+   couldn't be read; the files and their reasons are the debug mode's.
+9. **K11 changes** (PLAN §2): the app's translations join what stays as it is — a language file other
+   than English is data the user's language gives. Code, comments, `en.json`, documents and commit
+   messages stay English; a new word the app shows is a new key in `en.json`.
+
+**The steps** (PLAN §3.24): **A** the engine and its own surfaces — this decision; **B** every word of
+the window to keys; **C** the CLI's output, the TUI and `--help`; **D** diagnostics in both voices;
+**E** a plugin's `locales/` and the required quality declaration (§3.23), then Premium.
+
+**Not done:** shipping translations with the app (they live in the user's folder for now). Until step
+B, the window's unkeyed English sits under the page's `lang`: a Turkish page still uppercases those
+titles the Turkish way. The markup keeps English in its keyed elements for the instant before the words
+arrive; `tests/words_contract.rs` holds it equal to `en.json`.
+
+**Testing:** the engine (16): the built-in English whole, every problem kind worded by a key whose
+placeholders are the kind's arguments and whose name is the kind's serialized tag (the window builds the
+key from it), the folder's problems listed not skipped, a language measured against English, the list's
+order and a folder `en`, gettext's variables, a region falling back to its language, the choice's order
+and a lost choice, filling and falling back, a text with other placeholders not shown, plurals, two
+voices and one, the bundle's own words apart; the preferences' round trip; the CLI end to end with a
+snapshot (fresh English, a Turkish system speaking a partial file, a broken file in both voices, `use`,
+a code with no file refused with its stage, `system`); the window's contract — every key the markup and
+the scripts name is in `en.json`, the markup's fallback is `en.json`'s English, the new module parses
+and writes no markup, the new stage has listener words, the commands are granted.
+
+**Verification:** the §3.9 container (Debian 13, WebKitGTK, Xvfb), `LANG=tr_TR.UTF-8`, a partial
+`tr.json` and a broken `de.json` in the folder: the language group in Turkish on its own ("sistemle aynı
+(Türkçe)", "Klasördeki 1 dil dosyası okunamadı."); the debug mode with the broken file in both voices;
+the list ("Türkçe — %32 çevrildi", the percent written the Turkish way); *English* picked from it — the
+page turned English at once, the problem line said once, `preferences.json` saved `"language": "en"`.

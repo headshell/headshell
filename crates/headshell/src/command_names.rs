@@ -89,6 +89,10 @@ pub const COMMANDS: &[&str] = &[
     "environment",
     "online",
     "online_set",
+    "languages",
+    "language_set",
+    "locale_bundle",
+    "locales_folder_open",
     "debug_mode",
     "debug_set",
 ];

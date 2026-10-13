@@ -1,0 +1,52 @@
+{
+  "language": {
+    "code": "en",
+    "name": "English",
+    "english_name": "English"
+  },
+  "strings": {
+    "locale.problem.folder_unreadable": "the languages folder could not be read: {detail}",
+    "locale.problem.unreadable": "could not be read: {detail}",
+    "locale.problem.not_a_language_file": "is not a language file (a \"language\" and a \"strings\" object): {detail}",
+    "locale.problem.code_mismatch": "says it is \"{code}\", but the file is named {file} — name it {code}.json",
+    "locale.problem.invalid_code": "\"{code}\" is not a language code (like tr, de or pt-BR)",
+    "locale.problem.no_name": "the language has no name (\"name\" inside \"language\")",
+    "locale.problem.duplicate": "another file already gives the language \"{code}\"",
+    "locale.unavailable": "The chosen language, {code}, has no file in the languages folder any more; speaking {name} instead.",
+    "cli.language.speaking": "language : {name} ({code}) — {source}",
+    "cli.language.source.saved": "chosen",
+    "cli.language.source.system": "the system's language",
+    "cli.language.source.default": "the default",
+    "cli.language.source.default_no_file": "the default — there is no file for the system's language, {system}",
+    "cli.language.folder": "folder   : {folder}",
+    "cli.language.built_in": "built in",
+    "cli.language.coverage": "{translated} of {total}",
+    "cli.language.unknown_keys": {
+      "one": "{count} key English doesn't have",
+      "other": "{count} keys English doesn't have"
+    },
+    "cli.language.placeholder_mismatches": {
+      "one": "{count} text with other placeholders than English's",
+      "other": "{count} texts with other placeholders than English's"
+    },
+    "cli.language.problems": "could not use:",
+    "cli.language.add_hint": "to add a language, put its file (like tr.json) in the folder",
+    "cli.language.now_saved": "the app speaks {name} now",
+    "cli.language.now_system": "the app follows the system's language now: {name}",
+    "ui.settings.language.group": "language",
+    "ui.settings.language.title": "language",
+    "ui.settings.language.hint": "The language headshell speaks.",
+    "ui.settings.language.system": "same as the system",
+    "ui.settings.language.system_named": "same as the system ({name})",
+    "ui.settings.language.partial": "{name} — {percent} translated",
+    "ui.settings.language.lost": "The language you chose, {code}, isn't in the folder any more, so headshell speaks {name}.",
+    "ui.settings.language.problems": {
+      "one": "{count} language file in the folder couldn't be read.",
+      "other": "{count} language files in the folder couldn't be read."
+    },
+    "ui.settings.language.debug": "D-089: English is built in; every other language is a file in {folder}. A text a language leaves out is said in English.",
+    "ui.settings.language.add_title": "add a language",
+    "ui.settings.language.add_hint": "Put a language file in the languages folder and it shows up here.",
+    "ui.settings.language.open_folder": "open the folder"
+  }
+}

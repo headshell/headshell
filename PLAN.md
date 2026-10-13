@@ -208,6 +208,11 @@ What stays as it is — it is data, not text we write:
 - the documents' `*.tr.*` snapshots and the `Türkçe` link that leads to them.
   They stand as of 2026-09-25 and are not kept up to date; the English text is
   canonical, and a snapshot is translated again, not patched;
+- **the app's translations** (D-089): a language file other than English
+  (`locales/<code>.json`). The words the app shows live in language files,
+  English the source (`crates/headshell-core/locales/en.json`, built in);
+  a translation is data the user's language gives, not text we write.
+  Diagnostics are written in both: the user's language, ` ‖ `, English;
 - the commit messages from before D-073: rewriting history would change every
   hash the release tags point at.
 
@@ -2571,6 +2576,62 @@ plugin, a failing one); the session's dismiss and reset; the library's migration
 the echo plugin through QuickJS; the CLI end to end; the container — the page per source, covers, "not for me",
 the reset in settings.
 
+### 3.22 YouTube Music's fast path — DONE (D-088)
+
+**The problem:** a track took 3.4–4.1 s to start inside the engine (4.5–5.5 s from the shell), nearly all
+of it yt-dlp's process around a single InnerTube call; the read-ahead (§3.11) hid it for "next", not for the
+first song or a search the user plays.
+
+**Done:** `ytmusic` 0.9.0 asks InnerTube's `player` endpoint itself, as the visionOS client yt-dlp uses
+without a JS runtime — 0.2–0.3 s, the same address, no new permission. The visitor id the bot wall hands
+back is kept in the plugin's storage. yt-dlp stays as the fallback with the last word; an error carries both
+reasons; `provider test` says whether the fast path works.
+
+**Testing / verification:** a live test with yt-dlp left out; the missing-track test asks for both voices;
+9/9 against a local catalog mirror; an in-engine probe, 0.8.0 against 0.9.0, and a broken client falling
+back.
+
+### 3.23 Better sources: Premium, Qobuz, Spotify — TODO (the user's choice, 2026-10-09)
+
+The research and the reasons are in D-088. **Waits for §3.24** (the user's
+decision, 2026-10-12): a source's quality options become a required part of
+the plugin contract — how many, their names, what each does, and their words
+in which languages — so the language engine comes first. In order:
+
+1. **YouTube Music Premium** — 141 (AAC 256) through yt-dlp's `web_music` client and the user's cookies;
+   that client needs a JS runtime, so the engine installs one (`qjs`) through `requires`. Verified with the
+   user's Premium account. Opus (251/774) waits for a decoder — a new dependency, to be asked.
+2. **A Qobuz plugin** — the subscriber's unencrypted FLAC; signed in with a token (the password login sits
+   behind a captcha). The app id is read from the web player, and the user applies for an official one at
+   api@qobuz.com. No account to test with: its live tests skip, and are reported as skipped.
+3. **Spotify through librespot** — the user's own Premium, playback only, nothing decrypted written to disk.
+   It needs D-026 rewritten for Spotify first (PLAN §0.1), a helper program outside the core (K4), a way for
+   its audio to reach the core, and the catalog entry the user chose (`headshell/plugins`). New accounts may
+   hit librespot's open "audio key" error.
+
+### 3.24 The language engine — IN PROGRESS (D-089)
+
+**The problem:** every word was written into the surfaces in English; the
+user asked for a language engine — every word from a local folder, the
+language list being what that folder holds.
+
+**In steps, each one whole:**
+
+- **A. The engine — DONE.** `i18n/` in the core: the built-in `en.json`, the
+  data directory's `locales/` scanned (a file that can't be used listed with
+  its reason), the system's language, `{placeholders}`, CLDR plurals, a
+  missing key in English, two-voice diagnostics. `preferences.json`'s
+  `language`; `headshell language [use <code> | system]`; the window's
+  `languages`, `language_set`, `locale_bundle`, `locales_folder_open`; the
+  settings' language group, first on the page.
+- **B. The window — TODO.** Every word of `index.html` and the scripts to
+  keys.
+- **C. The CLI and the TUI — TODO.** Their output and `--help`.
+- **D. Diagnostics — TODO.** The error chain, `headshell diag` and warnings
+  in both voices.
+- **E. Plugins — TODO.** A plugin's `locales/` and the required quality
+  declaration (§3.23).
+
 ---
 
 # PHASE 4 — Rooms (the backend starts here)
@@ -2698,7 +2759,7 @@ For platforms with DRM two ways remain: driving the platform's **own** player
 |---|---|---|
 | **SoundCloud** | `SEARCH BROWSE STREAM` | No DRM. There is an official API, but key applications have been closed/intermittent for years; the practical way is yt-dlp. §2 K5's reference plugin is this one anyway. Some tracks (Go+, private) can't be accessed — the plugin **counts and reports** them, it doesn't silently skip them (K9). |
 | **Qobuz** | `SEARCH BROWSE STREAM` | No DRM; FLAC downloads to the subscriber unencrypted. No official public API; it is known through reverse engineering. A subscription is required. The cleanest source for a hi-res catalog. |
-| **YouTube Music** | `SEARCH BROWSE STREAM` | No DRM; the way is yt-dlp. **The highest maintenance cost:** YouTube actively makes it harder (nsig, PO tokens). That is exactly why it is a plugin — when it breaks, the core stays up. |
+| **YouTube Music** | `SEARCH BROWSE STREAM` | No DRM; the address comes from InnerTube's `player` endpoint, yt-dlp as the fallback (D-088). **The highest maintenance cost:** YouTube actively makes it harder (nsig, PO tokens). That is exactly why it is a plugin — when it breaks, the core stays up. |
 | **YouTube** (videos) | `SEARCH VIDEO` | **The official route** (D-086): YouTube's own player, the IFrame embed — nothing downloaded, no stream resolved, YouTube's ads and counting kept. Its rules are the window's to keep: visible while it plays, nothing over it, never under 200 × 200. Search through InnerTube (the one gray part, the user's choice). Needs the page served over `http(s)` — a custom scheme sends no `Referer` ("Error 153"). |
 | **Tidal** | `SEARCH BROWSE` | The official developer API gives catalog/search. Full streaming depends on the partner program; the high-quality tiers have DRM. Tidal Connect is a certified-device programme, not open to everyone. |
 | **Apple Music** | `SEARCH BROWSE` | MusicKit is **official and legitimate** — with a developer token + a user token the catalog and the user's library are fetched. But playing needs the MusicKit runtime: it isn't on Linux, and WebKitGTK has no FairPlay. `STREAM` could be opened in Phase 6's iOS/macOS versions. |

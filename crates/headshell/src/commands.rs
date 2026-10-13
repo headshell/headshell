@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use headshell_core::artwork::{ArtworkKey, ArtworkPicture, ArtworkReport, ArtworkVariant};
 use headshell_core::diag::Stage;
+use headshell_core::i18n::LocaleBundle;
 use headshell_core::ids::ProviderId;
 use headshell_core::lyrics::{LyricsItem, LyricsKey, LyricsReport};
 use headshell_core::model::PlayRule;
@@ -33,12 +34,12 @@ use headshell_core::playback::{
 use headshell_core::provider::remote::{self, NewServer, ServerKind};
 use headshell_core::recommend::{DismissReport, RecommendReport, RecommendResetReport};
 use headshell_core::session::{
-    self, ArtworkRequest, ImportReport, LookupMode, LyricsRequest, MusicFoldersReport,
-    OnlineReport, PlayFromReport, PlayOptions, PluginCatalogReport, PluginConsentReport,
-    PluginInstallReport, PluginListReport, PluginRemoveReport, PluginUpdateReport,
-    ProviderListReport, ProviderRoles, ProviderTestReport, ResolveReport, RolesReport, ScanReport,
-    SearchReport, SecretListReport, SecretWriteReport, ServerAddReport, ServerListReport,
-    ServerRemoveReport, SleeveResponse, StatsResponse,
+    self, ArtworkRequest, ImportReport, LanguagesReport, LookupMode, LyricsRequest,
+    MusicFoldersReport, OnlineReport, PlayFromReport, PlayOptions, PluginCatalogReport,
+    PluginConsentReport, PluginInstallReport, PluginListReport, PluginRemoveReport,
+    PluginUpdateReport, ProviderListReport, ProviderRoles, ProviderTestReport, ResolveReport,
+    RolesReport, ScanReport, SearchReport, SecretListReport, SecretWriteReport, ServerAddReport,
+    ServerListReport, ServerRemoveReport, SleeveResponse, StatsResponse,
 };
 use headshell_core::sleeve::CardPreset;
 use headshell_core::stats::StatsQuery;
@@ -1462,6 +1463,79 @@ pub async fn environment(state: State<'_, AppState>) -> CommandResult<Environmen
             })
         })
         .await
+}
+
+/// The language the app speaks and the ones it can (D-089) — `headshell
+/// language`.
+#[tauri::command]
+pub async fn languages(state: State<'_, AppState>) -> CommandResult<LanguagesReport> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.session().languages() }))
+        .await
+}
+
+/// Saves the language — a code, or `None` to follow the system's (D-089) —
+/// `headshell language use <code> | system`. The page asks for its words
+/// again afterwards.
+#[tauri::command]
+pub async fn language_set(
+    state: State<'_, AppState>,
+    code: Option<String>,
+) -> CommandResult<LanguagesReport> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move { core.live.session().set_language(code.as_deref()) })
+        })
+        .await
+}
+
+/// The page's words (D-089): the language the app speaks over English, and
+/// English alone for diagnostics' second voice.
+#[tauri::command]
+pub async fn locale_bundle(state: State<'_, AppState>) -> CommandResult<LocaleBundle> {
+    state
+        .run_on_core(move |core| Box::pin(async move { core.live.session().locale_bundle() }))
+        .await
+}
+
+/// Opens the languages folder in the system's file manager, creating it if
+/// it isn't there (D-089) — the CLI's `headshell language` prints its path.
+/// The opening is the shell's: it is the window's affordance, not a
+/// capability of the core.
+#[tauri::command]
+pub async fn locales_folder_open(state: State<'_, AppState>) -> CommandResult<std::path::PathBuf> {
+    let folder = state
+        .run_on_core(move |core| Box::pin(async move { core.live.session().locales_folder() }))
+        .await?;
+    open_in_file_manager(&folder)?;
+    Ok(folder)
+}
+
+/// Hands a folder to the system's file manager: `xdg-open` on Linux and the
+/// BSDs, `open` on macOS, `explorer` on Windows. The program is only
+/// started, not waited for; failing to start it is said with its stage
+/// (K9).
+fn open_in_file_manager(folder: &std::path::Path) -> CommandResult<()> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(folder)
+        .spawn()
+        .map(drop)
+        .map_err(|err| {
+            CommandError::new(
+                Stage::LocaleLoad,
+                &format!(
+                    "→ could not open {} with {program}: {err}",
+                    folder.display()
+                ),
+            )
+        })
 }
 
 /// Whether the desktop goes online, and who decided it (D-082) —

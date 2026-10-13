@@ -1,6 +1,7 @@
 //! The user's choices: the provider the play box searches first (D-080) —
 //! since D-086 the main provider, with music and video chosen apart from it —
-//! whether the desktop goes online (D-082), and the music folders (D-085).
+//! whether the desktop goes online (D-082), the music folders (D-085), and
+//! the language the app speaks (D-089).
 //!
 //! A file of its own, `preferences.json`, not the database: a choice is not
 //! library data — the line D-021 drew for `servers.json`. A missing file is
@@ -51,6 +52,11 @@ pub struct Preferences {
     /// history counts. The listens before it are not deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommend_since: Option<i64>,
+    /// The language the app speaks (D-089), as a code (`tr`, `pt-BR`);
+    /// `None`: nothing chosen — the system's language when there is a file
+    /// for it, otherwise English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// Reads the choices; no file is no choice.
@@ -109,6 +115,7 @@ mod tests {
             lookup: Some(LookupMode::Online),
             music_dirs: Some(vec![PathBuf::from("/music")]),
             recommend_since: Some(1_700_000_000_000),
+            language: Some("tr".to_owned()),
         };
         save(&path, &chosen).unwrap();
         assert_eq!(load(&path).unwrap(), chosen);

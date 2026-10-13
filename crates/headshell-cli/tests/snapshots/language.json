@@ -1,0 +1,43 @@
+{
+  "choice": {
+    "active": "en",
+    "saved": null,
+    "source": "<variable>",
+    "system": null,
+    "unavailable": null
+  },
+  "diag": {
+    "command": "<variable>",
+    "counters": {
+      "language.available": 1,
+      "language.problems": 0
+    },
+    "env": {
+      "arch": "<variable>",
+      "data_dir": "<variable>",
+      "headshell_version": "<variable>",
+      "os": "<variable>"
+    },
+    "error_chain": [],
+    "failed_at": null,
+    "finished_at": "<variable>",
+    "notes": [],
+    "started_at": "<variable>"
+  },
+  "languages": {
+    "available": [
+      {
+        "code": "en",
+        "english_name": "English",
+        "name": "English",
+        "origin": "built_in",
+        "placeholder_mismatches": [],
+        "total": "<count>",
+        "translated": "<count>",
+        "unknown_keys": []
+      }
+    ],
+    "folder": "<folder>",
+    "problems": []
+  }
+}

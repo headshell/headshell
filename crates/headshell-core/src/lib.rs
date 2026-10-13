@@ -11,6 +11,7 @@ pub mod config;
 pub mod diag;
 mod encoding;
 pub mod error;
+pub mod i18n;
 pub mod identity;
 pub mod ids;
 pub mod import;

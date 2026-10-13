@@ -281,6 +281,16 @@ pub struct OnlineReport {
     pub diag: DiagReport,
 }
 
+/// What `headshell language [use <code> | system]` answers (D-089): the
+/// language the app speaks and who decided it, every language it can
+/// speak, and the files in the languages folder it could not use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LanguagesReport {
+    pub choice: crate::i18n::LanguageChoice,
+    pub languages: crate::i18n::Languages,
+    pub diag: DiagReport,
+}
+
 /// What `headshell music-dirs [add|remove]` answers (D-085).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MusicFoldersReport {
@@ -1422,6 +1432,147 @@ impl Session {
             self.online_choice()
         })();
         self.finish(rec, result, |online, diag| OnlineReport { online, diag })
+    }
+
+    /// The languages the app can speak, and the one it speaks (D-089).
+    fn read_languages(
+        &self,
+    ) -> Result<(
+        crate::i18n::Languages,
+        Vec<crate::i18n::Catalog>,
+        crate::i18n::LanguageChoice,
+    )> {
+        let saved = crate::preferences::load(&self.config.preferences_path())?.language;
+        let (languages, catalogs) = crate::i18n::languages(&self.config.locales_dir())?;
+        let system = crate::i18n::system_language();
+        let choice = crate::i18n::choose(saved.as_deref(), system.as_deref(), &languages.available);
+        Ok((languages, catalogs, choice))
+    }
+
+    /// The language the app speaks — the saved choice, the system's, or
+    /// English — and every language it can speak (D-089): `headshell
+    /// language`, and the desktop's settings.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read. A language file that cannot be
+    /// used is not an error: it is listed in `languages.problems`.
+    pub fn languages(&self) -> Result<LanguagesReport> {
+        let mut rec = Recorder::start(
+            "language".to_owned(),
+            Some(self.config.data_dir().to_path_buf()),
+        );
+        let result = self.read_languages();
+        if let Ok((languages, _, _)) = &result {
+            count_languages(&mut rec, languages);
+        }
+        self.finish(rec, result, |(languages, _, choice), diag| {
+            LanguagesReport {
+                choice,
+                languages,
+                diag,
+            }
+        })
+    }
+
+    /// Saves the language the app speaks (D-089): a code from the language
+    /// list — `headshell language use <code>` — or `None` to follow the
+    /// system's — `headshell language system`.
+    ///
+    /// # Errors
+    /// If `code` is not a language the app can speak (the message says where
+    /// its file goes), or `preferences.json` cannot be read or written.
+    pub fn set_language(&self, code: Option<&str>) -> Result<LanguagesReport> {
+        let command = match code {
+            Some(code) => format!("language use {code}"),
+            None => "language system".to_owned(),
+        };
+        let mut rec = Recorder::start(command, Some(self.config.data_dir().to_path_buf()));
+        let result = (|| {
+            let (languages, _) = crate::i18n::languages(&self.config.locales_dir())?;
+            let chosen = match code {
+                None => None,
+                Some(code) => Some(
+                    crate::i18n::best_match(code, &languages.available).ok_or_else(|| {
+                        Error::new(
+                            Stage::LocaleLoad,
+                            ErrorKind::InvalidInput {
+                                detail: format!(
+                                    "there is no language \"{code}\" — put its file, {code}.json, in {}",
+                                    languages.folder.display()
+                                ),
+                            },
+                        )
+                    })?,
+                ),
+            };
+            let path = self.config.preferences_path();
+            let mut preferences = crate::preferences::load(&path)?;
+            preferences.language = chosen;
+            crate::preferences::save(&path, &preferences)?;
+            self.read_languages()
+        })();
+        if let Ok((languages, _, _)) = &result {
+            count_languages(&mut rec, languages);
+        }
+        self.finish(rec, result, |(languages, _, choice), diag| {
+            LanguagesReport {
+                choice,
+                languages,
+                diag,
+            }
+        })
+    }
+
+    /// What speaks the app's language (D-089), for a surface's words. Not a
+    /// recorded run: every command asks for it, and `diag` keeps the user's
+    /// last command.
+    ///
+    /// # Errors
+    /// If `preferences.json` cannot be read, or the built-in English is
+    /// broken.
+    pub fn translator(&self) -> Result<crate::i18n::Translator> {
+        let (_, catalogs, choice) = self.read_languages()?;
+        match catalogs
+            .iter()
+            .find(|catalog| catalog.meta.code == choice.active)
+        {
+            Some(catalog) => crate::i18n::Translator::new(catalog),
+            None => crate::i18n::Translator::english(),
+        }
+    }
+
+    /// The languages folder, created if it isn't there yet (D-089): where a
+    /// language file goes. The desktop opens it for the user.
+    ///
+    /// # Errors
+    /// If the folder cannot be created.
+    pub fn locales_folder(&self) -> Result<PathBuf> {
+        let folder = self.config.locales_dir();
+        std::fs::create_dir_all(&folder)
+            .map_err(|source| crate::error::io_err(Stage::LocaleLoad, &folder, source))?;
+        Ok(folder)
+    }
+
+    /// The desktop's words (D-089): the language the app speaks over
+    /// English, and English alone for diagnostics' second voice. Not a
+    /// recorded run, like [`Self::translator`].
+    ///
+    /// # Errors
+    /// As [`Self::translator`].
+    pub fn locale_bundle(&self) -> Result<crate::i18n::LocaleBundle> {
+        let (_, catalogs, choice) = self.read_languages()?;
+        let english;
+        let catalog = match catalogs
+            .iter()
+            .find(|catalog| catalog.meta.code == choice.active)
+        {
+            Some(catalog) => catalog,
+            None => {
+                english = crate::i18n::english()?;
+                &english
+            }
+        };
+        crate::i18n::LocaleBundle::new(catalog)
     }
 
     /// The music folders and who decided them (D-085): `headshell
@@ -3609,6 +3760,18 @@ impl Session {
         }
         result.map(|value| wrap(value, report))
     }
+}
+
+/// The language list's counts, for `headshell diag` (D-089).
+fn count_languages(rec: &mut Recorder, languages: &crate::i18n::Languages) {
+    rec.set(
+        "language.available",
+        i64::try_from(languages.available.len()).unwrap_or(i64::MAX),
+    );
+    rec.set(
+        "language.problems",
+        i64::try_from(languages.problems.len()).unwrap_or(i64::MAX),
+    );
 }
 
 /// The shared error for a plugin with no record in the consent ledger.

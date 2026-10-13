@@ -160,6 +160,18 @@ fn store_cookies(config: &Config) -> bool {
 /// (D-071). `None` if the catalog cannot be reached: the test is skipped and
 /// the reason is written.
 async fn install(config: &Config, test: &str) -> Option<PluginProvider> {
+    install_as(config, test, Tools::Installed).await
+}
+
+/// Whether [`install_as`] puts the plugin's tools (yt-dlp) in place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tools {
+    Installed,
+    /// Left out on purpose: what still works then works without them.
+    Missing,
+}
+
+async fn install_as(config: &Config, test: &str, tools: Tools) -> Option<PluginProvider> {
     let dir = match support::install_from_catalog(config, "ytmusic").await {
         Ok(dir) => dir,
         Err(reason) => {
@@ -173,7 +185,11 @@ async fn install(config: &Config, test: &str) -> Option<PluginProvider> {
     // The engine's job: install the artifacts the plugin declares. The test
     // does this the same way the user does with `headshell plugin install`
     // (from the shared cache), then sets up the provider.
-    for requirement in &manifest.requires {
+    let requirements = match tools {
+        Tools::Installed => manifest.requires.as_slice(),
+        Tools::Missing => &[],
+    };
+    for requirement in requirements {
         let shared = match shared_ytdlp(requirement) {
             Ok(path) => path,
             Err(reason) => panic!("could not install yt-dlp: {reason}"),
@@ -492,6 +508,66 @@ async fn a_search_hit_resolves_to_a_stream_with_the_unthrottling_range_header() 
     }
 }
 
+/// The fast path (D-088): the stream's address comes from InnerTube's own
+/// `player` endpoint, **without yt-dlp**.
+///
+/// yt-dlp is deliberately not installed here, so a resolved stream has only
+/// one explanation. Measured before it, inside the engine: yt-dlp took
+/// 3.4–4.1 s for what this path does in 0.2–0.3 s — the same client, the same
+/// address. If YouTube retires the client, this test turns red while the
+/// plugin keeps playing through yt-dlp: slower, not broken — and the red is
+/// how we hear about it.
+///
+/// The bot wall is the one refusal that skips: the fast path sends no
+/// cookies, and a data centre address (CI) can be stopped whatever the
+/// visitor id (D-061). Every other refusal fails.
+#[tokio::test]
+async fn a_search_hit_resolves_without_ytdlp_through_the_fast_path() {
+    if !prerequisites_met("the fast path") {
+        return;
+    }
+    let config = temp_config("fast-path");
+    let Some(provider) = install_as(&config, "the fast path", Tools::Missing).await else {
+        return;
+    };
+
+    let hits = provider.search("nujabes aruarian dance", 5).await.unwrap();
+    assert!(!hits.is_empty(), "the live search came back empty");
+
+    let mut refusals = Vec::new();
+    for hit in hits.iter().take(3) {
+        match provider.resolve_source(&hit.id).await {
+            Ok(Some(AudioSource::HttpStream { url, headers })) => {
+                assert!(
+                    url.starts_with("https://"),
+                    "the stream address is not https: {url}"
+                );
+                assert!(
+                    headers.iter().any(|header| {
+                        header.name.eq_ignore_ascii_case("range") && header.value == "bytes=0-"
+                    }),
+                    "no `Range: bytes=0-` header; the stream will be throttled: {headers:?}"
+                );
+                return;
+            }
+            Ok(other) => panic!("an http stream was expected, got: {other:?}"),
+            Err(err) => refusals.push(format!("{}: {}", hit.id, err.chain_text())),
+        }
+    }
+
+    let report = refusals.join("\n  ");
+    if refusals.iter().all(|refusal| refusal.contains("not a bot")) {
+        eprintln!(
+            "the fast path: YouTube's bot wall stopped all three candidates — \
+             skipped (D-061, this is not a failure).\n  {report}"
+        );
+        return;
+    }
+    panic!(
+        "the fast path resolved none of the three, and without yt-dlp nothing else can:\n  {report}"
+    );
+}
+
 /// A track that does not exist must fail **in yt-dlp's own words**.
 ///
 /// In the SoundCloud plugin the counterpart was "none is an answer, not an
@@ -500,6 +576,10 @@ async fn a_search_hit_resolves_to_a_stream_with_the_unthrottling_range_header() 
 /// confirm you're not a bot", and that distinction must reach the user.
 /// Flattening it into `Ok(None)` would turn three diagnoses into one (K9,
 /// D-048).
+///
+/// Since the fast path (D-088) a track goes to yt-dlp only after InnerTube's
+/// `player` endpoint said no; yt-dlp still has the last word, and the fast
+/// path's own reason follows it — two diagnoses, neither swallowed.
 #[tokio::test]
 async fn a_missing_track_fails_with_the_tools_own_words() {
     if !prerequisites_met("a missing track") {
@@ -523,6 +603,10 @@ async fn a_missing_track_fails_with_the_tools_own_words() {
     assert!(
         message.contains("yt-dlp"),
         "the error does not carry yt-dlp's message: {message}"
+    );
+    assert!(
+        message.contains("the fast path:"),
+        "the error does not carry the fast path's reason: {message}"
     );
     assert!(
         message.contains("STEP: PROVIDER_CALL"),
