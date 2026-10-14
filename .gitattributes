@@ -15,4 +15,6 @@
 *.ogg  binary
 *.mp3  binary
 *.m4a  binary
+*.mp4  binary
+*.m4s  binary
 *.zip  binary

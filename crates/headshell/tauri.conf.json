@@ -40,7 +40,7 @@
     "licenseFile": "../../LICENSE-MIT",
     "windows": {
       "wix": {
-        "version": "0.0.4"
+        "version": "0.0.5"
       }
     },
     "linux": {
