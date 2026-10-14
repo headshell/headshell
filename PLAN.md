@@ -2048,8 +2048,8 @@ flaws showed only in screenshots and were fixed (D-072).
 
 **Still open:** the "playing" state itself wasn't seen (the null device doesn't
 wait in real time — seen in §3.9); the Windows and macOS webviews weren't
-tried; seeking and volume aren't there because the core has no command for them
-(D-033).
+tried; volume isn't there because the core has no command for it (D-033) —
+seeking is, since §3.25.
 
 ### 3.9 Now playing as a sheet — DONE (D-075)
 
@@ -2075,7 +2075,7 @@ Music).
 
 **Not done:** cover art (a core capability — by D-033 a CLI subcommand first;
 done in §3.10), lyrics (the same — done in §3.12) and related tracks (no data
-in the core), seeking and
+in the core), seeking (done in §3.25) and
 volume (§3.8).
 
 **Testing:** `motion_js.rs` +2 — the spring's linearity (the sheet, its scrim
@@ -2249,8 +2249,8 @@ plays**.
    lyrics; `soundcloud` 0.4.0 says it has none.
 
 **Not done:** word-by-word (karaoke) timing — LRCLIB's word timing comes as
-YAML, a new parser; seeking to a line with a click — the core has no seek
-(§3.8); translations; an in-app way to ask LRCLIB again for a track whose
+YAML, a new parser; seeking to a line with a click — the core can seek since
+§3.25, the click is still to be wired (issue #1); translations; an in-app way to ask LRCLIB again for a track whose
 answer is kept (the CLI's cache lives 30 days).
 
 **Testing:** the LRC and `SYLT` readers; the version choice on real LRCLIB
@@ -2631,6 +2631,40 @@ language list being what that folder holds.
   in both voices.
 - **E. Plugins — TODO.** A plugin's `locales/` and the required quality
   declaration (§3.23).
+
+### 3.25 Moving in the track — DONE (D-090)
+
+**The problem:** GitHub issue #1 (a listener's list of suggestions), points 3
+and 2: clicking the progress line opened or closed now playing instead of
+moving in the song, and the arrow keys should move 5 seconds, with Ctrl
+changing the song. The line had only ever been a picture — the bar is the
+sheet's handle (D-075) — and the core had no seek the user could reach
+(§3.8, §3.9).
+
+**Done:**
+
+1. **The core:** `Player::seek` and `seek_by` (`SEEK_STEP_MS`, 5 s). A
+   position past the track's end ends it and the queue moves on as after an
+   ending; while a video is shown its clock moves and the shell moves its
+   player. `TickReport` says `moved`, and `track_changed` now counts from the
+   last report — a command between two rounds is reported by the next one.
+2. **The TUI:** ←/→ move 5 s, Ctrl+←/→ (and `n`/`b`) change the song.
+3. **The window:** `seek`, `seek_by`. The line is a slider with its own strip,
+   cut out of the bar's handle: a press puts it under the pointer, a drag
+   carries it, the sound jumps on release, Esc puts it back. Its knob is always
+   shown while a track can be moved in. ←/→ and Ctrl+←/→ as in the TUI; a held
+   key's steps add up while a jump is on its way.
+
+**Testing:** the containers' end (FLAC, Ogg, MP3) without a device; a real
+file moved, stepped, paused, past its end, and a video's clock moved
+(`playback_local.rs`); the jump reaching the window (`core_thread.rs`); the
+TUI's keys; the window's step against the core's (`ui_contract.rs`).
+
+**Verification:** the §3.9 container: a click at three quarters, a drag
+(the line and the time follow, the sound waits), a drag upwards that doesn't
+pull the sheet, the arrow keys, Ctrl+→, a paused track that stays paused, the
+end of the last track and of one in the middle of the queue. A video's seek
+was not seen (no network or plugin in the container).
 
 ---
 

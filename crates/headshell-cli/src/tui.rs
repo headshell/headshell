@@ -28,7 +28,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph};
 
 use headshell_core::playback::{
-    LiveSession, PlayState, PlaybackAnchor, Player, QueueItem, RepeatMode,
+    LiveSession, PlayState, PlaybackAnchor, Player, QueueItem, RepeatMode, SEEK_STEP_MS,
 };
 use headshell_core::session::PlayOptions;
 use headshell_core::suggest::SuggestReport;
@@ -98,6 +98,9 @@ enum Action {
     TogglePause,
     Next,
     Previous,
+    /// Back or forward by a step (D-090).
+    SeekBack,
+    SeekForward,
     SelectionUp,
     SelectionDown,
     PlaySelected,
@@ -112,11 +115,19 @@ fn action_for(key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Some(Action::Quit);
     }
+    // The arrows move in the track; with Ctrl they move through the queue
+    // (D-090) — as on the desktop. `n` and `b` stay: some terminals keep
+    // Ctrl+arrow for themselves.
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Char(' ') | KeyCode::Char('p') => Some(Action::TogglePause),
-        KeyCode::Char('n') | KeyCode::Right => Some(Action::Next),
-        KeyCode::Char('b') | KeyCode::Left => Some(Action::Previous),
+        KeyCode::Right if ctrl => Some(Action::Next),
+        KeyCode::Left if ctrl => Some(Action::Previous),
+        KeyCode::Right => Some(Action::SeekForward),
+        KeyCode::Left => Some(Action::SeekBack),
+        KeyCode::Char('n') => Some(Action::Next),
+        KeyCode::Char('b') => Some(Action::Previous),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::SelectionUp),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::SelectionDown),
         KeyCode::Enter => Some(Action::PlaySelected),
@@ -554,6 +565,15 @@ async fn apply(
             player.previous().await?;
             selection.select(Some(player.queue().position()));
         }
+        // Past the end the queue moves on: the selection follows it.
+        Action::SeekBack => {
+            player.seek_by(-SEEK_STEP_MS).await?;
+            selection.select(Some(player.queue().position()));
+        }
+        Action::SeekForward => {
+            player.seek_by(SEEK_STEP_MS).await?;
+            selection.select(Some(player.queue().position()));
+        }
         Action::SelectionUp => {
             let current = selection.selected().unwrap_or(0);
             selection.select(Some(current.saturating_sub(1)));
@@ -824,7 +844,7 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, view: &View<'_>) {
     }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " space pause · n/b next/previous · ↑↓ select · enter play · / search · s shuffle · r repeat · q quit",
+            " space pause · ←→ ±5 s · ctrl+←→ (n/b) next/previous · ↑↓ select · enter play · / search · s shuffle · r repeat · q quit",
             Style::default().fg(Color::DarkGray),
         ))),
         area,
@@ -874,7 +894,13 @@ mod tests {
         assert_eq!(action_for(key(KeyCode::Char('q'))), Some(Action::Quit));
         assert_eq!(action_for(key(KeyCode::Esc)), Some(Action::Quit));
         assert_eq!(action_for(key(KeyCode::Char('n'))), Some(Action::Next));
-        assert_eq!(action_for(key(KeyCode::Left)), Some(Action::Previous));
+        assert_eq!(action_for(key(KeyCode::Char('b'))), Some(Action::Previous));
+        // D-090: the arrows move in the track, Ctrl+arrows through the queue.
+        assert_eq!(action_for(key(KeyCode::Left)), Some(Action::SeekBack));
+        assert_eq!(action_for(key(KeyCode::Right)), Some(Action::SeekForward));
+        let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+        assert_eq!(action_for(ctrl(KeyCode::Left)), Some(Action::Previous));
+        assert_eq!(action_for(ctrl(KeyCode::Right)), Some(Action::Next));
         assert_eq!(action_for(key(KeyCode::Enter)), Some(Action::PlaySelected));
         assert_eq!(
             action_for(key(KeyCode::Char('s'))),

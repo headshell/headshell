@@ -157,7 +157,7 @@ enum Job {
 }
 
 /// An opened track, ready to decode.
-struct PreparedTrack {
+pub(crate) struct PreparedTrack {
     seq: u64,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
@@ -512,29 +512,8 @@ impl AudioEngine {
         Ok(self.play_prepared(open_source(source, head)?))
     }
 
-    /// [`Self::play_source`] from a position in the track (D-086): the
-    /// music picks up where its video was.
-    ///
-    /// The seek is the container's coarse one — it lands on a packet near
-    /// `start_ms`, and the position reports where it landed.
-    ///
-    /// # Errors
-    /// If the source cannot be opened, decoded, or moved to the position.
-    pub(crate) fn play_source_at(
-        &self,
-        source: &AudioSource,
-        head: Option<&StreamHead>,
-        start_ms: u64,
-    ) -> Result<u64> {
-        let mut prepared = open_source(source, head)?;
-        if start_ms > 0 {
-            seek_prepared(&mut prepared, start_ms)?;
-        }
-        Ok(self.play_prepared(prepared))
-    }
-
     /// Queues an opened track and returns its slice number.
-    fn play_prepared(&self, mut prepared: PreparedTrack) -> u64 {
+    pub(crate) fn play_prepared(&self, mut prepared: PreparedTrack) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
         prepared.seq = seq;
         self.shared.keep_stream(seq, &prepared);
@@ -1034,27 +1013,61 @@ fn prepare(source: Box<dyn MediaSource>, hint: Hint, label: &str) -> Result<Prep
     })
 }
 
+/// Opens a source at `start_ms` (D-086, D-090) — the device is not touched,
+/// so a position that can't be reached leaves what plays alone.
+///
+/// The seek is the container's coarse one: it lands on a packet near
+/// `start_ms`, and the position reports where it landed.
+///
+/// `None`: the position is past the track's end. The length a container
+/// states is not where its last packet starts — measured: an Ogg track of
+/// 1000 ms refuses 999, a FLAC of 15000 ms reaches 14999 but not 15000 —
+/// so "past the end" is the container's answer, not a comparison here.
+///
+/// # Errors
+/// If the source cannot be opened or decoded, or the container cannot move
+/// for another reason (a stream that can't seek).
+pub(crate) fn open_source_at(
+    source: &AudioSource,
+    head: Option<&StreamHead>,
+    start_ms: u64,
+) -> Result<Option<PreparedTrack>> {
+    let mut prepared = open_source(source, head)?;
+    if start_ms > 0 && !seek_prepared(&mut prepared, start_ms)? {
+        return Ok(None);
+    }
+    Ok(Some(prepared))
+}
+
 /// Moves an opened track to `start_ms` before its first packet is decoded
-/// (D-086), and notes where it landed.
-fn seek_prepared(prepared: &mut PreparedTrack, start_ms: u64) -> Result<()> {
+/// (D-086), and notes where it landed. `false`: the position is past the
+/// track's end.
+fn seek_prepared(prepared: &mut PreparedTrack, start_ms: u64) -> Result<bool> {
+    use symphonia::core::errors::{Error as SymphoniaError, SeekErrorKind};
     use symphonia::core::formats::{SeekMode, SeekTo};
     use symphonia::core::units::Time;
 
-    let seeked = prepared
-        .format
-        .seek(
-            SeekMode::Coarse,
-            SeekTo::Time {
-                time: Time::from_millis_u64(start_ms),
-                track_id: Some(prepared.track_id),
-            },
-        )
-        .map_err(|err| {
-            audio_err(
+    let seeked = match prepared.format.seek(
+        SeekMode::Coarse,
+        SeekTo::Time {
+            time: Time::from_millis_u64(start_ms),
+            track_id: Some(prepared.track_id),
+        },
+    ) {
+        Ok(seeked) => seeked,
+        // Past the last packet the readers answer one of two ways: FLAC
+        // reads off the end, Ogg and MP3 say the time is out of range.
+        Err(SymphoniaError::SeekError(SeekErrorKind::OutOfRange)) => return Ok(false),
+        Err(SymphoniaError::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Ok(false);
+        }
+        Err(err) => {
+            return Err(audio_err(
                 Stage::PlaybackDecode,
                 format!("could not move to {start_ms} ms in the track: {err}"),
-            )
-        })?;
+            ));
+        }
+    };
     // The decoder's state belongs to where it was; after a jump it starts
     // over.
     prepared.decoder.reset();
@@ -1063,7 +1076,7 @@ fn seek_prepared(prepared: &mut PreparedTrack, start_ms: u64) -> Result<()> {
         .and_then(|base| base.calc_time(seeked.actual_ts))
         .and_then(|time| u64::try_from(time.as_millis()).ok())
         .unwrap_or(start_ms);
-    Ok(())
+    Ok(true)
 }
 
 /// Decodes a single track to the end and writes it into the buffer.
@@ -1435,5 +1448,43 @@ mod tests {
         // 4 frames @8kHz → 8 frames at 16kHz.
         resample_into(&[1.0, 2.0, 3.0, 4.0], 8000, 1, 16_000, 1, &shared, 1024);
         assert_eq!(shared.ring.len(), 8);
+    }
+
+    /// D-090: a position inside the track is reached; one past its last
+    /// packet is "past the end", not an error — in every container, though
+    /// each says it its own way (FLAC reads off the end, Ogg and MP3 say
+    /// out of range). The positions are the measured edges: the Ogg refuses
+    /// even 1 ms short of its stated length. No device is needed.
+    #[test]
+    fn a_position_past_the_last_packet_is_the_end_not_an_error() {
+        let cases = [
+            ("fingerprint_sample.flac", 14_900, 15_000),
+            ("tagged.flac", 900, 1_000),
+            ("Other Artist - Ogg Track.ogg", 900, 999),
+            ("Test Artist - Mp3 Track.mp3", 1_900, 7_000),
+        ];
+        for (name, inside, past) in cases {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/audio")
+                .join(name);
+            let source = AudioSource::LocalFile { path };
+
+            let landed = open_source_at(&source, None, inside)
+                .unwrap_or_else(|err| panic!("{name}: {}", err.chain_text()))
+                .unwrap_or_else(|| panic!("{name}: {inside} ms is inside the track"));
+            assert!(
+                landed.offset_ms <= inside && inside - landed.offset_ms < 200,
+                "{name}: a coarse seek lands on a packet just before {inside} ms, not at {}",
+                landed.offset_ms
+            );
+
+            let past_end = open_source_at(&source, None, past).unwrap_or_else(|err| {
+                panic!("{name}: past the end is not an error: {}", err.chain_text())
+            });
+            assert!(
+                past_end.is_none(),
+                "{name}: {past} ms is past the last packet"
+            );
+        }
     }
 }

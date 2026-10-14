@@ -19,7 +19,7 @@ use crate::artwork::{
 use crate::ids::ProviderTrackId;
 use crate::library::WriteSummary;
 use crate::lyrics::{LyricsItem, LyricsKey, LyricsWorker};
-use crate::model::Listen;
+use crate::model::{Listen, TrackRef};
 use crate::playback::{PlayState, PlaybackAnchor, Player, QueueItem};
 use crate::session::{LookupMode, Session};
 use crate::{Error, Result};
@@ -38,8 +38,15 @@ pub struct TickReport {
     /// Always filled in. The shell computes the position from this
     /// (`PlaybackAnchor::position_at`).
     pub anchor: PlaybackAnchor,
-    /// Did the playing track change this round.
+    /// Did the playing track change since the last report — this round, or
+    /// by a command between two rounds (a seek past the end, D-090).
     pub track_changed: bool,
+    /// Did the position jump since the last report (D-090): a seek, or the
+    /// music taking the sound back from its video at another second. The
+    /// shell's estimate must start over from `anchor` — the one change in it
+    /// that the state, the rate and the track don't show.
+    #[serde(default)]
+    pub moved: bool,
     /// The number of listens **written** to the store this round.
     pub listens_recorded: usize,
     /// The number of listens that could not be written and are held back.
@@ -113,6 +120,21 @@ pub struct LiveSession {
     /// is not resolved again for this one.
     #[cfg(feature = "audio")]
     prefetch: crate::playback::prefetch::Prefetcher,
+    /// What the last report was made from (D-090): the playing track, its
+    /// queue position and the player's jump count. A command runs between
+    /// two rounds, and what it changed is reported by the next one.
+    reported: Reported,
+}
+
+/// See [`LiveSession::reported`].
+type Reported = (Option<TrackRef>, usize, u64);
+
+fn reported_of(player: &Player) -> Reported {
+    (
+        player.current_track().cloned(),
+        player.queue().position(),
+        player.seeks(),
+    )
 }
 
 impl LiveSession {
@@ -128,6 +150,7 @@ impl LiveSession {
         };
         Self {
             session,
+            reported: reported_of(&player),
             player,
             pending: Vec::new(),
             artwork: None,
@@ -424,11 +447,10 @@ impl LiveSession {
         // what is right for the shell — the track shown is the same; the
         // anchor's position says it started over, and `listens_recorded` says
         // there is a new listen.
-        let before = (
-            self.player.current_track().cloned(),
-            self.player.queue().position(),
-        );
-
+        //
+        // "Before" is the last report, not the start of this round (D-090): a
+        // command between two rounds — a seek past the end — changes the
+        // track too, and its answer is only the anchor.
         self.sync_history();
         let tick_result = self.player.tick().await;
 
@@ -436,10 +458,7 @@ impl LiveSession {
         // the error belongs to one track, the history to the whole session.
         let (recorded, store_error) = self.flush();
 
-        let after = (
-            self.player.current_track().cloned(),
-            self.player.queue().position(),
-        );
+        let after = reported_of(&self.player);
         let anchor = self.player.anchor();
         let finished =
             self.player.state() == PlayState::Stopped && self.player.current_track().is_none();
@@ -454,9 +473,13 @@ impl LiveSession {
         self.sync_lyrics();
         let lyrics_ready = self.lyrics.as_ref().is_some_and(LyricsWorker::drain_ready);
 
+        // Taken only for a report that goes out: after a failed round the
+        // next one still says what changed.
+        let before = std::mem::replace(&mut self.reported, after.clone());
         Ok(TickReport {
             anchor,
-            track_changed: before != after,
+            track_changed: (&before.0, before.1) != (&after.0, after.1),
+            moved: before.2 != after.2,
             listens_recorded: recorded,
             listens_pending: self.pending.len(),
             store_error,
@@ -546,7 +569,7 @@ mod tests {
     use crate::diag::Stage;
     use crate::error::ErrorKind;
     use crate::ids::ProviderId;
-    use crate::model::{ListenSource, TrackRef};
+    use crate::model::ListenSource;
     use crate::provider::ProviderRegistry;
 
     fn temp_dir(label: &str) -> crate::test_support::TempDir {

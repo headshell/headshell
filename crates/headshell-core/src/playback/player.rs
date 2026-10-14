@@ -90,6 +90,21 @@ const VIDEO_REPORT_SLACK_MS: u64 = 1_500;
 #[cfg(feature = "audio")]
 const SEEK_SLACK_MS: u64 = 1_500;
 
+/// How far one press of an arrow key moves the playing track (D-090), in
+/// the TUI and the desktop alike — the desktop's copy is checked against
+/// this one (`ui_contract.rs`).
+pub const SEEK_STEP_MS: i64 = 5_000;
+
+/// The error for a seek while nothing plays (D-090).
+fn nothing_to_seek() -> Error {
+    Error::new(
+        Stage::PlaybackDecode,
+        ErrorKind::InvalidInput {
+            detail: "nothing is playing to move in".to_owned(),
+        },
+    )
+}
+
 /// The error for a video call while nothing plays.
 fn nothing_plays() -> Error {
     Error::new(
@@ -146,6 +161,8 @@ pub struct Player {
     /// Tracks passed by because they are videos only and nothing here can
     /// show them — counted, not dropped silently (K9).
     video_only_skipped: usize,
+    /// How many times the position jumped (D-090): see [`Player::seeks`].
+    seeks: u64,
 }
 
 impl std::fmt::Debug for Player {
@@ -183,6 +200,7 @@ impl Player {
             video_mode: false,
             shows_video: false,
             video_only_skipped: 0,
+            seeks: 0,
         }
     }
 
@@ -767,16 +785,21 @@ impl Player {
                 .engine
                 .as_ref()
                 .map_or(0, super::engine::AudioEngine::position_ms);
-            if here.abs_diff(at_ms) > SEEK_SLACK_MS
-                && let Err(err) = self.seek(at_ms)
-            {
+            if here.abs_diff(at_ms) > SEEK_SLACK_MS {
                 // The music goes on from where it paused rather than not at
                 // all; the jump's failure is said (K9).
-                tracing::warn!(
-                    at_ms,
-                    error = %err.chain_text().replace('\n', " "),
-                    "the music could not move to the video's position; it goes on from where it paused"
-                );
+                match self.reopen_at(at_ms) {
+                    Ok(true) => self.seeks += 1,
+                    Ok(false) => tracing::warn!(
+                        at_ms,
+                        "the video's position is past the music's end; it goes on from where it paused"
+                    ),
+                    Err(err) => tracing::warn!(
+                        at_ms,
+                        error = %err.chain_text().replace('\n', " "),
+                        "the music could not move to the video's position; it goes on from where it paused"
+                    ),
+                }
             }
             if let Some(engine) = &self.engine {
                 engine.resume();
@@ -809,16 +832,95 @@ impl Player {
         Ok(false)
     }
 
-    /// Moves the playing music to `at_ms` (D-086): the track is opened again
-    /// there; what was heard before the jump stays with the listen.
+    /// Moves the playing track to `at_ms` (D-090): the progress bar, the
+    /// arrow keys. What was heard before the jump stays with the listen; the
+    /// jump itself is not heard time.
+    ///
+    /// A position at or past the track's end ends it, and the queue moves
+    /// on as when it ends by itself — `repeat one` plays it again. While a
+    /// video is shown its clock moves, and the shell moves its player to
+    /// the anchor's position (D-086); at its end the video ends as videos
+    /// do, and the shell says so ([`Self::video_ended`]).
+    ///
+    /// # Errors
+    /// If nothing plays, or the source cannot be opened again or moved
+    /// ([`Stage::PlaybackDecode`]); what played goes on then.
+    pub async fn seek(&mut self, at_ms: u64) -> Result<()> {
+        if self.now_playing.is_none() {
+            return Err(nothing_to_seek());
+        }
+        if let Some(video) = self.video.as_mut() {
+            video.position_ms = video.duration_ms.map_or(at_ms, |end| at_ms.min(end));
+            video.reported_at = std::time::Instant::now();
+            self.seeks += 1;
+            return Ok(());
+        }
+        #[cfg(feature = "audio")]
+        {
+            let past_end = self.anchor().duration_ms.is_some_and(|end| at_ms >= end);
+            if !past_end && self.reopen_at(at_ms)? {
+                self.seeks += 1;
+                return Ok(());
+            }
+            self.leave_at_end().await
+        }
+        #[cfg(not(feature = "audio"))]
+        Err(nothing_to_seek())
+    }
+
+    /// Moves the playing track by `delta_ms` from where it is (D-090): back
+    /// is negative. Back past the start is the start; forward past the end
+    /// is the end, as [`Self::seek`].
+    ///
+    /// # Errors
+    /// As [`Self::seek`].
+    pub async fn seek_by(&mut self, delta_ms: i64) -> Result<()> {
+        let here = self.anchor().position_ms;
+        self.seek(here.saturating_add_signed(delta_ms)).await
+    }
+
+    /// How many times the position has jumped (D-090) — a seek, or the music
+    /// taking the sound back from its video at another second. The playing
+    /// session reports a change to the shell, whose estimate of the position
+    /// must start over.
+    #[must_use]
+    pub fn seeks(&self) -> u64 {
+        self.seeks
+    }
+
+    /// The user moved past the track's end (D-090): it ends as it would
+    /// have, and the queue moves on as after an ending. It counts as
+    /// "next" does — finished if the play rule counted it, skipped if not.
+    /// It is a jump too: with `repeat one` the same track starts over, and
+    /// nothing else would tell the shell.
+    #[cfg(feature = "audio")]
+    async fn leave_at_end(&mut self) -> Result<()> {
+        if self.current_counts() {
+            self.habits.finished += 1;
+        } else {
+            self.habits.skipped += 1;
+        }
+        self.seeks += 1;
+        self.finish_current_listen();
+        if self.queue.advance_after_finish().is_some() {
+            return self.start_current().await;
+        }
+        self.stop();
+        Ok(())
+    }
+
+    /// Opens the playing music again at `at_ms` (D-086): the source is opened
+    /// and moved first, so the device is touched only when the position can
+    /// be reached. `false`: the position is past the track's end, and
+    /// nothing changed.
     ///
     /// # Errors
     /// If nothing plays from the engine, or the source cannot be opened or
     /// moved.
     #[cfg(feature = "audio")]
-    pub fn seek(&mut self, at_ms: u64) -> Result<()> {
+    fn reopen_at(&mut self, at_ms: u64) -> Result<bool> {
         let Some(now) = &self.now_playing else {
-            return Err(nothing_plays());
+            return Err(nothing_to_seek());
         };
         let Some(source) = now.source.clone() else {
             return Err(Error::new(
@@ -827,6 +929,9 @@ impl Player {
                     detail: "the track is a video only; its player moves it".to_owned(),
                 },
             ));
+        };
+        let Some(prepared) = super::engine::open_source_at(&source, None, at_ms)? else {
+            return Ok(false);
         };
         let (heard, paused) = self.engine.as_ref().map_or((0, false), |engine| {
             (
@@ -837,7 +942,7 @@ impl Player {
             )
         });
         let engine = super::engine::AudioEngine::open()?;
-        let seq = engine.play_source_at(&source, None, at_ms)?;
+        let seq = engine.play_prepared(prepared);
         if paused {
             engine.pause();
         }
@@ -848,7 +953,7 @@ impl Player {
             now.carried_ms = now.carried_ms.saturating_add(heard);
             now.seq = seq;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Asks the provider for a playable source.

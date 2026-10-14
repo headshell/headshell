@@ -2767,9 +2767,11 @@ kbd {
   color: var(--headshell-accent);
 }
 
+/* Late, as the line's colour (D-090): a moment of buffering doesn't flash. */
 .state.buffering {
   color: var(--headshell-info);
-  animation: pulse calc(var(--headshell-duration) * 6) ease-in-out infinite alternate;
+  transition: color 0s linear 400ms;
+  animation: pulse calc(var(--headshell-duration) * 6) ease-in-out 400ms infinite alternate;
 }
 
 .state.stopped {
@@ -2783,6 +2785,26 @@ kbd {
   to {
     opacity: 0.3;
   }
+}
+
+/* The line under the song moves in it (D-090). Its strip is three times
+ * the line's height, so it is easy to hit, and it is cut out of the bar's
+ * "open now playing" area (`app.js`). The negative margin keeps the layout
+ * where the bare line had it. */
+.seek {
+  position: relative;
+  margin: -6px 0;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.seek[aria-disabled="true"] {
+  cursor: default;
+}
+
+/* The ring goes round the knob, not round the strip. */
+.seek:focus-visible {
+  outline: none;
 }
 
 .bar {
@@ -2801,8 +2823,57 @@ kbd {
   will-change: transform;
 }
 
-.player.buffering .fill {
+/* The knob rides the fill's end: a point at the line's start, moved with
+ * `translateX` (D-028); the dot is centred on it. Always there while a
+ * track can be moved in. */
+.knob {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.seek[aria-disabled="true"] .knob {
+  visibility: hidden;
+}
+
+.knob-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: var(--headshell-accent);
+  /* A rim of the bar's own colour lifts it off the line. */
+  box-shadow: 0 0 0 2px var(--headshell-surface);
+  transition: transform var(--headshell-duration) ease-out;
+}
+
+.seek:hover .knob-dot {
+  transform: scale(1.17);
+}
+
+/* Held: bigger at once — the press answers on the way down. */
+.seek.scrubbing .knob-dot {
+  transform: scale(1.33);
+  transition: none;
+}
+
+.seek:focus-visible .knob-dot {
+  box-shadow:
+    0 0 0 2px var(--headshell-surface),
+    0 0 0 4px var(--headshell-accent);
+}
+
+/* A moment of buffering — a jump in the track, the start of a local file —
+ * doesn't flash the line: the colour turns only when the wait is long
+ * enough to be noticed, and turns back at once. */
+.player.buffering .fill,
+.player.buffering .knob-dot {
   background: var(--headshell-info);
+  transition-property: background-color, transform;
+  transition-delay: 400ms, 0s;
 }
 
 .time {
@@ -3856,7 +3927,9 @@ kbd {
 
   button:active:not(:disabled),
   .dropzone.over,
-  .switch:active:not(:disabled) .switch-knob {
+  .switch:active:not(:disabled) .switch-knob,
+  .seek:hover .knob-dot,
+  .seek.scrubbing .knob-dot {
     transform: none;
   }
 }

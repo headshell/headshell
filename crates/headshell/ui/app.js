@@ -1004,29 +1004,63 @@ function renderAnchor(next) {
 // visible changes: a paused track must not rewrite the same text every
 // frame.
 const barFill = $("barFill");
+const seekBar = $("seek");
+const seekKnob = $("seekKnob");
 const timeLabel = $("timeLabel");
 let drawing = 0;
 let drawnRatio = -1;
 let drawnLabel = "";
+let drawnSeekable = null;
+/// The line's width (px), for the knob's `translateX`: measured when it
+/// changes, not every frame.
+let seekWidth = 0;
+/// The line being held (D-090): `{ pointerId, ms }`, or `null`.
+let scrub = null;
 
 function draw() {
   if (!anchor) return;
-  const position = positionAt(anchor, Date.now());
+  // A held line shows where it would go; the arm and the lyrics follow it
+  // (D-090).
+  const position = scrub ? scrub.ms : positionAt(anchor, Date.now());
   const duration = anchor.duration_ms ?? 0;
   const ratio = duration > 0 ? Math.min(position / duration, 1) : 0;
   playedRatio = ratio;
   moveArm();
   if (Math.abs(ratio - drawnRatio) > 0.0004) {
     barFill.style.transform = `scaleX(${ratio})`;
+    seekKnob.style.transform = `translateX(${ratio * seekWidth}px)`;
     drawnRatio = ratio;
   }
   const label = `${clock(position)} / ${duration > 0 ? clock(duration) : "—:—"}`;
-  if (label !== drawnLabel) {
+  const seekable = duration > 0 && anchor.state !== "stopped";
+  if (label !== drawnLabel || seekable !== drawnSeekable) {
     timeLabel.textContent = label;
     drawnLabel = label;
+    describeSeek(position, duration, seekable);
   }
   lightLyricLine(position);
 }
+
+/// The line as a slider, for assistive technology (D-090): written when
+/// the second changes, as the label is.
+function describeSeek(position, duration, seekable) {
+  if (seekable !== drawnSeekable) {
+    seekBar.setAttribute("aria-disabled", String(!seekable));
+    drawnSeekable = seekable;
+  }
+  seekBar.setAttribute("aria-valuemax", String(Math.floor(duration / 1000)));
+  seekBar.setAttribute("aria-valuenow", String(Math.floor(position / 1000)));
+  seekBar.setAttribute(
+    "aria-valuetext",
+    t("ui.player.seek_value", { position: clock(position), duration: duration > 0 ? clock(duration) : "—:—" }),
+  );
+}
+
+new ResizeObserver(() => {
+  seekWidth = seekBar.clientWidth;
+  drawnRatio = -1;
+  draw();
+}).observe(seekBar);
 
 function drawFrame() {
   drawing = 0;
@@ -1862,7 +1896,8 @@ verticalDrag(nowSheet, {
 });
 
 verticalDrag(player, {
-  ignore: "button",
+  // The line under the song moves in it (D-090), not the sheet.
+  ignore: "button, .seek",
   onStart: () => {
     player.classList.remove("pressed");
     unfoldSheet();
@@ -1875,7 +1910,7 @@ verticalDrag(player, {
 // The tap rule: the press shows on the way down, the sheet moves on the way
 // up. A drag that follows swallows the click (`motion.js`).
 player.addEventListener("pointerdown", (event) => {
-  if (event.button === 0 && !event.target.closest("button")) player.classList.add("pressed");
+  if (event.button === 0 && !event.target.closest("button, .seek")) player.classList.add("pressed");
 });
 // A drag up from the bar crosses the sheet's text. The bar's own text cannot
 // be selected, but the press would still begin a selection that the gesture
@@ -1887,10 +1922,126 @@ for (const type of ["pointerup", "pointercancel", "pointerleave"]) {
   player.addEventListener(type, () => player.classList.remove("pressed"));
 }
 player.addEventListener("click", (event) => {
-  if (!event.target.closest("button")) setNowOpen(!nowOpen);
+  if (!event.target.closest("button, .seek")) setNowOpen(!nowOpen);
 });
 nowToggle.addEventListener("click", () => setNowOpen(!nowOpen));
 $("btnNowGrabber").addEventListener("click", () => setNowOpen(false));
+
+// ————————————————————————————————————— moving in the track (D-090)
+//
+// The line under the song is its own control. A press puts the line under
+// the pointer at once and a drag carries it 1:1; the sound jumps on release
+// — every jump opens the track again (a stream: a new request), and jumping
+// all along a drag would stutter. Esc during a drag puts the line back.
+//
+// Where the track lands, and what past its end means, is the core's: the
+// line shows the guess until the answer comes, then the answer.
+
+/// One arrow key: the core's `SEEK_STEP_MS` (`ui_contract.rs` keeps the two
+/// equal).
+const SEEK_STEP_MS = 5000;
+
+function seekable() {
+  return seekBar.getAttribute("aria-disabled") !== "true";
+}
+
+function scrubTo(clientX) {
+  const rect = seekBar.getBoundingClientRect();
+  const ratio = rect.width > 0 ? Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1) : 0;
+  scrub.ms = Math.round(ratio * (anchor?.duration_ms ?? 0));
+  draw();
+}
+
+/// Lets go of the line; what it held, or `null`.
+function letGoOfLine() {
+  const held = scrub;
+  scrub = null;
+  seekBar.classList.remove("scrubbing");
+  if (held && seekBar.hasPointerCapture(held.pointerId)) seekBar.releasePointerCapture(held.pointerId);
+  return held;
+}
+
+/// Esc, or the pointer taken away: the line goes back to the track.
+function cancelScrub() {
+  if (!letGoOfLine()) return;
+  drawnRatio = -1;
+  draw();
+}
+
+seekBar.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || !seekable()) return;
+  // No focus is taken: the arrow keys move in the track wherever the focus
+  // is, and a focused line wears the keyboard's ring — WebKit showed it
+  // after a click.
+  seekBar.setPointerCapture(event.pointerId);
+  scrub ={ pointerId: event.pointerId, ms: 0 };
+  seekBar.classList.add("scrubbing");
+  scrubTo(event.clientX);
+});
+seekBar.addEventListener("pointermove", (event) => {
+  if (scrub?.pointerId === event.pointerId) scrubTo(event.clientX);
+});
+seekBar.addEventListener("pointerup", (event) => {
+  if (scrub?.pointerId === event.pointerId) seekTo(letGoOfLine().ms);
+});
+seekBar.addEventListener("pointercancel", cancelScrub);
+seekBar.addEventListener("lostpointercapture", cancelScrub);
+
+/// Shows the track at `ms` until the core answers. A track that opens
+/// again waits — `buffering`, as the core will say — rather than run on
+/// ahead of its sound; a video plays on.
+function holdAt(ms) {
+  if (!anchor) return;
+  const waits = !video.now && anchor.state === "playing";
+  renderAnchor({
+    ...anchor,
+    position_ms: Math.min(Math.max(Math.round(ms), 0), anchor.duration_ms ?? Infinity),
+    wall_time: new Date().toISOString(),
+    state: waits ? "buffering" : anchor.state,
+    rate: waits ? 0 : anchor.rate,
+  });
+}
+
+/// The core's answer to a jump replaces the guess, and a video's player
+/// goes where the core says the track is (D-086). A refusal is on screen
+/// already (`call`); the line goes back to where the track is.
+async function landSeek(next) {
+  if (!next) {
+    renderAnchor(await call("anchor"));
+    return;
+  }
+  renderAnchor(next);
+  if (video.now && videoLayer.loaded()) videoLayer.seek(next.position_ms);
+}
+
+async function seekTo(ms) {
+  holdAt(ms);
+  await landSeek(await call("seek", { atMs: Math.round(ms) }));
+}
+
+/// The arrow keys: a step back or forward. A key held down repeats faster
+/// than a stream opens again, so the steps taken while a jump is on its way
+/// add up and go as one.
+let seekSteps = 0;
+let seekGoing = false;
+
+async function seekStep(direction) {
+  if (!anchor || scrub || !seekable()) return;
+  seekSteps += direction;
+  holdAt(positionAt(anchor, Date.now()) + direction * SEEK_STEP_MS);
+  if (seekGoing) return;
+  seekGoing = true;
+  while (seekSteps !== 0) {
+    const steps = seekSteps;
+    seekSteps = 0;
+    const next = await call("seek_by", { deltaMs: steps * SEEK_STEP_MS });
+    await landSeek(next);
+    if (!next) seekSteps = 0;
+    // Steps taken meanwhile stay shown on top of the answer.
+    else if (seekSteps !== 0) holdAt(next.position_ms + seekSteps * SEEK_STEP_MS);
+  }
+  seekGoing = false;
+}
 
 // ————————————————————————————————————— play
 
@@ -2286,9 +2437,10 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    // The topmost goes first: the notices lie over the sheet, the
+    // The topmost goes first: a held line, the notices over the sheet, the
     // whole-sheet lyrics over the record.
-    if (toastTimers.size > 0) dismissAllToasts();
+    if (scrub) cancelScrub();
+    else if (toastTimers.size > 0) dismissAllToasts();
     else if (nowOpen && lyricsFull) setLyricsFull(false);
     else if (nowOpen) setNowOpen(false);
     return;
@@ -2299,6 +2451,14 @@ document.addEventListener("keydown", (event) => {
     if (event.key === ",") {
       event.preventDefault();
       openPanel("settings");
+      return;
+    }
+    // Ctrl+←/→: the previous or next song (D-090) — not in a text box,
+    // where they move by words.
+    if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && !isTyping(event.target)) {
+      event.preventDefault();
+      if (event.key === "ArrowRight") playNext();
+      else playPrevious();
       return;
     }
     const slot = event.key === "0" ? 10 : Number(event.key);
@@ -2314,11 +2474,12 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     togglePause();
   } else if (event.key === "ArrowRight") {
+    // ←/→ move in the track (D-090); with Ctrl, through the queue.
     event.preventDefault();
-    playNext();
+    seekStep(1);
   } else if (event.key === "ArrowLeft") {
     event.preventDefault();
-    playPrevious();
+    seekStep(-1);
   } else if (event.key === "/") {
     event.preventDefault();
     $("playQuery").focus();

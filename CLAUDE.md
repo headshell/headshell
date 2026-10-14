@@ -205,7 +205,7 @@ headshell video "<artist> - <title>" | --file <path>   # the song's video, from 
 headshell online [on|off]                        # the desktop's online choice (not the CLI's)
 headshell music-dirs [add <dir> | remove <dir>]  # the local music folders (HEADSHELL_MUSIC_DIRS overrides)
 headshell language [use <code> | system]         # the language the app speaks; the list is the locales/ folder (D-089)
-headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues
+headshell play <track> [--all] [--shuffle] [--dry-run] [--tui]   # --tui: `/` searches, Enter plays, Tab queues, ←/→ move 5 s
 headshell diag                                   # the last run's diagnostics report
 ```
 

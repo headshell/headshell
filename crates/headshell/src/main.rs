@@ -278,6 +278,9 @@ fn run(
             commands::next,
             commands::previous,
             commands::jump_to,
+            // Moving in the track (D-090)
+            commands::seek,
+            commands::seek_by,
             commands::set_shuffle,
             commands::set_repeat,
             // Music videos (D-086)

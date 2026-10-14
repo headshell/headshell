@@ -172,6 +172,7 @@ impl Notable {
 /// progress bar stayed at 0:00 and no error was visible.
 fn worth_sending(last: &Notable, report: &TickReport) -> bool {
     report.track_changed
+        || report.moved
         || report.listens_recorded > 0
         || report.store_error.is_some()
         || report.finished
@@ -222,6 +223,7 @@ mod tests {
         TickReport {
             anchor,
             track_changed: false,
+            moved: false,
             listens_recorded: 0,
             listens_pending: 0,
             store_error: None,
@@ -307,6 +309,19 @@ mod tests {
         let mut next = report(anchor(PlayState::Playing, 1_000, Some(240_000)));
         assert!(!worth_sending(&last, &next));
         next.lyrics_ready = true;
+        assert!(worth_sending(&last, &next));
+    }
+
+    /// A seek is the one jump the estimate can't see (D-090): the state
+    /// and the track stay what they were. The seek's own answer is the
+    /// anchor taken while the track opens again — `Buffering` — and with
+    /// nothing sent after it the bar froze there, as in the first test.
+    #[test]
+    fn a_jump_in_the_position_is_worth_sending() {
+        let last = Notable::of(&anchor(PlayState::Playing, 10_000, Some(240_000)));
+        let mut next = report(anchor(PlayState::Playing, 120_000, Some(240_000)));
+        assert!(!worth_sending(&last, &next));
+        next.moved = true;
         assert!(worth_sending(&last, &next));
     }
 }

@@ -1176,13 +1176,13 @@
     <!-- ————————————————— player bar -->
     <footer id="player" class="player" aria-label="player">
       <div class="controls transport">
-        <button id="btnPrev" class="icon-button" type="button" title="previous (←)" aria-label="previous song">
+        <button id="btnPrev" class="icon-button" type="button" title="previous (Ctrl+←)" aria-label="previous song" data-i18n-attr="title=ui.player.previous_title">
           <svg class="icon" aria-hidden="true"><use href="#i-prev" /></svg>
         </button>
         <button id="btnPlayPause" class="icon-button play" type="button" title="play / pause (space)" aria-label="play">
           <svg class="icon" aria-hidden="true"><use id="playPauseIcon" href="#i-play" /></svg>
         </button>
-        <button id="btnNext" class="icon-button" type="button" title="next (→)" aria-label="next song">
+        <button id="btnNext" class="icon-button" type="button" title="next (Ctrl+→)" aria-label="next song" data-i18n-attr="title=ui.player.next_title">
           <svg class="icon" aria-hidden="true"><use href="#i-next" /></svg>
         </button>
         <button id="btnStop" class="icon-button subtle" type="button" title="stop" aria-label="stop">
@@ -1195,7 +1195,23 @@
           <span id="nowTitle" class="now-title">—</span>
           <span id="nowArtist" class="now-artist"></span>
         </div>
-        <div class="bar"><div id="barFill" class="fill"></div></div>
+        <!-- The line under the song moves in it (D-090): its own strip, out
+             of the bar's "open now playing" area. -->
+        <div
+          id="seek"
+          class="seek"
+          role="slider"
+          tabindex="0"
+          aria-valuemin="0"
+          aria-valuemax="0"
+          aria-valuenow="0"
+          aria-disabled="true"
+          aria-label="position in the song"
+          data-i18n-attr="aria-label=ui.player.seek"
+        >
+          <div class="bar"><div id="barFill" class="fill"></div></div>
+          <div id="seekKnob" class="knob" aria-hidden="true"><span class="knob-dot"></span></div>
+        </div>
       </div>
       <span id="timeLabel" class="time">0:00 / —:—</span>
       <div class="controls modes">
@@ -1217,7 +1233,8 @@
         <h2 id="helpTitle">keyboard shortcuts</h2>
         <ul class="keys">
           <li><span><kbd>space</kbd></span> pause or keep playing</li>
-          <li><span><kbd>←</kbd> <kbd>→</kbd></span> previous or next song</li>
+          <li><span><kbd>←</kbd> <kbd>→</kbd></span> <span data-i18n="ui.help.keys.seek">back or forward 5 seconds</span></li>
+          <li><span><kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd></span> <span data-i18n="ui.help.keys.songs">previous or next song</span></li>
           <li><span><kbd>/</kbd></span> jump to the search box</li>
           <li><span><kbd>L</kbd></span> show the lyrics — press again for up next</li>
           <li><span><kbd>Enter</kbd></span> play the first match</li>

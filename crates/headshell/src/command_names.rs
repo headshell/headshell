@@ -43,6 +43,8 @@ pub const COMMANDS: &[&str] = &[
     "next",
     "previous",
     "jump_to",
+    "seek",
+    "seek_by",
     "set_shuffle",
     "set_repeat",
     "provider_roles",

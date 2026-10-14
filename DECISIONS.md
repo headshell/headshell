@@ -6213,3 +6213,66 @@ and writes no markup, the new stage has listener words, the commands are granted
 (Türkçe)", "Klasördeki 1 dil dosyası okunamadı."); the debug mode with the broken file in both voices;
 the list ("Türkçe — %32 çevrildi", the percent written the Turkish way); *English* picked from it — the
 page turned English at once, the problem line said once, `preferences.json` saved `"language": "en"`.
+
+## D-090 — Moving in the track: the line is a slider, the arrows move 5 seconds
+
+**Date:** 2026-10-14 · **Status:** APPLIED (2026-10-14)
+
+**Question:** The project's first GitHub issue (#1, "suggestion", from a listener) lists eight points. The
+user picked the third first — "clicking on the seek bar opens or closes the menu instead of seeking" — and,
+asked, the second with it: ←/→ move 5 seconds, Ctrl+←/→ change the song, since both need the same seek.
+The line had only ever been a picture: the whole bar is the now-playing sheet's handle (D-075), and the core
+had no seek the user could reach (PLAN §3.8, §3.9, §3.12) — only the one D-086 wrote for the music taking
+the sound back from its video. The user chose a click and a drag, and a knob always shown.
+
+**Decision:**
+
+1. **The core moves; the shells ask.** `Player::seek(at_ms)` and `seek_by(delta_ms)`, both async;
+   `SEEK_STEP_MS` (5 s) is the arrow keys' step everywhere. Back past the start is the start. The source
+   is opened and moved **before** the device is touched (`engine::open_source_at`), so a position that
+   can't be reached leaves what plays alone. What was heard stays with the listen; the jump is not heard
+   time (D-086's rule).
+2. **Past the end is the end, not an error.** A position at or past the track's length ends it, and the
+   queue moves on as after an ending — `repeat one` plays it again. It counts as "next" does: finished if
+   the play rule counted the track, skipped if not. The container decides what is past the end, not a
+   comparison with the stated length: measured, an Ogg of 1000 ms refuses 999, a FLAC of 15000 ms reaches
+   14999 and reads off the end at 15000, an MP3 of 2000 ms lands at 1908 for anything up to its end. FLAC's
+   end-of-file and the others' "out of range" are both read as the end.
+3. **A video shown makes the sound (D-086)**, so a seek moves the video's clock, clamped to its length, and
+   the shell moves its player to the anchor's position. At its end the video ends as videos do and the
+   shell reports it (`video_ended`): the track never changes under a video by a seek, so the shell never
+   moves an old video to a new track's second.
+4. **The window learns the jump.** The webview estimates the position from the anchor and is sent only
+   what the estimate can't know (D-033). A seek's answer is the anchor taken while the track opens again —
+   `buffering` — and with the state back to `playing` by the next round, nothing was sent: the line froze,
+   the first fault D-033's tests were written for. `TickReport` now says **`moved`** (the player counts its
+   jumps), and **`track_changed` counts from the last report**, not from the round's start — a seek past
+   the end changes the track between two rounds, and the next one must say so.
+5. **The line is a slider with a strip of its own** (`role="slider"`, 16 px tall around the 4 px line),
+   cut out of the bar's handle: the bar's click, press and upward drag leave it alone. A press puts the line
+   under the pointer at once; a drag carries the line, the knob, the time label, the tonearm and the lyrics
+   1:1; **the sound jumps on release** — every jump opens the track again (a stream: a new request), and
+   jumping all along a drag would stutter. Esc during a drag puts the line back. The knob shows while a
+   track can be moved in. A click takes no focus: the arrows work wherever the focus is, and WebKit showed
+   the keyboard's ring after a click.
+6. **The keys.** ←/→ move 5 s, Ctrl+←/→ change the song (not in a text box, where they move by words) —
+   on the desktop and in the TUI, where `n`/`b` stay because some terminals keep Ctrl+arrows. A held key
+   repeats faster than a stream opens again: the steps taken while a jump is on its way add up and go as
+   one. The page's copy of the step is tested against the core's.
+7. **Buffering for a moment doesn't flash.** A local file's jump buffers for a few milliseconds; the line,
+   the knob and the state dot turn to the buffering colour only after 400 ms, and back at once.
+
+**Consequence:** IPC `seek`, `seek_by` (and their permissions); new words (`ui.player.*`,
+`ui.help.keys.*`) are keys in `en.json` (D-089). The rest of issue #1 — a click on a lyric line, URLs, the
+YouTube errors, configurable keys, the browse page — is not in this decision.
+
+**Testing:** `a_position_past_the_last_packet_is_the_end_not_an_error` (four containers, no device);
+`the_user_moves_in_the_track_and_past_its_end` and `a_seek_moves_the_videos_clock_while_a_video_is_shown`
+on a real device; `a_jump_in_the_position_is_worth_sending`; the TUI's keys; `the_desktop_steps_as_far_as_the_core`.
+
+**Verification:** the §3.9 container (Debian 13, WebKitGTK, Xvfb, a PulseAudio null sink) with two
+generated tones: a click at three quarters (1:30 of 2:00, playing on, the sheet shut); a drag held at the
+middle (1:00 shown, the knob enlarged, the sound waiting) and let go; a drag upwards from the line that
+didn't pull the sheet; →→→, ←, Ctrl+→; a click on a paused track (stayed paused); a drag past the end of
+the queue's last track (stopped) and of its first (the next one played). A video's seek was not seen: no
+network or plugin in the container.

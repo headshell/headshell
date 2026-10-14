@@ -130,7 +130,7 @@ headshell play "Pink Floyd" --all --tui
 │ ▸ Pink Floyd - Time                                                        │
 │   Pink Floyd - The Great Gig in the Sky                                    │
 └────────────────────────────────────────────────────────────────────────────┘
- space pause · n/b next/previous · ↑↓ select · enter play · s shuffle · r repeat · q quit
+ space pause · ←→ ±5 s · ctrl+←→ (n/b) next/previous · ↑↓ select · enter play · / search · …
 ```
 
 ### 🖥️ The same on the desktop

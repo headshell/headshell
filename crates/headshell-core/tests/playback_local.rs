@@ -405,3 +405,158 @@ async fn the_music_goes_on_from_where_its_video_was() {
         "the music should pick up near 9 s, it is at {position} ms"
     );
 }
+
+/// D-090: the user moves in the playing track. The track opens again at the
+/// second asked for, a paused one stays paused, a step goes from where it
+/// is, and the session's next report says the position jumped — once.
+/// Past the end the track ends and the queue moves on, as when it ends by
+/// itself, and the report says the track changed.
+#[tokio::test]
+async fn the_user_moves_in_the_track_and_past_its_end() {
+    if !has_output_device() {
+        eprintln!("no audio output — skipping the seek test (this is not a failure)");
+        return;
+    }
+    let dir = support::TempDir::new("seek");
+    let session = Session::open(Config::with_data_dir(dir.path())).unwrap();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(LocalProvider::new(vec![fixture("")])));
+    let items: Vec<QueueItem> = ["fingerprint_sample.flac", "tagged.flac"]
+        .iter()
+        .map(|name| QueueItem {
+            id: ProviderTrackId::new(ProviderId::new("local"), fixture(name).to_string_lossy()),
+            track: TrackRef::new("Artist", *name),
+        })
+        .collect();
+    let mut player = Player::new(registry);
+    if let Err(err) = player.play_items(items).await {
+        eprintln!(
+            "could not open the audio device, skipping the test:\n{}",
+            err.chain_text()
+        );
+        return;
+    }
+    // Paused, the position holds still while the test looks.
+    player.pause();
+    let mut live = LiveSession::new(session, player);
+    let quiet = live.tick().await.unwrap();
+    assert!(!quiet.moved && !quiet.track_changed, "{quiet:?}");
+
+    live.player_mut().seek(9_000).await.unwrap();
+    let anchor = live.player().anchor();
+    // A coarse seek lands on a packet just before the second: FLAC frames
+    // here are a fraction of a second long.
+    assert!(
+        (8_500..=9_000).contains(&anchor.position_ms),
+        "the track should be near 9 s, it is at {} ms",
+        anchor.position_ms
+    );
+    assert_eq!(
+        anchor.state,
+        PlayState::Paused,
+        "a paused track stays paused"
+    );
+    let report = live.tick().await.unwrap();
+    assert!(report.moved, "the jump must reach the shell: {report:?}");
+    assert!(!report.track_changed, "{report:?}");
+    assert!(!live.tick().await.unwrap().moved, "a jump is said once");
+
+    live.player_mut()
+        .seek_by(-headshell_core::playback::SEEK_STEP_MS)
+        .await
+        .unwrap();
+    let back = live.player().anchor().position_ms;
+    assert!(
+        (3_500..=4_000).contains(&back),
+        "a step back from ~9 s lands near 4 s, it is at {back} ms"
+    );
+    live.player_mut().seek_by(-60_000).await.unwrap();
+    assert!(
+        live.player().anchor().position_ms < 100,
+        "back past the start is the start"
+    );
+
+    let at = live.player().queue().position();
+    live.player_mut().seek(15_000).await.unwrap();
+    assert_eq!(
+        live.player().queue().position(),
+        at + 1,
+        "the end of the track moves the queue on"
+    );
+    assert_eq!(
+        live.player()
+            .current_track()
+            .map(|track| track.title.as_str()),
+        Some("tagged.flac")
+    );
+    let report = live.tick().await.unwrap();
+    assert!(
+        report.track_changed,
+        "a seek past the end changes the track: {report:?}"
+    );
+    live.player_mut().stop();
+}
+
+/// D-090 with a video shown (D-086): the video's player makes the sound, so
+/// a seek moves the video's clock — the shell moves its player to the
+/// anchor — and past the video's end it stops at the end: the video ends as
+/// videos do, and the shell says so.
+#[tokio::test]
+async fn a_seek_moves_the_videos_clock_while_a_video_is_shown() {
+    if !has_output_device() {
+        eprintln!("no audio output — skipping the video seek test (this is not a failure)");
+        return;
+    }
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(LocalProvider::new(vec![fixture("")])));
+    let item = QueueItem {
+        id: ProviderTrackId::new(
+            ProviderId::new("local"),
+            fixture("fingerprint_sample.flac").to_string_lossy(),
+        ),
+        track: TrackRef::new("Artist", "Chords"),
+    };
+    let mut player = Player::new(registry);
+    if let Err(err) = player.play_items(vec![item]).await {
+        eprintln!(
+            "could not open the audio device, skipping the test:\n{}",
+            err.chain_text()
+        );
+        return;
+    }
+    player
+        .show_video(
+            headshell_core::video::VideoSource::Youtube {
+                video_id: "CCHdMIEGaaM".to_owned(),
+            },
+            ProviderId::new("tube"),
+            1_000,
+        )
+        .unwrap();
+    player
+        .video_report(1_000, PlayState::Paused, Some(60_000))
+        .unwrap();
+    let before = player.seeks();
+
+    player.seek(30_000).await.unwrap();
+    assert_eq!(player.surface(), headshell_core::playback::Surface::Video);
+    assert_eq!(player.anchor().position_ms, 30_000);
+    assert_eq!(
+        player.seeks(),
+        before + 1,
+        "the jump is counted for the shell"
+    );
+
+    player.seek(90_000).await.unwrap();
+    assert_eq!(
+        player.anchor().position_ms,
+        60_000,
+        "past the video's end is its end"
+    );
+    assert_eq!(
+        player.queue().position(),
+        0,
+        "the video ends the track, not the seek"
+    );
+    player.stop();
+}

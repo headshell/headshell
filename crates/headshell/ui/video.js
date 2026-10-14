@@ -249,6 +249,12 @@ export function createVideoLayer({ layer, frame, file }, handlers) {
       if (state === "playing" || state === "buffering") this.pause();
       else this.play();
     },
+    /// Moves the player to `ms` (D-090): where the core says the track is.
+    seek(ms) {
+      positionMs = Math.max(0, ms);
+      if (kind === "youtube") command("seekTo", [positionMs / 1000, true]);
+      else if (kind === "file") file.currentTime = positionMs / 1000;
+    },
     /// Stops and empties the player: nothing plays where it is not shown.
     clear() {
       clearInterval(listening);

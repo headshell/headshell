@@ -483,3 +483,19 @@ fn the_debug_mode_hides_its_details_with_one_rule() {
         "diagnostics' row must be the debug mode's"
     );
 }
+
+/// The arrow keys step as far on the desktop as in the TUI (D-090): the TUI
+/// uses the core's constant, the page a copy of it.
+#[test]
+fn the_desktop_steps_as_far_as_the_core() {
+    let line = APP_JS
+        .lines()
+        .find(|line| line.starts_with("const SEEK_STEP_MS = "))
+        .expect("app.js has no SEEK_STEP_MS");
+    let step: i64 = line
+        .trim_start_matches("const SEEK_STEP_MS = ")
+        .trim_end_matches(';')
+        .parse()
+        .expect("SEEK_STEP_MS is a plain number");
+    assert_eq!(step, headshell_core::playback::SEEK_STEP_MS);
+}

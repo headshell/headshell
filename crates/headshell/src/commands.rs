@@ -687,6 +687,35 @@ pub async fn jump_to(state: State<'_, AppState>, index: usize) -> CommandResult<
         .await
 }
 
+/// Moves the playing track to `at_ms` (D-090) — the progress bar. Past
+/// the end the track ends and the queue moves on; the tick that follows says
+/// so (`track_changed`).
+#[tauri::command]
+pub async fn seek(state: State<'_, AppState>, at_ms: u64) -> CommandResult<PlaybackAnchor> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().seek(at_ms).await?;
+                Ok(core.live.anchor())
+            })
+        })
+        .await
+}
+
+/// Moves the playing track by `delta_ms` from where it is (D-090) — the
+/// arrow keys; back is negative.
+#[tauri::command]
+pub async fn seek_by(state: State<'_, AppState>, delta_ms: i64) -> CommandResult<PlaybackAnchor> {
+    state
+        .run_on_core(move |core| {
+            Box::pin(async move {
+                core.live.player_mut().seek_by(delta_ms).await?;
+                Ok(core.live.anchor())
+            })
+        })
+        .await
+}
+
 #[tauri::command]
 pub async fn set_shuffle(state: State<'_, AppState>, on: bool) -> CommandResult<QueueView> {
     state
