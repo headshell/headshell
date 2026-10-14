@@ -3344,6 +3344,12 @@ D-059).
 ## D-063 — The MSI version is written separately, but isn't allowed to drift
 **Date:** 2026-09-21 · **Status:** APPLIED (2026-09-21)
 
+> **Note (2026-10-15):** the RPM met the same wall. The release workflow installed `tauri-cli ^2`, which
+> became 2.12.3 by v0.0.5-beta; its bundler takes a newer `rpm` crate that refuses `0.0.5-beta` ("invalid
+> character" — RPM writes a pre-release with `~`), and Tauri has no RPM version of its own to set as
+> `wix.version` is set. The user's choice: **pin `tauri-cli` to 2.12.1**, the one that made 0.0.4-beta's
+> packages, so the names stay as they were. Moving it on first needs the RPM's version decided.
+
 **Question:** While §3.5's second debt was being closed — macOS and Windows
 packaging were run by hand for the first time — Windows failed:
 

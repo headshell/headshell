@@ -74,8 +74,12 @@ jobs:
           targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
 
+      # Pinned (D-063 note, 2026-10-15): 2.12.3's bundler takes a newer `rpm`
+      # crate that refuses `0.0.5-beta` — RPM wants `~` for a pre-release, and
+      # Tauri gives the RPM no version of its own. 2.12.1 made 0.0.4-beta's
+      # packages. Before moving it on, the RPM's version has to be decided.
       - name: Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version "=2.12.1" --locked
 
       # The version lives in one place: `tauri.conf.json` has **no** `version` field;
       # Tauri reads it from `Cargo.toml`. Written in two places, one would drift.
