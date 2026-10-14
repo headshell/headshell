@@ -22,7 +22,7 @@
 // Identifiers and user-facing text are both in English (D-036, D-073).
 
 import { positionAt, clock } from "./anchor.js";
-import { lineAt, readingTop } from "./lyrics.js";
+import { lineAt, lineStart, readingTop } from "./lyrics.js";
 import { contextMenus } from "./menu.js";
 import { diag, numberFormat, t, translatePage, useWords } from "./words.js";
 import {
@@ -1363,6 +1363,8 @@ function coverSummaryText(s) {
 
 const LYRIC_DIM = 0.34;
 const LYRIC_BROWSING = 0.8;
+/// How far a line under the pointer comes up towards lit: it can be clicked.
+const LYRIC_HOVER_LIFT = 0.45;
 const FOLLOW_PAUSE_MS = 4000;
 const SHIFT_STEP_MS = 500;
 
@@ -1381,6 +1383,10 @@ let lightStale = true;
 let followInstant = true;
 let browsing = false;
 let browseTimer = 0;
+/// A line clicked (D-090), until the track reaches it: a jump lands on the
+/// packet just before the line's start, and the line before it must not
+/// light meanwhile — for a stream, that is the whole wait.
+let pinnedLine = null;
 
 const LYRICS_FROM = {
   sidecar: "from a lyrics file next to the song",
@@ -1468,6 +1474,7 @@ function showLyrics(item) {
 function drawLyricLines(lyrics) {
   litLine = null;
   litElement = null;
+  pinnedLine = null;
   followInstant = true;
   place(lyricsList, { y: 0 });
   const synced = Boolean(lyrics?.synced);
@@ -1490,7 +1497,11 @@ function drawLyricLines(lyrics) {
 function lightLyricLine(position) {
   const lyrics = lyricsItem?.lyrics;
   if (!lyricsShown || !lyrics?.synced) return;
-  const index = lineAt(lyrics, position, lyricsItem.offset_ms ?? 0);
+  let index = lineAt(lyrics, position, lyricsItem.offset_ms ?? 0);
+  if (pinnedLine !== null) {
+    if ((index ?? -1) === pinnedLine - 1) index = pinnedLine;
+    else pinnedLine = null;
+  }
   if (index === litLine && !lightStale) return;
   lightStale = false;
   litLine = index;
@@ -1566,6 +1577,46 @@ for (const type of ["wheel", "touchstart", "pointerdown"]) {
 }
 lyricsScroll.addEventListener("keydown", (event) => {
   if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) startBrowsing();
+});
+
+// A synced line is a place in the song (D-090; issue #1): a click plays
+// from where it starts, and following picks up from it at once. The line
+// under the pointer comes up a little to say so — on the same spring as the
+// lit line, since the lines' opacity is the motion layer's.
+
+function syncedLineAt(target) {
+  const line = target?.closest?.(".lyric");
+  return line && lyricsList.contains(line) && lyricsItem?.lyrics?.synced ? line : null;
+}
+
+function lineRest(line) {
+  if (line === litElement) return 1;
+  return browsing ? LYRIC_BROWSING : LYRIC_DIM;
+}
+
+lyricsList.addEventListener("pointerover", (event) => {
+  const line = syncedLineAt(event.target);
+  if (!line || line === litElement) return;
+  const rest = lineRest(line);
+  animate(line, { opacity: rest + (1 - rest) * LYRIC_HOVER_LIFT });
+});
+lyricsList.addEventListener("pointerout", (event) => {
+  const line = syncedLineAt(event.target);
+  if (!line || line.contains(event.relatedTarget)) return;
+  animate(line, { opacity: lineRest(line) });
+});
+lyricsList.addEventListener("click", (event) => {
+  const line = syncedLineAt(event.target);
+  if (!line || !seekable()) return;
+  // A drag that selected words was reading, not choosing.
+  if (globalThis.getSelection?.()?.toString()) return;
+  const index = [...lyricsList.children].indexOf(line);
+  const at = lineStart(lyricsItem.lyrics, index, lyricsItem.offset_ms ?? 0);
+  if (at === null) return;
+  pinnedLine = index;
+  seekTo(at);
+  clearTimeout(browseTimer);
+  stopBrowsing();
 });
 
 /// `1.2 s` — to a tenth.

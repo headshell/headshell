@@ -21,6 +21,9 @@
 pub mod anchor;
 #[cfg(feature = "audio")]
 pub mod engine;
+/// HLS streams: a playlist of fragments played as one (D-091).
+#[cfg(all(feature = "audio", feature = "http-client"))]
+pub(crate) mod hls;
 /// A progressive reader connecting a remote stream to symphonia (§1.3).
 /// Compiled when both the audio pipeline and the HTTP client are on.
 #[cfg(all(feature = "audio", feature = "http-client"))]

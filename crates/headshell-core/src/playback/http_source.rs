@@ -161,6 +161,24 @@ impl HttpMediaSource {
         })
     }
 
+    /// A stream read from `reader` in the background, its length unknown —
+    /// so symphonia reads it front to back: an HLS playlist's files, one
+    /// after another (D-091).
+    ///
+    /// # Errors
+    /// If the download thread cannot start.
+    pub(crate) fn from_reader(reader: Box<dyn Read + Send>, label: &str) -> Result<Self> {
+        let shared = Shared::new(Vec::with_capacity(CHUNK * 16));
+        let writer = Arc::clone(&shared);
+        let label = label.to_owned();
+        spawn_download(move || writer.pump(reader, &label))?;
+        Ok(Self {
+            shared,
+            pos: 0,
+            total: None,
+        })
+    }
+
     /// Starts from a head fetched ahead of time and fetches the rest from
     /// where it ends (D-077). **No request is made here**: the head is
     /// already the start of the stream, and the rest is asked for in the

@@ -31,6 +31,7 @@
 mod support;
 
 use headshell_core::config::Config;
+use headshell_core::diag::Stage;
 use headshell_core::ids::{ProviderId, ProviderTrackId};
 use headshell_core::plugin::PluginProvider;
 use headshell_core::plugin::manifest::PluginManifest;
@@ -247,9 +248,9 @@ async fn a_search_hit_resolves_to_a_playable_http_stream() {
     let hits = provider.search("lofi", 10).await.unwrap();
     assert!(!hits.is_empty(), "the live search came back empty");
 
-    // About 1% of tracks only offer HLS, and in that case the plugin returns an
-    // error on purpose. The test's job is not chasing that 1%; the first one
-    // that resolves is enough.
+    // Some tracks are offered only encrypted, and the plugin refuses them on
+    // purpose (D-026). The test's job is not chasing those; the first one that
+    // resolves is enough.
     let mut resolved = None;
     let mut refusals = Vec::new();
     for hit in hits.iter().take(5) {
@@ -340,7 +341,17 @@ async fn a_soundcloud_track_actually_plays() {
 
     let mut player = headshell_core::playback::Player::new(registry);
     if let Err(err) = player.play_items(vec![item]).await {
-        eprintln!("playback: could not open the audio pipeline ({err}) — skipped");
+        // No sound device here, or no network: the condition isn't met. Any
+        // other failure is SoundCloud reached and the track not playing — the
+        // skip once hid exactly that, when SoundCloud dropped its plain
+        // streams (D-091).
+        let stage = err.stage();
+        assert!(
+            matches!(stage, Stage::PlaybackOutput | Stage::NetworkRequest),
+            "the track did not play:\n{}",
+            err.chain_text()
+        );
+        eprintln!("playback: {stage:?} unavailable ({err}) — skipped");
         return;
     }
 
@@ -360,4 +371,27 @@ async fn a_soundcloud_track_actually_plays() {
         best > 1000,
         "the audio did not advance; the measured state/position sequence: {positions:?}"
     );
+
+    // D-091: the stream is HLS, and moving in it opens the fragment that
+    // holds the second — the position is there and goes on from there.
+    player.seek(30_000).await.unwrap();
+    let landed = player.anchor().position_ms;
+    assert!(
+        (30_000..30_100).contains(&landed),
+        "the seek should land on 30 s, it is at {landed} ms"
+    );
+    let mut after = landed;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        player.tick().await.unwrap();
+        after = player.anchor().position_ms;
+        if after > landed + 1000 {
+            break;
+        }
+    }
+    assert!(
+        after > landed + 1000,
+        "the audio did not go on after the seek: {after} ms"
+    );
+    player.stop();
 }

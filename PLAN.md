@@ -2249,8 +2249,8 @@ plays**.
    lyrics; `soundcloud` 0.4.0 says it has none.
 
 **Not done:** word-by-word (karaoke) timing — LRCLIB's word timing comes as
-YAML, a new parser; seeking to a line with a click — the core can seek since
-§3.25, the click is still to be wired (issue #1); translations; an in-app way to ask LRCLIB again for a track whose
+YAML, a new parser; seeking to a line with a click — done in §3.25 (issue
+#1); translations; an in-app way to ask LRCLIB again for a track whose
 answer is kept (the CLI's cache lives 30 days).
 
 **Testing:** the LRC and `SYLT` readers; the version choice on real LRCLIB
@@ -2654,6 +2654,10 @@ sheet's handle (D-075) — and the core had no seek the user could reach
    carries it, the sound jumps on release, Esc puts it back. Its knob is always
    shown while a track can be moved in. ←/→ and Ctrl+←/→ as in the TUI; a held
    key's steps add up while a jump is on its way.
+4. **A lyric line plays from where it starts** (issue #1, point 1): a click on
+   a synced line moves there and following picks up from it; the line under
+   the pointer comes up a little. A coarse jump lands just before the line, so
+   the clicked line stays lit until the track reaches it.
 
 **Testing:** the containers' end (FLAC, Ogg, MP3) without a device; a real
 file moved, stepped, paused, past its end, and a video's clock moved
@@ -2663,8 +2667,29 @@ TUI's keys; the window's step against the core's (`ui_contract.rs`).
 **Verification:** the §3.9 container: a click at three quarters, a drag
 (the line and the time follow, the sound waits), a drag upwards that doesn't
 pull the sheet, the arrow keys, Ctrl+→, a paused track that stays paused, the
-end of the last track and of one in the middle of the queue. A video's seek
+end of the last track and of one in the middle of the queue; a click on a
+lyric line (0:37 lit, the line under the pointer brighter). A video's seek
 was not seen (no network or plugin in the container).
+
+### 3.26 SoundCloud's HLS streams — DONE (D-091)
+
+**The problem:** SoundCloud stopped giving plain streams: on 2026-10-15, 20 of
+20 searched tracks offered only HLS (AAC in MP4 fragments; some only
+encrypted). The plugin refused HLS, so nothing from SoundCloud played — and
+the live play test hid it as a skip.
+
+**Done:** the core plays an unencrypted HLS media playlist (`playback/hls.rs`):
+the init file and the fragments as one stream, its length from the playlist,
+a seek opening the fragment that holds the second and dropping the packets
+before it. Encrypted, master and byte-range playlists are refused with their
+reason. `soundcloud` 0.7.0 picks the best unencrypted AAC variant and declares
+the streams' host; an encrypted-only track says so. The live play test skips
+only for a missing device or network, and now seeks too.
+
+**Testing:** the playlist parser (SoundCloud's shape, relative addresses, the
+refusals); a generated HLS fixture from a local server — whole, opened at 3 s
+without the first fragment fetched, past the end; live: 7/7 against a local
+catalog mirror, a SoundCloud track played and moved to 30 s.
 
 ---
 

@@ -1882,6 +1882,11 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+/* A synced line is a place in the song: a click plays from it (D-090). */
+.lyrics:not(.unsynced) .lyric {
+  cursor: pointer;
+}
+
 /* A pause in synced lyrics: the music goes on without words. */
 .lyric.gap {
   color: var(--headshell-text-dim);

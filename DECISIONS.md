@@ -6286,3 +6286,55 @@ The test waits one callback after the pause before it measures: a buffer the out
 still counted as it finishes. The device tests of `playback_local.rs` take turns at the device — on this
 machine two streams opened at once on ALSA's hardware device failed with "I/O error (5)", more often once
 D-090 added two more of them; twelve runs in a row passed after.
+
+**Addendum (2026-10-15) — a lyric line is a place in the song.** Issue #1's first point, on the seek
+above. A click on a synced line moves the track to where it starts — its start with the user's shift
+taken off, as the line being sung is found (`lyrics.js` `lineStart`, tested as `lineAt`'s inverse on the
+shared accuracy set) — and following picks up from it at once. The line under the pointer comes up a
+little towards lit, on the same spring as the lit line: the lines' opacity is the motion layer's, and a
+CSS hover would have been dimmed with the line. A coarse jump lands on the packet just before the line,
+and for a stream the wait is long: the clicked line stays lit until the track reaches it, instead of the
+line before it. A drag that selected words is reading, not choosing. Unsynced words don't move anything.
+
+## D-091 — SoundCloud's HLS streams: the core plays an unencrypted playlist
+
+**Date:** 2026-10-15 · **Status:** APPLIED (2026-10-15)
+
+**Question:** Pushing D-090, CI went red on every platform at SoundCloud's live test: none of five
+search hits resolved — "this track offers only HLS". Measured the same day: **20 of 20** searched tracks
+offered no `progressive` stream any more (D-069's measurement had 99% with one); every one had HLS of AAC
+in MP4 fragments (`hls`, `audio/mp4; codecs="mp4a.40.2"`, 160 and 96 kb/s), a few only encrypted
+variants (`cbc-`/`ctr-encrypted-hls`), and the `audio/mpegurl` variant answered 404. Nothing from
+SoundCloud played — and `a_soundcloud_track_actually_plays` had reported it as a skip, its skip catching
+every error. The user chose to fix it before the next release.
+
+**Decision:**
+
+1. **The core reads an HLS media playlist** (`playback/hls.rs`, with the audio pipeline and the HTTP
+   client): an address whose name ends in `.m3u8` is one — the provider's address says so, and no request
+   is spent finding out. The init file and the fragments are fetched one after another, each when the one
+   before is read, into the same background download as any HTTP stream; read front to back they are one
+   fragmented MP4, which symphonia reads. The stream is not seekable to symphonia on purpose: a seekable
+   MP4 is searched from its end, which would fetch every fragment before the first sound.
+2. **Its length is the playlist's** (the fragments' lengths added up); a fragmented MP4 read front to
+   back doesn't know it.
+3. **Moving in it (D-090):** the fragment holding the second is opened behind the init file. symphonia
+   counts time from the first fragment it reads (it doesn't read `tfdt`), so the engine drops the packets
+   that end before the second within the fragment — an AAC frame, 23 ms, is the step — and the position is
+   the second asked for. At or past the end is the end.
+4. **What isn't played says why (K9):** an encrypted playlist (`#EXT-X-KEY` other than `NONE` — nothing
+   encrypted is opened, D-026), a master playlist (the provider names one variant), byte ranges, a
+   fragment without a length. The address's key is never in the message.
+5. **No plugin contract change.** A plugin returns the playlist's address as any `http_stream`; its host
+   must be in its permissions, as any stream's. `soundcloud` **0.7.0** takes a progressive variant if one is
+   left, otherwise the best unencrypted AAC one (`hq`, `sq`, `lq`), sends `track_authorization` when
+   resolving, declares `playback.media-streaming.soundcloud.cloud`, and refuses an encrypted-only track with
+   that reason. An older app given the playlist cannot read it — it couldn't play SoundCloud anyway.
+6. **The live play test** skips only for a missing sound device or network; any other failure is
+   SoundCloud reached and not playing. It moves to 30 s too, so the platforms with a device test the seek.
+
+**Testing:** the parser on SoundCloud's shape, relative addresses and the refusals (the key never shown);
+a generated HLS fixture (`fixtures/audio/hls`, the command in its README) from a local server: whole
+(6037 ms played across the fragments), opened at 3 s (the first fragment never fetched, 3037 ms played,
+980 ms dropped within the second), at and past its end; live, against a local catalog mirror: 7/7, a
+SoundCloud track played and moved to 30 s on this machine's device.

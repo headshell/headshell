@@ -242,6 +242,14 @@ system.
 **Audio is never relayed (K3):** the core fetches the address you return
 itself.
 
+**An HLS playlist plays too (D-091).** An address whose name ends in `.m3u8`
+is read as an HLS media playlist: the core fetches its init file and its
+fragments one after another and plays them as one stream, moving in it by
+fragment. What it reads: an unencrypted media playlist of MP4 fragments (AAC,
+as SoundCloud serves). It refuses, saying so, an encrypted playlist (nothing
+encrypted is opened — D-026), a master playlist (name one variant) and byte
+ranges. The playlist's host must be in your permissions, as any stream's.
+
 ### `artwork(id, size)`
 
 The cover of one of your tracks, for the "now playing" record and the queue

@@ -15,6 +15,7 @@ reproduced.
 | `corrupt.flac` | the decoder reporting its stage | 24 invalid bytes |
 | `cover.jpg` | the cover image path | a 5-byte placeholder |
 | `Dir Artist/` | inference from the directory structure | an empty directory tree |
+| `hls/` | an HLS stream played and moved in (D-091) | the `ffmpeg` command below: 6 s of AAC in four MP4 fragments |
 
 ## `fingerprint_sample.flac`
 
@@ -42,3 +43,17 @@ Since it is synthetic, it **has no match** in the AcoustID database, and it
 shouldn't: the live AcoustID test checks the distinction between "no match
 found" and "the service couldn't be reached" (K9), not recognising a known
 track.
+
+## `hls/`
+
+An HLS media playlist with an init file and four fragments: a 440 Hz tone,
+6 s, mono, AAC at 64 kb/s, cut every 2 s — the shape SoundCloud serves (D-091).
+Made with ffmpeg 7.1 (Debian 13); the fragments' lengths are in the playlist.
+
+```sh
+cd fixtures/audio/hls && ffmpeg -y \
+  -f lavfi -i "sine=frequency=440:duration=6:sample_rate=44100" -ac 1 \
+  -c:a aac -b:a 64k -f hls -hls_time 2 -hls_playlist_type vod \
+  -hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
+  -hls_segment_filename "data%03d.m4s" playlist.m3u8
+```

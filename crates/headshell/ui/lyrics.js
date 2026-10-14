@@ -34,6 +34,17 @@ export function lineAt(lyrics, positionMs, offsetMs) {
   return low === 0 ? null : low - 1;
 }
 
+/// Where the track is when line `index` starts (D-090) — where a click on
+/// the line moves to: its start with the shift taken off, as `lineAt` takes
+/// it, and never before the track's start. `null` for unsynced lyrics and a
+/// line without a start.
+export function lineStart(lyrics, index, offsetMs) {
+  if (!lyrics || !lyrics.synced) return null;
+  const start = lyrics.lines[index]?.start_ms;
+  if (start === undefined || start === null) return null;
+  return Math.max(0, start - offsetMs);
+}
+
 /// Where the list scrolls to put a line at the reading position: a third of
 /// the way down, the way a reader's eye rests — clamped to what the list can
 /// scroll.

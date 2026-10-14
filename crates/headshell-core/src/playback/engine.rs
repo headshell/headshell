@@ -169,6 +169,10 @@ pub(crate) struct PreparedTrack {
     time_base: Option<symphonia::core::units::TimeBase>,
     /// Where decoding starts in the track (D-086); `0` from the start.
     offset_ms: u64,
+    /// Packets ending before this point of the opened stream are not played
+    /// (D-091): an HLS stream opens at the fragment holding a second, and
+    /// the second is reached by dropping what comes before it.
+    skip_ms: u64,
     /// A stream started from a head: through this it asks for a new address
     /// (D-077).
     #[cfg(feature = "http-client")]
@@ -929,6 +933,15 @@ fn open_source(source: &AudioSource, head: Option<&StreamHead>) -> Result<Prepar
             prepare(Box::new(file), hint, &path.display().to_string())
         }
         #[cfg(feature = "http-client")]
+        AudioSource::HttpStream { url, headers } if super::hls::is_playlist(url) => {
+            open_hls(url, headers, 0)?.ok_or_else(|| {
+                audio_err(
+                    Stage::PlaybackDecode,
+                    format!("{} has no length to play", crate::net::without_query(url)),
+                )
+            })
+        }
+        #[cfg(feature = "http-client")]
         AudioSource::HttpStream { url, headers } => {
             let mut hint = Hint::new();
             // The extension is only a **hint**: servers give extension-less
@@ -1031,6 +1044,7 @@ fn prepare(source: Box<dyn MediaSource>, hint: Hint, label: &str) -> Result<Prep
         duration_ms,
         time_base,
         offset_ms: 0,
+        skip_ms: 0,
         #[cfg(feature = "http-client")]
         stream: None,
     })
@@ -1055,10 +1069,48 @@ pub(crate) fn open_source_at(
     head: Option<&StreamHead>,
     start_ms: u64,
 ) -> Result<Option<PreparedTrack>> {
+    #[cfg(feature = "http-client")]
+    if let AudioSource::HttpStream { url, headers } = source
+        && super::hls::is_playlist(url)
+    {
+        return open_hls(url, headers, start_ms);
+    }
     let mut prepared = open_source(source, head)?;
     if start_ms > 0 && !seek_prepared(&mut prepared, start_ms)? {
         return Ok(None);
     }
+    Ok(Some(prepared))
+}
+
+/// Opens an HLS stream at `start_ms` (D-091): the fragment holding it,
+/// behind the init file, with the packets before it dropped. Its length is
+/// the playlist's — a fragmented MP4 read front to back doesn't know it.
+/// `None`: `start_ms` is at or past the end.
+///
+/// # Errors
+/// If the playlist cannot be fetched or is one that isn't played, or the
+/// stream cannot be decoded.
+#[cfg(feature = "http-client")]
+fn open_hls(
+    url: &str,
+    headers: &[crate::net::HttpHeader],
+    start_ms: u64,
+) -> Result<Option<PreparedTrack>> {
+    let playlist = super::hls::fetch(url, headers)?;
+    let Some((first, from_ms)) = playlist.segment_at(start_ms) else {
+        return Ok(None);
+    };
+    let label = crate::net::without_query(url);
+    let stream = super::http_source::HttpMediaSource::from_reader(
+        Box::new(playlist.reader_from(first, headers)),
+        label,
+    )?;
+    let mut hint = Hint::new();
+    hint.with_extension("mp4");
+    let mut prepared = prepare(Box::new(stream), hint, label)?;
+    prepared.duration_ms = Some(playlist.duration_ms());
+    prepared.offset_ms = start_ms;
+    prepared.skip_ms = start_ms - from_ms;
     Ok(Some(prepared))
 }
 
@@ -1123,6 +1175,8 @@ fn decode_track(
         source_rate,
         source_channels,
         duration_ms,
+        time_base,
+        mut skip_ms,
         ..
     } = prepared;
 
@@ -1162,6 +1216,19 @@ fn decode_track(
         };
         if packet.track_id != track_id {
             continue;
+        }
+        if skip_ms > 0 {
+            // Where the packet ends in the opened stream; one that ends
+            // before the point asked for is not played (D-091).
+            let ends_ms = time_base.and_then(|base| {
+                let at = base.calc_time(packet.pts)?.as_millis();
+                let length = base.calc_duration(packet.dur)?.as_millis();
+                Some(at.saturating_add(length))
+            });
+            match ends_ms {
+                Some(ends) if ends <= i128::from(skip_ms) => continue,
+                _ => skip_ms = 0,
+            }
         }
 
         match decoder.decode(&packet) {
@@ -1509,5 +1576,85 @@ mod tests {
                 "{name}: {past} ms is past the last packet"
             );
         }
+    }
+
+    /// D-091 without a network: the fixture HLS stream (`fixtures/audio/hls`,
+    /// AAC in four MP4 fragments, 6.04 s) from a local server. From the
+    /// start it plays whole across the fragments; opened at 3 s it asks for
+    /// nothing before the fragment holding 3 s, and plays the rest — the
+    /// packets before 3 s within that fragment dropped. At its end it is
+    /// past the end.
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn an_hls_stream_plays_across_its_fragments_and_opens_at_a_second() {
+        use crate::test_support::{Answer, LocalServer};
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/audio/hls");
+        let server = LocalServer::start(move |request| {
+            let name = request.path.trim_start_matches("/hls/");
+            match std::fs::read(dir.join(name)) {
+                Ok(body) => Answer::whole(&body),
+                Err(_) => Answer::status(404, "no such file"),
+            }
+        });
+        let source = AudioSource::HttpStream {
+            url: server.url("/hls/playlist.m3u8"),
+            headers: Vec::new(),
+        };
+        // What one opened stream decodes to, in frames at its own rate.
+        let frames_of = |prepared: PreparedTrack| {
+            let rate = prepared.source_rate;
+            let shared = shared_for_test(1 << 20, u64::from(rate), 1);
+            let mut scratch = Vec::new();
+            decode_track(&shared, prepared, rate, 1, 1 << 20, &mut scratch);
+            assert_eq!(shared.error.lock().unwrap().clone(), None);
+            (
+                shared.frames_queued.load(Ordering::Acquire),
+                u64::from(rate),
+            )
+        };
+
+        let whole = open_source(&source, None).unwrap();
+        assert_eq!(whole.duration_ms, Some(6_037), "the playlist's length");
+        assert_eq!(whole.offset_ms, 0);
+        let (frames, rate) = frames_of(whole);
+        let ms = frames * 1000 / rate;
+        assert!(ms.abs_diff(6_037) < 80, "the whole stream played {ms} ms");
+
+        let before = server.seen().len();
+        let at = open_source_at(&source, None, 3_000).unwrap().unwrap();
+        assert_eq!(at.offset_ms, 3_000, "the position is the second asked for");
+        assert_eq!(
+            at.skip_ms,
+            3_000 - 2_020,
+            "dropped within the fragment that holds it"
+        );
+        let (frames, rate) = frames_of(at);
+        let ms = frames * 1000 / rate;
+        assert!(ms.abs_diff(3_037) < 80, "from 3 s it played {ms} ms");
+        let asked: Vec<String> = server.seen()[before..]
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                "/hls/playlist.m3u8",
+                "/hls/init.mp4",
+                "/hls/data001.m4s",
+                "/hls/data002.m4s",
+                "/hls/data003.m4s"
+            ],
+            "nothing before the fragment holding 3 s is fetched"
+        );
+
+        assert!(
+            open_source_at(&source, None, 6_037).unwrap().is_none(),
+            "its end"
+        );
+        assert!(
+            open_source_at(&source, None, 9_000).unwrap().is_none(),
+            "past its end"
+        );
     }
 }

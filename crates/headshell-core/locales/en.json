@@ -39,6 +39,7 @@
     "ui.player.next_title": "next (Ctrl+→)",
     "ui.help.keys.seek": "back or forward 5 seconds",
     "ui.help.keys.songs": "previous or next song",
+    "ui.help.lyrics_click": "Click a line of the lyrics to play from it.",
     "ui.settings.language.group": "language",
     "ui.settings.language.title": "language",
     "ui.settings.language.hint": "The language headshell speaks.",
