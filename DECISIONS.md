@@ -6276,3 +6276,13 @@ middle (1:00 shown, the knob enlarged, the sound waiting) and let go; a drag upw
 didn't pull the sheet; →→→, ←, Ctrl+→; a click on a paused track (stayed paused); a drag past the end of
 the queue's last track (stopped) and of its first (the next one played). A video's seek was not seen: no
 network or plugin in the container.
+
+**Addendum (2026-10-15) — a pause the output took back.** master's CI went red on macOS:
+`pausing_freezes_the_position` saw the position run on, paused. The output's callback reads the state,
+plays a buffer and then writes `Playing`; a pause landing in between was overwritten, and the track played
+on paused. D-090's seek pauses a track right as it opens, in that very window. The callback's own word on
+the state — playing, waiting, ended — now never takes it out of `Paused` (a compare-and-swap, not a store).
+The test waits one callback after the pause before it measures: a buffer the output took just before is
+still counted as it finishes. The device tests of `playback_local.rs` take turns at the device — on this
+machine two streams opened at once on ALSA's hardware device failed with "I/O error (5)", more often once
+D-090 added two more of them; twelve runs in a row passed after.

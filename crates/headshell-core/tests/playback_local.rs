@@ -9,6 +9,10 @@
 
 #![cfg(feature = "audio")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// The device's turn is held across the async tests' awaits on purpose: each
+// `#[tokio::test]` runs on its own thread and runtime, so nothing waits on
+// the holder.
+#![allow(clippy::await_holding_lock)]
 
 mod support;
 
@@ -35,6 +39,17 @@ fn local(path: &std::path::Path) -> AudioSource {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/audio")).join(name)
+}
+
+/// The machine's one sound device: the tests that open it take turns. The
+/// tests of one binary run on parallel threads, and two streams opened at
+/// once on ALSA's hardware device failed with "I/O error (5)" — once a few
+/// runs, more often after D-090 added two more such tests.
+fn device_turn() -> std::sync::MutexGuard<'static, ()> {
+    static DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    DEVICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Is there an audio output? Without one the test is meaningless.
@@ -66,6 +81,7 @@ fn engine_for(name: &str) -> Option<AudioEngine> {
 
 #[test]
 fn a_real_file_plays_and_the_position_advances() {
+    let _turn = device_turn();
     let Some(engine) = engine_for("tagged.flac") else {
         return;
     };
@@ -116,6 +132,7 @@ fn a_real_file_plays_and_the_position_advances() {
 
 #[test]
 fn pausing_freezes_the_position() {
+    let _turn = device_turn();
     let Some(engine) = engine_for("Test Artist - Mp3 Track.mp3") else {
         return;
     };
@@ -131,6 +148,9 @@ fn pausing_freezes_the_position() {
 
     engine.pause();
     assert_eq!(engine.state(), PlayState::Paused);
+    // A buffer the output took just before the pause is still counted as it
+    // finishes; one callback later the position holds (D-090).
+    std::thread::sleep(Duration::from_millis(60));
     let paused_at = engine.position_ms();
 
     std::thread::sleep(Duration::from_millis(300));
@@ -138,6 +158,11 @@ fn pausing_freezes_the_position() {
         engine.position_ms(),
         paused_at,
         "the position must not advance while paused"
+    );
+    assert_eq!(
+        engine.state(),
+        PlayState::Paused,
+        "the output must not take the pause back"
     );
 
     engine.resume();
@@ -156,6 +181,7 @@ fn pausing_freezes_the_position() {
 /// track's samples are appended behind the finished one.
 #[test]
 fn two_tracks_play_back_to_back_without_the_output_ever_stopping() {
+    let _turn = device_turn();
     if !has_output_device() {
         eprintln!("no audio output — skipping the gapless test (this is not a failure)");
         return;
@@ -233,6 +259,7 @@ fn two_tracks_play_back_to_back_without_the_output_ever_stopping() {
 /// address the session kept — the counts say so.
 #[tokio::test]
 async fn next_and_previous_start_from_what_was_read_ahead() {
+    let _turn = device_turn();
     if !has_output_device() {
         eprintln!("no audio output — skipping the read-ahead test (this is not a failure)");
         return;
@@ -355,6 +382,7 @@ fn a_missing_file_names_the_path() {
 /// says so.
 #[tokio::test]
 async fn the_music_goes_on_from_where_its_video_was() {
+    let _turn = device_turn();
     if !has_output_device() {
         eprintln!("no audio output — skipping the video hand-over test (this is not a failure)");
         return;
@@ -413,6 +441,7 @@ async fn the_music_goes_on_from_where_its_video_was() {
 /// itself, and the report says the track changed.
 #[tokio::test]
 async fn the_user_moves_in_the_track_and_past_its_end() {
+    let _turn = device_turn();
     if !has_output_device() {
         eprintln!("no audio output — skipping the seek test (this is not a failure)");
         return;
@@ -503,6 +532,7 @@ async fn the_user_moves_in_the_track_and_past_its_end() {
 /// videos do, and the shell says so.
 #[tokio::test]
 async fn a_seek_moves_the_videos_clock_while_a_video_is_shown() {
+    let _turn = device_turn();
     if !has_output_device() {
         eprintln!("no audio output — skipping the video seek test (this is not a failure)");
         return;

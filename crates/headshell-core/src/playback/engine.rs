@@ -243,6 +243,22 @@ impl Shared {
         self.state.store(state_to_u8(state), Ordering::Release);
     }
 
+    /// The output's own word on the state — playing, waiting, ended — which
+    /// never takes it out of `Paused`. The callback reads the state, plays a
+    /// buffer, then writes; a pause landing in between was overwritten with
+    /// `Playing`, and the track played on paused (seen on macOS CI; D-090's
+    /// seek pauses a track right as it starts, in that very window).
+    fn set_state_unless_paused(&self, state: PlayState) {
+        let paused = state_to_u8(PlayState::Paused);
+        let next = state_to_u8(state);
+        // `Err` is "paused": nothing to write.
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
+                (now != paused).then_some(next)
+            });
+    }
+
     /// Turns a frame count into milliseconds.
     fn frames_to_ms(&self, frames: u64) -> u64 {
         let rate = self.sample_rate.load(Ordering::Acquire);
@@ -774,13 +790,13 @@ impl AudioEngine {
                         .fetch_add(given as u64 / channels, Ordering::AcqRel);
 
                     if given > 0 {
-                        cb_shared.set_state(PlayState::Playing);
+                        cb_shared.set_state_unless_paused(PlayState::Playing);
                     } else if cb_shared.idle.load(Ordering::Acquire) {
                         // The buffer is empty and there is no work to decode: it really ended.
-                        cb_shared.set_state(PlayState::Stopped);
+                        cb_shared.set_state_unless_paused(PlayState::Stopped);
                     } else {
                         // The data ran out but there is a track to decode: we wait.
-                        cb_shared.set_state(PlayState::Buffering);
+                        cb_shared.set_state_unless_paused(PlayState::Buffering);
                     }
                 },
                 move |err| {
