@@ -251,12 +251,19 @@ impl Shared {
     fn set_state_unless_paused(&self, state: PlayState) {
         let paused = state_to_u8(PlayState::Paused);
         let next = state_to_u8(state);
-        // `Err` is "paused": nothing to write.
-        let _ = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
-                (now != paused).then_some(next)
-            });
+        // A loop of its own rather than `fetch_update`, which newer
+        // toolchains deprecate under another name: CI and this machine's
+        // compiler must both take it.
+        let mut now = self.state.load(Ordering::Acquire);
+        while now != paused {
+            match self
+                .state
+                .compare_exchange_weak(now, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(actual) => now = actual,
+            }
+        }
     }
 
     /// Turns a frame count into milliseconds.
