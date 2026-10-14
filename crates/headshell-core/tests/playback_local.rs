@@ -133,7 +133,9 @@ fn a_real_file_plays_and_the_position_advances() {
 #[test]
 fn pausing_freezes_the_position() {
     let _turn = device_turn();
-    let Some(engine) = engine_for("Test Artist - Mp3 Track.mp3") else {
+    // The 15 s track: a CI machine plays in long buffers, and the 2 s one
+    // could run out between the steps below.
+    let Some(engine) = engine_for("fingerprint_sample.flac") else {
         return;
     };
 
@@ -165,11 +167,18 @@ fn pausing_freezes_the_position() {
         "the output must not take the pause back"
     );
 
+    // The output counts a buffer when it takes one, and macOS CI's buffers
+    // are long — 450 ms of position arrived in one step there: the next one
+    // may come a while after the resume. Waited for, not timed.
     engine.resume();
-    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while engine.position_ms() <= paused_at && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         engine.position_ms() > paused_at,
-        "it must advance after resuming"
+        "it must advance after resuming (still at {} ms after 2 s)",
+        engine.position_ms()
     );
 }
 
