@@ -118,6 +118,9 @@ pub(crate) struct Answer {
     /// Sends this many bytes of the body, then waits before the rest: a
     /// stream whose end comes late.
     pause: Option<(usize, std::time::Duration)>,
+    /// Sends this many bytes of the body, then closes the connection — its
+    /// `Content-Length` still the whole: a download the server cuts.
+    cut: Option<usize>,
 }
 
 #[cfg(feature = "http-client")]
@@ -147,6 +150,7 @@ impl Answer {
                 )],
                 body: body[start..=end].to_vec(),
                 pause: None,
+                cut: None,
             },
             None => Self::whole(body),
         }
@@ -160,6 +164,7 @@ impl Answer {
             headers: Vec::new(),
             body: body.to_vec(),
             pause: None,
+            cut: None,
         }
     }
 
@@ -169,6 +174,7 @@ impl Answer {
             headers: Vec::new(),
             body: text.as_bytes().to_vec(),
             pause: None,
+            cut: None,
         }
     }
 
@@ -176,6 +182,13 @@ impl Answer {
     #[cfg(feature = "audio")]
     pub(crate) fn pausing_after(mut self, bytes: usize, pause: std::time::Duration) -> Self {
         self.pause = Some((bytes, pause));
+        self
+    }
+
+    /// Used by the audio stream's tests (D-094).
+    #[cfg(feature = "audio")]
+    pub(crate) fn breaking_off_after(mut self, bytes: usize) -> Self {
+        self.cut = Some(bytes);
         self
     }
 }
@@ -262,6 +275,13 @@ impl LocalServer {
                         head.push_str("\r\n");
                         let mut out = stream;
                         if out.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        if let Some(sent) = answer.cut {
+                            let sent = sent.min(answer.body.len());
+                            let _ = out.write_all(&answer.body[..sent]);
+                            let _ = out.flush();
+                            let _ = out.shutdown(std::net::Shutdown::Both);
                             return;
                         }
                         match answer.pause {

@@ -6366,3 +6366,46 @@ typing.
    reads "search".
 5. A row plays on a click, or on Enter or Space when focused (Tab reaches it); right-click is the song
    menu; covers come as the suggestions' do.
+
+## D-094 — Compressed answers, and a stream that breaks off is picked up again
+
+**Date:** 2026-10-15 · **Status:** APPLIED (2026-10-15)
+
+**Question:** Issue #1, point 4: with YouTube and YouTube Music both enabled, searching failed, "possibly
+a 403". Measured the same day (release build, ytmusic 0.9.0 + youtube 0.2.0, a container whose link was
+shaped both ways with netem; notes outside the repository, `/srv/rust/hs-issue4/RESULTS.md`):
+
+- No rate limit on the search endpoint: 200 searches 20 at a time, all answered.
+- `ureq` was built without `gzip`: InnerTube's search answer came as **673 KB** instead of 13 KB, and a
+  plugin request has 15 s. At 5 Mbit with 1% loss, alone 6/6 searches passed (the slowest 13.7 s), the two
+  plugins together **3/6**; at 2 Mbit with 1% loss 2/10 and **0/10**; on 3G (384 kbit, 2%) none. The two
+  plugins searching at once share the link — "only when both are enabled".
+- googlevideo cut the audio download halfway on a lossy link (`Peer disconnected`): 3 of 3 plays stopped
+  mid-track, and the CLI still said it played.
+- A 403: for ~15 minutes, one IPv4 address got everything past the first MiB of a stream refused, while
+  IPv6 got it all. It could not be brought back on demand (40 downloads in a row, 10 at once).
+
+**Decision:**
+
+1. **The metadata and plugin clients ask for gzip** (`ureq`'s `gzip` feature; `flate2` was already in the
+   tree through `zip`, no crate is added). The stream and download clients do not ask: their ranges,
+   lengths and hashes are counted on the file's own bytes.
+2. **The cap counts what a body unpacks to.** ureq's limit counts the bytes as they come; 32 MB on the
+   wire could unpack to any size. The headers that describe the packed bytes (`Content-Encoding`,
+   `Content-Length`) are not handed on with the unpacked body.
+3. **A stream of known length that breaks off is asked for again from the byte it stopped at**, with the
+   same address; the server must answer as a range of the same file (`open_stream_at`'s check), or it is not
+   joined. A stream started from a head (D-077) still gets one new address when its own no longer answers.
+   A break that moved the stream on by 64 KiB counts from zero again; three in a row without that, and it
+   fails, saying where and why — the break and the refusal both (K9). A stream of unknown length (HLS) fails
+   on a break, as before.
+4. **The IPv4 403 is not addressed:** it could not be reproduced on demand, so there is nothing to test a
+   change against. The issue asks the reporter for the error text and whether their link has IPv6.
+
+**Testing:** gzip asked for and unpacked by the metadata and plugin clients, not asked for by the stream
+and download clients, a body unpacking past the cap refused (`fixtures/net/`); a stream cut twice read
+whole from the right bytes, a stream cut more often than the limit but moving on read whole, one cut at
+the same byte given up after three, one the server won't continue failing with both reasons. Live, the same
+container: searches at 5 Mbit/1% 6/6 alone and together (1.3–6.4 s), 2 Mbit/1% 6/6 and 6/6, 3G over two runs 16/16 and
+15/16 (the slowest 14.1 s); at 5 Mbit/1% 3 of 3 plays whole, and at 2 Mbit/1% googlevideo's cuts at
+~4.8 MB were picked up from the same byte.

@@ -2519,7 +2519,8 @@ machine they were taken on).
     in the web process (Xvfb, software painting — re-measure on a real
     session); the decode thread polls every 5 ms while idle.
 18. Covers online: ~6 s and ~420 KB of MusicBrainz JSON per album; a slow
-    link (30 KB/s + 300 ms) took 21 s for one cover.
+    link (30 KB/s + 300 ms) took 21 s for one cover. Since D-094 the answers
+    are asked for gzip — re-measure.
 19. A read-only data directory refuses even `stats`.
 20. A WAV starts ~1–1.5 s after play (FLAC: 0.05 s) — the codec's packets,
     not the network.
@@ -2530,9 +2531,12 @@ machine they were taken on).
 search 10–40 ms, local suggestions 20–30 ms, a 20,000-file scan 7 s (0.7 s
 unchanged), next/previous with the read-ahead 10–30 ms, the window in 0.5 s.
 
-**Not measured yet:** the YouTube Music plugin and the catalog install under a
-bad network, a session left open for hours (leaks), Windows/macOS, the desktop
-redrawing a very long queue.
+**Measured since:** YouTube Music and YouTube under a bad network (2026-10-15,
+issue #1): searches ran past the plugin budget on a lossy link, uncompressed,
+and googlevideo cut downloads halfway — both fixed in D-094.
+
+**Not measured yet:** the catalog install under a bad network, a session left
+open for hours (leaks), Windows/macOS, the desktop redrawing a very long queue.
 
 ### 3.20 Music videos — DONE (D-086)
 

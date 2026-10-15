@@ -12,6 +12,17 @@
 //! a problem: the command is waiting for the answer anyway. A caller that
 //! wants a non-blocking transport (the GUI's event loop, mobile) supplies its
 //! own `HttpClient`; the trait boundary is what makes this trade reversible.
+//!
+//! ## Compressed answers (D-094)
+//!
+//! The metadata and plugin clients ask for gzip, and ureq unpacks it:
+//! InnerTube's search answer is 673 KB plain and 13 KB compressed, and plain
+//! it ran past the plugin budget on a lossy link. The clients of
+//! `UreqClient::long_body` — audio streams and artifact downloads — do not ask:
+//! their byte offsets, `Content-Length` and hashes are the file's own bytes.
+//!
+//! ureq's body limit counts the bytes **as they come**, before unpacking; the
+//! cap on what they unpack to is `read_capped`'s.
 
 use std::io::Read;
 use std::time::Duration;
@@ -150,6 +161,9 @@ impl UreqClient {
             .timeout_connect(Some(limits.handshake))
             .timeout_send_request(Some(limits.handshake))
             .timeout_recv_body(Some(limits.idle))
+            // The file's own bytes (D-094): a range, a length and a hash are
+            // counted on them.
+            .accept_encoding(ureq::config::AutoHeaderValue::None)
             .http_status_as_error(false)
             .user_agent(concat!("headshell/", env!("CARGO_PKG_VERSION")))
             .build();
@@ -181,13 +195,24 @@ impl UreqClient {
         .map_err(|err| super::network_err(&request.url, err))?;
 
         let status = response.status().as_u16();
-        let headers = collect_headers(response.headers());
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_BODY_BYTES)
-            .read_to_vec()
-            .map_err(|err| super::network_err(&request.url, err))?;
+        let mut headers = collect_headers(response.headers());
+        if unpacked(response.headers()) {
+            // ureq unpacks the body: these two describe the bytes on the wire,
+            // not the ones handed on.
+            headers.retain(|header| {
+                !header.name.eq_ignore_ascii_case("content-encoding")
+                    && !header.name.eq_ignore_ascii_case("content-length")
+            });
+        }
+        let body = read_capped(
+            response
+                .body_mut()
+                .with_config()
+                .limit(MAX_BODY_BYTES)
+                .reader(),
+            MAX_BODY_BYTES,
+        )
+        .map_err(|detail| super::network_err(&request.url, detail))?;
 
         Ok(HttpResponse {
             status,
@@ -383,6 +408,29 @@ impl UreqClient {
         }
         Ok(response)
     }
+}
+
+/// Does ureq unpack this body: it does a gzip one (D-094).
+fn unpacked(headers: &ureq::http::HeaderMap) -> bool {
+    headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("gzip"))
+}
+
+/// Reads a metadata body whole, up to `cap` bytes **unpacked** (D-094): a
+/// gzip answer small on the wire can unpack to any size, and ureq's own limit
+/// counts it before unpacking.
+fn read_capped(reader: impl Read, cap: u64) -> std::result::Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    reader
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|err| err.to_string())?;
+    if body.len() as u64 > cap {
+        return Err(format!("the answer is larger than {cap} bytes"));
+    }
+    Ok(body)
 }
 
 /// The response's `Content-Range`, read.
@@ -673,5 +721,118 @@ mod tests {
             .err()
             .expect("another length is another file");
         assert!(err.chain_text().contains("12000"), "{}", err.chain_text());
+    }
+
+    // — Compressed answers (D-094) ————————————————————————————————————————
+
+    const ANSWER_GZ: &[u8] = include_bytes!("../../../../fixtures/net/answer.json.gz");
+    const ZEROS_GZ: &[u8] = include_bytes!("../../../../fixtures/net/zeros-1mib.gz");
+
+    /// A local server for a single connection that hands over the request's
+    /// header lines, lowercased, with the connection.
+    fn serve_once_seeing(
+        serve: impl FnOnce(Vec<String>, TcpStream) + Send + 'static,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            while request.read_line(&mut line).unwrap_or(0) > 2 {
+                lines.push(line.trim_end().to_ascii_lowercase());
+                line.clear();
+            }
+            let _ = seen.send(lines.clone());
+            serve(lines, stream);
+        });
+        (format!("http://{addr}/youtubei/v1/search"), heard)
+    }
+
+    fn send_gzip(stream: &mut TcpStream, body: &[u8]) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+    }
+
+    /// The metadata client and the plugins' ask for gzip and hand on the text
+    /// unpacked; the two headers that describe the packed bytes are gone.
+    #[test]
+    fn the_metadata_and_plugin_clients_ask_for_gzip_and_hand_on_the_unpacked_body() {
+        for (name, client) in [
+            ("metadata", UreqClient::new()),
+            ("plugins", UreqClient::without_redirects()),
+        ] {
+            let (url, heard) = serve_once_seeing(|_, mut stream| send_gzip(&mut stream, ANSWER_GZ));
+            let response = client
+                .send_blocking(&crate::net::HttpRequest::get(url))
+                .unwrap();
+            let lines = heard.recv().unwrap();
+
+            assert!(
+                lines.iter().any(|line| line == "accept-encoding: gzip"),
+                "{name}: {lines:?}"
+            );
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                response.body, br#"{"contents":"unpacked by the client"}"#,
+                "{name}"
+            );
+            assert_eq!(response.header("content-encoding"), None, "{name}");
+            assert_eq!(response.header("content-length"), None, "{name}");
+            assert_eq!(
+                response.header("content-type"),
+                Some("application/json"),
+                "{name}"
+            );
+        }
+    }
+
+    /// Streams and downloads count ranges, lengths and hashes on the file's
+    /// own bytes: they don't ask for them packed.
+    #[test]
+    fn the_stream_and_download_clients_ask_for_the_files_own_bytes() {
+        let (url, heard) = serve_once_seeing(|_, mut stream| send_headers(&mut stream, 0));
+        UreqClient::for_streams().open_stream(&url, &[]).unwrap();
+        let lines = heard.recv().unwrap();
+        assert!(
+            !lines.iter().any(|line| line.starts_with("accept-encoding")),
+            "{lines:?}"
+        );
+
+        let (url, heard) = serve_once_seeing(|_, mut stream| send_headers(&mut stream, 0));
+        UreqClient::for_downloads().open(&url).unwrap();
+        let lines = heard.recv().unwrap();
+        assert!(
+            !lines.iter().any(|line| line.starts_with("accept-encoding")),
+            "{lines:?}"
+        );
+    }
+
+    /// 33 KB on the wire that unpack to 33 MiB: ureq's own limit counts the
+    /// 33 KB, the client's counts what they unpack to.
+    #[test]
+    fn a_body_that_unpacks_past_the_cap_is_refused() {
+        let copies = usize::try_from(super::MAX_BODY_BYTES / (1024 * 1024)).unwrap() + 1;
+        let (url, _heard) = serve_once_seeing(move |_, mut stream| {
+            send_gzip(&mut stream, &ZEROS_GZ.repeat(copies));
+        });
+        let err = UreqClient::new()
+            .send_blocking(&crate::net::HttpRequest::get(url))
+            .unwrap_err();
+        assert!(
+            err.chain_text().contains("larger than"),
+            "{}",
+            err.chain_text()
+        );
     }
 }

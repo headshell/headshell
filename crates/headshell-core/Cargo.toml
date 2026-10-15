@@ -35,7 +35,10 @@ sha2 = "0.10"
 strsim = "0.11.1"
 symphonia = { version = "0.6", features = ["mp3", "flac", "vorbis", "isomp4", "aac"], optional = true }
 thiserror = "2.0.20"
-ureq = { version = "3.4", default-features = false, features = ["rustls"], optional = true }
+# D-094: `gzip` — InnerTube's search answer is 673 KB plain and 13 KB compressed; plain,
+# searches ran past the 15 s plugin budget on a lossy link. It brings no crate the
+# tree lacks: `flate2` is already here through `zip`.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "gzip"], optional = true }
 tracing = "0.1.44"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 zune-jpeg = { version = "0.5", optional = true }

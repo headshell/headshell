@@ -34,6 +34,18 @@
 //! asked for from where it ends. If the address went stale in between, the
 //! source asks for a new one through its [`StreamHandle`] and waits — the
 //! head keeps playing meanwhile — then carries on from the same byte.
+//!
+//! ## Picking up a stream that broke off (D-094)
+//!
+//! A server may cut a download halfway — googlevideo did, on a lossy link,
+//! every time. A stream whose length is known is asked for again from the
+//! byte it stopped at, with the same address; the server must answer as a
+//! range of the same file, or it is not joined. A break that moved the stream
+//! on counts from zero again, so a long track on a link the server keeps
+//! cutting still gets to its end; `MAX_STALLED_RESUMES` breaks in a row
+//! without moving on, and it fails, saying why. A stream of unknown length
+//! (an HLS playlist's files) has nothing to be picked up from: a break fails
+//! it, as before.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +71,29 @@ const WAIT: Duration = Duration::from_millis(50);
 /// old one no longer answers. A provider resolves one in seconds (yt-dlp:
 /// 4–5 s, measured); past this the address is not coming.
 const ADDRESS_WAIT: Duration = Duration::from_secs(30);
+
+/// How many times in a row a stream may break off without moving on before
+/// it is given up (D-094).
+const MAX_STALLED_RESUMES: u32 = 3;
+
+/// A break after the stream moved on by at least this much since it was last
+/// picked up is not counted against it.
+const RESUME_PROGRESS: u64 = CHUNK as u64;
+
+/// The pause before a broken stream is asked for again, times the breaks in
+/// a row.
+const RESUME_PAUSE: Duration = Duration::from_millis(250);
+
+/// How a body read into the buffer came to an end.
+enum Pumped {
+    /// The server sent all it would.
+    Ended,
+    /// The reader is gone, or the download failed for good — its error is
+    /// set.
+    Stopped,
+    /// The body broke off with this error.
+    BrokeOff(String),
+}
 
 /// An HTTP source that downloads in the background and can be read ahead.
 pub struct HttpMediaSource {
@@ -153,7 +188,14 @@ impl HttpMediaSource {
                 .min(CHUNK * 16),
         ));
         let writer = Arc::clone(&shared);
-        spawn_download(move || writer.pump(reader, &label))?;
+        let url = url.to_owned();
+        let headers = headers.to_vec();
+        spawn_download(move || match total {
+            // No new address can be asked for here: a stream opened this way
+            // has no handle.
+            Some(total) => writer.keep_downloading(Some(reader), url, headers, total, &label, None),
+            None => writer.read_once(reader, &label),
+        })?;
         Ok(Self {
             shared,
             pos: 0,
@@ -171,7 +213,7 @@ impl HttpMediaSource {
         let shared = Shared::new(Vec::with_capacity(CHUNK * 16));
         let writer = Arc::clone(&shared);
         let label = label.to_owned();
-        spawn_download(move || writer.pump(reader, &label))?;
+        spawn_download(move || writer.read_once(reader, &label))?;
         Ok(Self {
             shared,
             pos: 0,
@@ -215,7 +257,7 @@ impl HttpMediaSource {
             let headers = headers.to_vec();
             let total = head.total;
             spawn_download(move || {
-                writer.continue_after_head(url, headers, total, &label, address_wait);
+                writer.keep_downloading(None, url, headers, total, &label, Some(address_wait));
             })?;
         }
         let handle = StreamHandle(Arc::clone(&shared));
@@ -294,54 +336,72 @@ impl Shared {
         self.error.lock().ok().and_then(|mut slot| slot.take())
     }
 
-    /// Reads the body to its end into the buffer.
-    fn pump(&self, mut reader: Box<dyn Read + Send>, label: &str) {
+    /// Reads a body of unknown length to its end: if it breaks off, there is
+    /// nothing to pick it up from.
+    fn read_once(&self, reader: Box<dyn Read + Send>, label: &str) {
+        match self.pump(reader, label) {
+            Pumped::Ended | Pumped::Stopped => self.finish(),
+            Pumped::BrokeOff(reason) => {
+                self.fail(format!("the {label} stream broke off: {reason}"));
+            }
+        }
+    }
+
+    /// Reads the body into the buffer until it ends, breaks off, or nobody
+    /// reads it any more. It does not mark the download done: the caller
+    /// knows whether there is more to fetch.
+    fn pump(&self, mut reader: Box<dyn Read + Send>, label: &str) -> Pumped {
         let mut chunk = vec![0u8; CHUNK];
         loop {
             if self.closed.load(Ordering::Acquire) {
-                break;
+                return Pumped::Stopped;
             }
             match reader.read(&mut chunk) {
-                Ok(0) => break,
+                Ok(0) => return Pumped::Ended,
                 Ok(n) => {
                     let Ok(mut data) = self.data.lock() else {
                         self.fail("could not lock the download buffer".to_owned());
-                        return;
+                        return Pumped::Stopped;
                     };
                     if data.len() + n > MAX_BUFFER_BYTES {
                         drop(data);
                         self.fail(format!(
                             "{label} exceeded the memory cap ({MAX_BUFFER_BYTES} bytes)"
                         ));
-                        return;
+                        return Pumped::Stopped;
                     }
                     data.extend_from_slice(&chunk[..n]);
                     drop(data);
                     self.ready.notify_all();
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => {
-                    self.fail(format!("the {label} stream broke off: {err}"));
-                    return;
-                }
+                Err(err) => return Pumped::BrokeOff(err.to_string()),
             }
         }
-        self.finish();
     }
 
-    /// Fetches the rest after a head. If the address no longer answers, asks
-    /// for a new one **once** and carries on from the same byte with it.
-    fn continue_after_head(
+    /// Downloads a `total`-byte file into the buffer, from where the buffer
+    /// ends to the file's end: `reader` when one is open already, otherwise
+    /// a range asked for from that byte. A body that breaks off is asked for
+    /// again from the byte it stopped at (D-094). With `address_wait` — a
+    /// stream started from a head, whose handle the engine keeps — an
+    /// address that no longer answers is replaced **once**, and the stream
+    /// carries on from the same byte with the new one.
+    fn keep_downloading(
         &self,
+        mut reader: Option<Box<dyn Read + Send>>,
         url: String,
         headers: Vec<HttpHeader>,
         total: u64,
         label: &str,
-        address_wait: Duration,
+        address_wait: Option<Duration>,
     ) {
         let client = UreqClient::for_streams();
         let mut address = (url, headers);
         let mut replaced = false;
+        let mut stalled = 0u32;
+        // Why the stream is being picked up again, while it is.
+        let mut broke: Option<String> = None;
         loop {
             if self.closed.load(Ordering::Acquire) {
                 self.finish();
@@ -351,31 +411,83 @@ impl Shared {
                 self.fail("could not lock the download buffer".to_owned());
                 return;
             };
-            match client.open_stream_at(&address.0, &address.1, offset, total) {
-                Ok(reader) => {
-                    self.pump(reader, label);
+            if offset >= total {
+                self.finish();
+                return;
+            }
+            let current = match reader.take() {
+                Some(current) => current,
+                None => match client.open_stream_at(&address.0, &address.1, offset, total) {
+                    Ok(current) => current,
+                    Err(err) => {
+                        let reason = err.chain_text().replace('\n', " ");
+                        let after_break = broke.as_deref().map(|why| {
+                            format!("the {label} stream broke off at byte {offset} ({why}), and ")
+                        });
+                        let Some(wait) = address_wait.filter(|_| !replaced) else {
+                            self.fail(match (after_break, replaced) {
+                                (Some(before), false) => {
+                                    format!("{before}could not be picked up again: {reason}")
+                                }
+                                (_, true) => format!(
+                                    "the rest of {label} could not be fetched with a new address either: {reason}"
+                                ),
+                                (None, false) => {
+                                    format!("the rest of {label} could not be fetched: {reason}")
+                                }
+                            });
+                            return;
+                        };
+                        tracing::info!(stream = %label, offset, error = %reason, "the stream's address no longer answers; asking for a new one");
+                        let Some(fresh) = self.wait_for_address(wait) else {
+                            self.fail(format!(
+                                "{}the rest of {label} could not be fetched ({reason}), and no new address came within {:.1} s",
+                                after_break.unwrap_or_default(),
+                                wait.as_secs_f64()
+                            ));
+                            return;
+                        };
+                        address = fresh;
+                        replaced = true;
+                        continue;
+                    }
+                },
+            };
+            let reason = match self.pump(current, label) {
+                Pumped::Stopped => {
+                    self.finish();
                     return;
                 }
-                Err(err) => {
-                    let reason = err.chain_text().replace('\n', " ");
-                    if replaced {
-                        self.fail(format!(
-                            "the rest of {label} could not be fetched with a new address either: {reason}"
-                        ));
+                Pumped::BrokeOff(reason) => reason,
+                // A body that ends short of the file broke off too: what it
+                // left out is not silence.
+                Pumped::Ended => match self.len() {
+                    Some(now) if now >= total => {
+                        self.finish();
                         return;
                     }
-                    tracing::info!(stream = %label, offset, error = %reason, "the stream's address no longer answers; asking for a new one");
-                    let Some(fresh) = self.wait_for_address(address_wait) else {
-                        self.fail(format!(
-                            "the rest of {label} could not be fetched ({reason}), and no new address came within {:.1} s",
-                            address_wait.as_secs_f64()
-                        ));
+                    Some(now) => format!("the body ended at byte {now} of {total}"),
+                    None => {
+                        self.fail("could not lock the download buffer".to_owned());
                         return;
-                    };
-                    address = fresh;
-                    replaced = true;
-                }
+                    }
+                },
+            };
+            let now = self.len().unwrap_or(offset);
+            stalled = if now.saturating_sub(offset) >= RESUME_PROGRESS {
+                0
+            } else {
+                stalled + 1
+            };
+            if stalled >= MAX_STALLED_RESUMES {
+                self.fail(format!(
+                    "the {label} stream broke off {MAX_STALLED_RESUMES} times in a row at byte {now} of {total}; the last time: {reason}"
+                ));
+                return;
             }
+            tracing::info!(stream = %label, at = now, total, error = %reason, "the stream broke off; asking for it again from the same byte");
+            std::thread::sleep(RESUME_PAUSE * (stalled + 1));
+            broke = Some(reason);
         }
     }
 
@@ -668,9 +780,164 @@ mod tests {
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let shared = Shared::new(Vec::new());
         shared.closed.store(true, Ordering::Release);
-        shared.pump(Box::new(Endless(std::sync::Arc::clone(&reads))), "x");
+        shared.read_once(Box::new(Endless(std::sync::Arc::clone(&reads))), "x");
 
         assert_eq!(reads.load(Ordering::Relaxed), 0);
         assert!(shared.done.load(Ordering::Acquire));
+    }
+
+    // — A stream that breaks off (D-094) ————————————————————————————————
+
+    /// Bytes that say where they are: a joint at the wrong byte shows.
+    fn numbered(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// googlevideo cut the download halfway on a lossy link, every time: the
+    /// stream is asked for again from the byte it stopped at, and the track
+    /// reads whole.
+    #[test]
+    fn a_stream_that_breaks_off_is_picked_up_from_the_byte_it_stopped_at() {
+        let flac = fixture();
+        let served = flac.clone();
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let server = LocalServer::start(move |req| match asked.fetch_add(1, Ordering::Relaxed) {
+            0 => Answer::whole(&served).breaking_off_after(8_000),
+            1 => Answer::file(&served, req.range.as_deref()).breaking_off_after(8_000),
+            _ => Answer::file(&served, req.range.as_deref()),
+        });
+
+        let mut source = HttpMediaSource::open(&server.url("/videoplayback?sig=1"), &[]).unwrap();
+        let mut read = Vec::new();
+        source.read_to_end(&mut read).unwrap();
+
+        assert_eq!(read, flac);
+        let ranges: Vec<_> = server.seen().into_iter().map(|req| req.range).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                None,
+                Some("bytes=8000-".to_owned()),
+                Some("bytes=16000-".to_owned())
+            ]
+        );
+    }
+
+    /// A long track on a link the server keeps cutting: every break that
+    /// moved the stream on counts from zero again, so more breaks than the
+    /// limit still get it to its end.
+    #[test]
+    fn breaks_that_move_the_stream_on_do_not_add_up() {
+        let file = numbered(400_000);
+        let served = file.clone();
+        let step = usize::try_from(RESUME_PROGRESS).unwrap() + 6_000;
+        let server = LocalServer::start(move |req| {
+            Answer::file(&served, req.range.as_deref()).breaking_off_after(step)
+        });
+
+        let mut source =
+            HttpMediaSource::open(&server.url("/v"), &[HttpHeader::new("Range", "bytes=0-")])
+                .unwrap();
+        let mut read = Vec::new();
+        source.read_to_end(&mut read).unwrap();
+
+        assert_eq!(read, file);
+        assert!(
+            server.seen().len() > MAX_STALLED_RESUMES as usize + 1,
+            "the test must break more often than the limit: {}",
+            server.seen().len()
+        );
+    }
+
+    /// A server that cuts it at the same byte every time: the stream gives up
+    /// after the limit, and says where and why.
+    #[test]
+    fn a_stream_that_keeps_breaking_off_without_moving_on_fails_and_says_so() {
+        let file = numbered(50_000);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let server = LocalServer::start(move |req| {
+            if asked.fetch_add(1, Ordering::Relaxed) == 0 {
+                Answer::whole(&file).breaking_off_after(1_000)
+            } else {
+                Answer::file(&file, req.range.as_deref()).breaking_off_after(0)
+            }
+        });
+
+        let mut source = HttpMediaSource::open(&server.url("/v?sig=secret"), &[]).unwrap();
+        let mut read = Vec::new();
+        let err = source.read_to_end(&mut read).unwrap_err();
+
+        assert_eq!(read.len(), 1_000, "what arrived was read");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("{MAX_STALLED_RESUMES} times in a row"))
+                && text.contains("byte 1000 of 50000"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("secret"),
+            "the key must not reach the error: {text}"
+        );
+        // Every request broke off, the first one too: 1 000 bytes is not
+        // moving on.
+        assert_eq!(server.seen().len(), MAX_STALLED_RESUMES as usize);
+    }
+
+    /// A server that answers the second request with the whole file instead
+    /// of the rest: its bytes are not joined on, and the error names both the
+    /// break and the refusal (K9).
+    #[test]
+    fn a_stream_the_server_will_not_continue_fails_with_both_reasons() {
+        let file = numbered(50_000);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let server = LocalServer::start(move |_| {
+            if asked.fetch_add(1, Ordering::Relaxed) == 0 {
+                Answer::whole(&file).breaking_off_after(1_000)
+            } else {
+                Answer::whole(&file)
+            }
+        });
+
+        let mut source = HttpMediaSource::open(&server.url("/v"), &[]).unwrap();
+        let mut read = Vec::new();
+        let err = source.read_to_end(&mut read).unwrap_err();
+
+        assert_eq!(read.len(), 1_000);
+        let text = err.to_string();
+        assert!(
+            text.contains("broke off at byte 1000")
+                && text.contains("could not be picked up again")
+                && text.contains("from byte 1000"),
+            "{text}"
+        );
+    }
+
+    /// A body of unknown length has nothing to be picked up from: a break
+    /// fails it, as before (an HLS playlist's files).
+    #[test]
+    fn a_stream_of_unknown_length_that_breaks_off_fails() {
+        struct Breaking(bool);
+        impl Read for Breaking {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, true) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "Peer disconnected",
+                    ));
+                }
+                out[..10].fill(3);
+                Ok(10)
+            }
+        }
+        let mut source = HttpMediaSource::from_reader(Box::new(Breaking(false)), "x.m3u8").unwrap();
+        let mut read = Vec::new();
+        let err = source.read_to_end(&mut read).unwrap_err();
+
+        assert_eq!(read, vec![3; 10]);
+        assert!(
+            err.to_string()
+                .contains("the x.m3u8 stream broke off: Peer disconnected"),
+            "{err}"
+        );
     }
 }
