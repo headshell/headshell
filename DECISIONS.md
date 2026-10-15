@@ -6344,3 +6344,25 @@ a generated HLS fixture (`fixtures/audio/hls`, the command in its README) from a
 (6037 ms played across the fragments), opened at 3 s (the first fragment never fetched, 3037 ms played,
 980 ms dropped within the second), at and past its end; live, against a local catalog mirror: 7/7, a
 SoundCloud track played and moved to 30 s on this machine's device.
+
+## D-093 — Enter in the play box lists the matches instead of playing the first
+
+**Date:** 2026-10-15 · **Status:** APPLIED (2026-10-15)
+
+**Question:** Issue #1, point 8: searching played the first match at once; the reporter wanted to see the
+results and pick one. The suggestions under the play box (D-080) were the only list, and only while
+typing.
+
+**Decision:**
+
+1. **Enter opens a results section** (`panel-results`): the songs, the artists and the other matches, each
+   under its heading, a provider asked as a fallback named beside them. A lit suggestion still plays on
+   Enter; Shift+Enter and "play all" still queue every match.
+2. **The list is the suggestions' answer** (`suggest`, the CLI's `headshell suggest`), asked once without
+   the typing pauses — no new core command (K1). Not found and could not ask stay apart (K9).
+3. **The section is not in the sidebar** and has no Ctrl+number: it is where a search lands, not a place
+   to go. The sidebar's pill hides while it is in front.
+4. **Playing the first match** moves to the play box's menu ("play the first match"); the submit button
+   reads "search".
+5. A row plays on a click, or on Enter or Space when focused (Tab reaches it); right-click is the song
+   menu; covers come as the suggestions' do.

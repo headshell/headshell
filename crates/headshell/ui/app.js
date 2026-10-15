@@ -508,7 +508,11 @@ function markNav(instant) {
 function movePill(instant) {
   const pill = $("navPill");
   const active = document.querySelector(`.nav[data-panel="${currentPanel}"]`);
-  if (!active) return;
+  // A section the sidebar doesn't list (the search results) has no tab to mark.
+  if (!active) {
+    pill.hidden = true;
+    return;
+  }
   const y = active.offsetTop;
   if (instant || pill.hidden) {
     place(pill, { y });
@@ -2139,10 +2143,12 @@ async function queueAdded(view, what) {
   toast(`Added ${what} to your queue.`, true);
 }
 
+// Enter shows what the search finds as a list to choose from (issue #1,
+// point 8); a lit suggestion plays on Enter before this is reached.
 $("playForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const query = playQuery();
-  if (query) startPlay(query, false);
+  if (query) showResults(query);
 });
 
 // Shift+Enter: queue every matching track. The **core** builds the queue;
@@ -2272,29 +2278,34 @@ function drawSuggest(report, asked) {
 // shows the ones already seen at once.
 const suggestThumbs = new Map();
 
-async function coverSuggestions(asked) {
-  const tracks = suggestRows.filter((row) => row.item);
+/// The rows with a cover slot on screen: the panel's and the results list's.
+function shownRows() {
+  return [...suggestRows, ...resultsRows];
+}
+
+async function coverSuggestions(asked, rows = suggestRows, current = () => asked === suggestAsked) {
+  const tracks = rows.filter((row) => row.item);
   if (tracks.length === 0) return;
   const report = await call("artwork_shown", { items: tracks.map((row) => row.item) });
-  if (!report || asked !== suggestAsked) return;
+  if (!report || !current()) return;
   report.items.forEach((entry, index) => {
     tracks[index].key = entry.key;
   });
-  const onScreen = new Set(tracks.map((row) => row.key));
+  const onScreen = new Set(shownRows().map((row) => row.key));
   for (const key of suggestThumbs.keys()) if (!onScreen.has(key)) suggestThumbs.delete(key);
   await paintSuggestCovers(report.items.filter((entry) => entry.status === "found").map((entry) => entry.key));
 }
 
 async function paintSuggestCovers(keys) {
   const wanted = [...new Set(keys)].filter(
-    (key) => !suggestThumbs.has(key) && suggestRows.some((row) => row.key === key),
+    (key) => !suggestThumbs.has(key) && shownRows().some((row) => row.key === key),
   );
   if (wanted.length > 0) {
     for (const picture of (await call("artwork_images", { keys: wanted, variant: "thumb" })) ?? []) {
       suggestThumbs.set(picture.key, picture.uri);
     }
   }
-  for (const row of suggestRows) {
+  for (const row of shownRows()) {
     const uri = row.key ? suggestThumbs.get(row.key) : undefined;
     const slot = row.el.querySelector(".suggest-art");
     if (!uri || slot.querySelector("img")) continue;
@@ -2307,14 +2318,14 @@ async function paintSuggestCovers(keys) {
   }
 }
 
-function suggestTrack(item) {
+function suggestTrack(item, rows = suggestRows, prefix = "suggest-row") {
   const track = item.track;
   const row = h(
     "div",
     {
       class: "suggest-row",
       role: "option",
-      id: `suggest-row-${suggestRows.length}`,
+      id: `${prefix}-${rows.length}`,
       "aria-selected": "false",
       menu: () => songMenu(track, { item }),
     },
@@ -2327,17 +2338,17 @@ function suggestTrack(item) {
     ),
     h("span", { class: "suggest-time", text: track.duration_ms ? clock(track.duration_ms) : "" }),
   );
-  suggestRows.push({ el: row, item, key: null, pick: () => playItems([item]) });
+  rows.push({ el: row, item, key: null, pick: () => playItems([item]) });
   return row;
 }
 
-function suggestArtist(artist) {
+function suggestArtist(artist, rows = suggestRows, prefix = "suggest-row") {
   const row = h(
     "div",
     {
       class: "suggest-row artist",
       role: "option",
-      id: `suggest-row-${suggestRows.length}`,
+      id: `${prefix}-${rows.length}`,
       "aria-selected": "false",
       menu: () => artistMenu(artist),
     },
@@ -2350,7 +2361,7 @@ function suggestArtist(artist) {
       h("span", { class: "suggest-sub", text: "artist · play all their songs" }),
     ),
   );
-  suggestRows.push({ el: row, pick: () => startPlay(artist, true) });
+  rows.push({ el: row, pick: () => startPlay(artist, true) });
   return row;
 }
 
@@ -2462,6 +2473,101 @@ suggestPanel.addEventListener("pointermove", (event) => {
 suggestPanel.addEventListener("click", (event) => {
   const index = suggestRowAt(event.target);
   if (index !== -1) suggestRows[index].pick();
+});
+
+// ————————————————————————————————————— results (issue #1, point 8)
+//
+// Enter in the play box shows what the search finds as a list instead of
+// playing the first match. It is the suggestions' own answer (`suggest`, the
+// CLI's `headshell suggest`), asked without the typing pauses and drawn whole:
+// the songs, the artists, the rest, each under its heading, in a section the
+// sidebar doesn't list. A row plays on a click or Enter, has the song menu on
+// a right-click, and the header's "play all" queues every match as before.
+
+let resultsAsked = 0;
+let resultsRows = [];
+let resultsQuery = "";
+
+async function showResults(query) {
+  closeSuggest();
+  // An answer for the typed text arriving late must not bring the panel back.
+  suggestAsked += 1;
+  const asked = ++resultsAsked;
+  resultsQuery = query;
+  resultsRows = [];
+  $("resultsLede").textContent = t("ui.results.lede", { query });
+  $("resultsBody").replaceChildren(
+    h("p", { class: "empty", text: t("ui.results.searching", { provider: providerName(playFrom?.provider) }) }),
+  );
+  showBase("results", { instant: nowOpen });
+  setNowOpen(false);
+  content.scrollTop = 0;
+  const report = await call("suggest", { query });
+  if (asked !== resultsAsked) return;
+  if (!report) {
+    $("resultsBody").replaceChildren(h("p", { class: "empty", text: t("ui.results.failed") }));
+    return;
+  }
+  playFrom = report.play_from;
+  drawResults(report, asked);
+}
+
+function drawResults(report, asked) {
+  const rows = [];
+  const nodes = [];
+  if (report.sections[0]?.fallback) {
+    nodes.push(h("p", { class: "hint", text: t("ui.results.nothing_in", { provider: providerName(report.play_from.provider) }) }));
+  }
+  const group = (heading, entries) => {
+    if (entries.length === 0) return;
+    nodes.push(h("h2", { class: "results-heading", text: heading }));
+    nodes.push(h("div", { class: "results-list", role: "listbox", "aria-label": heading }, ...entries));
+  };
+  for (const section of report.sections) {
+    const named = (label) => (section.fallback ? `${label} · ${t("ui.results.from", { provider: section.display_name })}` : label);
+    group(named(t("ui.results.songs")), section.tracks.map((item) => resultRow(suggestTrack(item, rows, "result-row"), rows)));
+    group(
+      named(t("ui.results.artists")),
+      section.artists.map((entry) => resultRow(suggestArtist(entry.artist, rows, "result-row"), rows)),
+    );
+    group(named(t("ui.results.more")), section.more.map((item) => resultRow(suggestTrack(item, rows, "result-row"), rows)));
+  }
+  if (report.sections.length === 0) {
+    nodes.push(h("p", { class: "empty", text: t("ui.results.nothing", { query: report.query.trim() }) }));
+  }
+  // "Not found" and "could not ask" are different answers (K9).
+  for (const failure of report.failures) {
+    nodes.push(
+      h("p", {
+        class: "suggest-failure",
+        text: t("ui.results.could_not_ask", {
+          name: failure.display_name,
+          reason: debugMode ? `STEP: ${failure.stage} — ${firstLine(failure.chain)}` : stageText(failure.stage).toLowerCase(),
+        }),
+        title: failure.chain,
+      }),
+    );
+  }
+  resultsRows = rows;
+  $("resultsBody").replaceChildren(...nodes);
+  coverSuggestions(asked, rows, () => asked === resultsAsked);
+}
+
+/// A row of the list can be reached with the keyboard: Tab to it, Enter plays.
+function resultRow(row, rows) {
+  const entry = rows[rows.length - 1];
+  row.setAttribute("tabindex", "0");
+  row.addEventListener("click", () => entry.pick());
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    entry.pick();
+  });
+  return row;
+}
+
+$("btnResultsPlayAll").addEventListener("click", () => {
+  if (resultsQuery) startPlay(resultsQuery, true);
 });
 
 // ————————————————————————————————————— keyboard
@@ -4902,7 +5008,8 @@ function isTextField(el) {
 /// something typed.
 const FIELD_ACTIONS = {
   playQuery: () => [
-    { label: "play the first match", key: "Enter", run: () => $("playForm").requestSubmit() },
+    { label: "show the matches", key: "Enter", run: () => $("playForm").requestSubmit() },
+    { label: "play the first match", run: () => startPlay(playQuery(), false) },
     { label: "queue every match", key: "Shift+Enter", run: () => startPlay(playQuery(), true) },
   ],
   searchQuery: () => [{ label: "search", key: "Enter", run: () => $("searchForm").requestSubmit() }],

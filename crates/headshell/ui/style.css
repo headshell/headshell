@@ -3068,6 +3068,48 @@ kbd {
   border-bottom: 0;
 }
 
+/* ————————————————— the search results (issue #1, point 8)
+ *
+ * The suggestions' rows, laid out as a page: the same row, in a list that
+ * scrolls with the section instead of floating under the field. */
+
+.results-heading {
+  margin: 28px 0 8px;
+  color: var(--headshell-text-dim);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.results-heading:first-child {
+  margin-top: 0;
+}
+
+.results-list {
+  display: grid;
+  gap: 2px;
+}
+
+.results-list .suggest-row {
+  cursor: pointer;
+}
+
+.results-list .suggest-row:hover,
+.results-list .suggest-row:focus-visible {
+  background: var(--headshell-accent);
+  color: var(--headshell-bg);
+  outline: none;
+}
+
+.results-list .suggest-row:hover .suggest-sub,
+.results-list .suggest-row:hover .suggest-time,
+.results-list .suggest-row:focus-visible .suggest-sub,
+.results-list .suggest-row:focus-visible .suggest-time {
+  color: inherit;
+  opacity: 0.8;
+}
+
 /* ————————————————— suggestions under the play box (D-080)
  *
  * The context menu's surface — raised, flat, a shadow that says it floats —

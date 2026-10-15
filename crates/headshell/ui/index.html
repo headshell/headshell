@@ -226,7 +226,7 @@
               spellcheck="false"
             />
           </label>
-          <button type="submit" class="primary">play</button>
+          <button type="submit" class="primary" data-i18n="ui.play.search">search</button>
           <button id="btnPlayAll" type="button" title="play every match (Shift+Enter)">play all</button>
           <!-- What the play box offers while it is typed in (D-080): the
                chosen provider's tracks whose title begins with the text, then
@@ -246,6 +246,20 @@
              Songs picked from the listener's own history, one source at a
              time. Worked out on this machine: a source is asked only for
              songs like one of its own tracks. -->
+        <!-- What a search finds, as a list (issue #1, point 8): Enter in the
+             play box opens it. A section the sidebar doesn't list; `app.js`
+             draws it from the suggestions' answer. -->
+        <section id="panel-results" class="panel" aria-labelledby="titleResults" hidden>
+          <header class="panel-head">
+            <h1 id="titleResults" class="panel-title" data-i18n="ui.results.title">results</h1>
+            <p id="resultsLede" class="panel-lede"></p>
+            <div class="panel-actions">
+              <button id="btnResultsPlayAll" type="button" data-i18n="ui.results.play_all">play every match</button>
+            </div>
+          </header>
+          <div id="resultsBody" class="results" aria-live="polite"></div>
+        </section>
+
         <section id="panel-foryou" class="panel" aria-labelledby="titleForYou" hidden>
           <header class="panel-head">
             <h1 id="titleForYou" class="panel-title">for you</h1>
@@ -1237,7 +1251,7 @@
           <li><span><kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd></span> <span data-i18n="ui.help.keys.songs">previous or next song</span></li>
           <li><span><kbd>/</kbd></span> jump to the search box</li>
           <li><span><kbd>L</kbd></span> show the lyrics — press again for up next</li>
-          <li><span><kbd>Enter</kbd></span> play the first match</li>
+          <li><span><kbd>Enter</kbd></span> <span data-i18n="ui.help.keys.enter">list every match — pick one to play it</span></li>
           <li><span><kbd>↓</kbd> <kbd>↑</kbd></span> move through the suggestions (Enter plays one)</li>
           <li><span><kbd>Shift</kbd>+<kbd>Enter</kbd></span> play every match</li>
           <li><span><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>0</kbd></span> jump to a section</li>
