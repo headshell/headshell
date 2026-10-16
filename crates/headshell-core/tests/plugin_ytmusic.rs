@@ -382,6 +382,7 @@ async fn a_youtube_or_youtube_music_link_opens_its_song() {
         return;
     }
     let config = temp_config("link");
+    let cookies_given = store_cookies(&config);
     let Some(provider) = install(&config, "link").await else {
         return;
     };
@@ -402,10 +403,19 @@ async fn a_youtube_or_youtube_music_link_opens_its_song() {
         "a video's byline names its views where a song's names its album"
     );
     // Not a song on YouTube Music, and it still plays: the stream comes as
-    // any video id's does.
+    // any video id's does. CI's data-centre addresses meet YouTube's bot
+    // wall: without cookies only that part is skipped, and only on the wall's
+    // own words — any other refusal fails (D-061).
     match provider.resolve_source(&at[0].id).await {
         Ok(Some(AudioSource::HttpStream { url, .. })) => {
             assert!(url.contains("googlevideo.com"), "{url}");
+        }
+        Err(err) if !cookies_given && err.chain_text().contains("not a bot") => {
+            eprintln!(
+                "the linked video's stream: YouTube bot wall and no cookies given — \
+                 skipped (this is not a failure).\n  {}",
+                err.chain_text().replace('\n', " ")
+            );
         }
         other => panic!("the linked video gave no stream: {other:?}"),
     }
