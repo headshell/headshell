@@ -104,9 +104,13 @@ fn a_real_file_plays_and_the_position_advances() {
         engine.state()
     );
 
-    // Wait until the track ends; a 1 s file must end within 4 s.
+    // Wait until the track ends; a 1 s file must end within 4 s. `Stopped`
+    // comes a buffer after the buffer drains — the callback that drains it
+    // still says `Playing` — so both are waited for (`remote_http.rs`, the
+    // same race on macOS CI's ~450 ms buffers).
     let deadline = Instant::now() + Duration::from_secs(4);
-    while !engine.finished() && Instant::now() < deadline {
+    while !(engine.finished() && engine.state() == PlayState::Stopped) && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(

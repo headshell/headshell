@@ -726,8 +726,15 @@ fn an_http_stream_really_decodes_and_plays() {
         engine.state()
     );
 
+    // The buffer drains in the callback that plays its last samples, and that
+    // callback still says `Playing`; `Stopped` comes with the next one, a
+    // buffer later. macOS CI plays ~450 ms buffers (D-090 addendum): reading
+    // the state the moment `finished()` turns true failed there once
+    // (2026-10-16). Both are waited for, and both must come.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !engine.finished() && std::time::Instant::now() < deadline {
+    while !(engine.finished() && engine.state() == PlayState::Stopped)
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
