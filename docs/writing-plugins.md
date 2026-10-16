@@ -1,4 +1,4 @@
-# Writing plugins (contract api 6)
+# Writing plugins (contract api 7)
 
 `headshell` plugins are written in **JavaScript** and run in the **QuickJS**
 engine embedded in `headshell` (D-069). No Python, Node or other runtime is
@@ -26,10 +26,18 @@ Three working examples:
   — **a video service**: it finds music videos and hands over YouTube ids;
   the app plays them in YouTube's own player. No stream, no tool.
 - [`fixtures/plugins/echo/main.js`](../fixtures/plugins/echo/main.js) — a test
-  plugin with a fixed catalog, a cover, lyrics, a video and similar songs
-  (~120 lines). For
+  plugin with a fixed catalog, a cover, lyrics, a video, similar songs and
+  links (~130 lines). For
   seeing the contract bare.
 
+> **If you're coming from api 6:** api 7 (D-095) adds links: a link pasted in
+> the play box plays through the plugin that takes links like it. The
+> manifest **must** name the links it takes — `"links": [...]`, templates
+> with `{id}` where the song's part stands, or `"links": []`; an api 6
+> manifest doesn't, so it no longer loads. With `[]`, raising `"api"` to `7`
+> and adding that one line is the whole port. With templates, export
+> `link(id, template)` (§3).
+>
 > **If you're coming from api 5:** api 6 (D-087) adds similar songs, for the
 > app's *for you* page. The manifest **must** say whether the plugin names
 > them — `"related": true` or `"related": false`; an api 5 manifest doesn't,
@@ -98,12 +106,13 @@ same as the directory name; if they don't match, the plugin is rejected.
 {
   "name": "soundcloud",
   "display_name": "SoundCloud",
-  "version": "0.5.0",
-  "api": 6,
+  "version": "0.8.0",
+  "api": 7,
   "artwork": true,
   "lyrics": false,
   "video": false,
   "related": true,
+  "links": ["https://soundcloud.com/{id}"],
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {
@@ -119,11 +128,12 @@ same as the directory name; if they don't match, the plugin is rejected.
 | `name` | yes | The same as the directory name. The provider ID. |
 | `display_name` | yes | The name shown to the user. |
 | `version` | yes in the catalog | The plugin's own version. Every plugin in the catalog is versioned: that is what catches an update, and the file addresses are pinned to it (§9). |
-| `api` | yes | The contract version it speaks: `6` today. |
+| `api` | yes | The contract version it speaks: `7` today. |
 | `artwork` | yes | Does the plugin give covers: `true` — it exports `artwork(id, size)` (§3) — or `false`. There is no default: a missing field is rejected, so "it gives none" is always a statement, never a guess. |
 | `lyrics` | yes | Does the plugin give lyrics: `true` — it exports `lyrics(id)` (§3) — or `false`. No default either, for the same reason. |
 | `video` | yes | Does the plugin give videos: `true` — it exports `resolve_video(id)` (§3) — or `false`. No default, for the same reason. A plugin with `video` and without `stream` is a video service: its tracks are videos only. |
 | `related` | yes | Does the plugin name songs like one of its items: `true` — it exports `related(id, limit)` (§3) — or `false`. No default, for the same reason. |
+| `links` | yes | The links the plugin plays, as templates: a link written out whole, `{id}` where the song's part stands — `["https://youtu.be/{id}"]` — and it exports `link(id, template)` (§3); or `[]`. No default, for the same reason. How a link is read against a template: §3, `link`. |
 | `main` | yes | The script's path relative to the plugin directory. It must be `.js` and can't leave the directory (`..` and absolute paths are rejected). |
 | `capabilities` | no | `search`, `stream`. The engine checks that the function of every declared capability is exported. |
 | `permissions.net` | no | The hosts to connect to. See §2. |
@@ -196,6 +206,7 @@ export function resolve_source(id) {
 | `lyrics(id)` | if the manifest says `"lyrics": true` | lyrics, or `null` |
 | `resolve_video(id)` | if the manifest says `"video": true` | a video, or `null` |
 | `related(id, limit)` | if the manifest says `"related": true` | an array of tracks |
+| `link(id, template)` | if the manifest's `links` names a template | an array of tracks |
 
 The names are deliberately the same as api 1's method names and the core's
 `Provider` trait (`resolve_source`, not `resolveSource`). You can write an
@@ -349,6 +360,56 @@ you list it, is left out, and the answer is cut to `limit`. `[]` means "none
 like it" — an answer, not an error. Give `genres` with your tracks when the
 service names them: the app learns them, and its *more <genre>* sections and
 scoring get better for it.
+
+### `link(id, template)`
+
+The song at a link (D-095). Someone pasted a link in the play box (or ran
+`headshell play <link>`); it fitted one of the templates your manifest's
+`links` names, and the core hands you what stood in `{id}` with the template
+it fitted, as you wrote it:
+
+```json
+"links": [
+  "https://music.youtube.com/watch?v={id}",
+  "https://www.youtube.com/watch?v={id}",
+  "https://youtu.be/{id}"
+]
+```
+
+```js
+export function link(id, template) {
+  const song = lookUp(id);        // your service's own "what is this"
+  return song ? [toTrack(song)] : [];
+}
+```
+
+Return tracks, the same shape as `search`'s — the one at the link, with the
+same bare `id` your `resolve_source` takes, since that is how it plays. `[]`
+means "nothing there", an answer; a link to something you can't play (a
+profile, a page of the site) is an error you throw, saying what it is. **Only
+a song's link is played for now:** if you return more than one track, the
+core refuses the link as a list. Playlists come later, through the same
+function.
+
+How a link fits a template — the core does this, not you:
+
+- **`{id}`** appears exactly once: in the path (`/track/{id}`), where it takes
+  everything between the text around it, `/` included
+  (`https://soundcloud.com/{id}` gives `artist/track`); or as a whole query
+  value (`watch?v={id}`).
+- **The host** is compared without case, and a leading `www.` or `m.` doesn't
+  count: `youtube.com`, `www.youtube.com` and `m.youtube.com` are one site,
+  `music.youtube.com` another. Write a template per site.
+- **The scheme, a port, a fragment** (`#t=42`) and a slash at the end don't
+  matter. **Query pairs** the template doesn't name (`&t=42s`, `&si=…`) are
+  left aside; the ones it names must be there, in any order.
+- When two of your templates fit, the one naming more of the link wins.
+- When two plugins take the same link, the one the user plays music from is
+  asked first, then the others in order.
+
+The core never fetches the link itself, and a template is not a permission:
+what you look up goes through `host.http`, inside your `permissions.net` (§2),
+as any of your calls.
 
 ### Raising an error
 
@@ -519,7 +580,8 @@ kind: where the plugin runs changed. So was api 2 → 3 (D-076): the manifest
 gained a **required** field (`artwork`), and an api 2 manifest doesn't have
 it — an optional field would have left "gives no covers" and "was written
 before covers" looking the same. api 3 → 4 (D-078) did the same for `lyrics`,
-api 4 → 5 (D-086) for `video`, and api 5 → 6 (D-087) for `related`.
+api 4 → 5 (D-086) for `video`, api 5 → 6 (D-087) for `related`, and api 6
+→ 7 (D-095) for `links`.
 
 ---
 

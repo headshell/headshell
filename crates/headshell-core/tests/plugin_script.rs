@@ -157,6 +157,36 @@ async fn a_script_plugin_answers_health_search_and_resolve() {
     assert_eq!(similar.len(), 1);
     assert_eq!(similar[0].id, id);
     assert_eq!(similar[0].genres, vec!["Hip-Hop", "Turkish Rap"]);
+
+    // api 7 (D-095): the manifest's `links` names templates; what stood in
+    // `{id}` and the template go in, the song at the link comes out.
+    assert!(provider.info().capabilities.contains(Capabilities::LINKS));
+    let templates: Vec<String> = provider
+        .link_templates()
+        .into_iter()
+        .map(|template| template.template)
+        .collect();
+    assert_eq!(
+        templates,
+        [
+            "https://echo.example.invalid/track/{id}",
+            "https://echo.example.invalid/list?l={id}"
+        ]
+    );
+    let at = provider
+        .open_link("track-1", "https://echo.example.invalid/track/{id}")
+        .await
+        .unwrap();
+    assert_eq!(at.len(), 1);
+    assert_eq!(at[0].id, id);
+    assert!(
+        provider
+            .open_link("nowhere", "https://echo.example.invalid/track/{id}")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing at the link is an answer"
+    );
 }
 
 /// api 1's Python plugin is refused **without crashing** and the user is told
@@ -275,7 +305,8 @@ async fn a_hanging_plugin_times_out_instead_of_freezing_the_core() {
          export function artwork() { return null; }\n\
          export function lyrics() { return null; }\n\
          export function resolve_video() { return null; }\n\
-         export function related() { return []; }\n",
+         export function related() { return []; }\n\
+         export function link() { return []; }\n",
     )
     .unwrap();
 

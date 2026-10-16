@@ -201,6 +201,55 @@ async fn a_track_names_tracks_like_it() {
     assert!(similar.iter().all(|track| track.id != hits[0].id));
 }
 
+/// api 7 (D-095): a soundcloud.com link opens the track at it; a set's link
+/// is refused saying so, and an address with nothing at it is "nothing there".
+#[tokio::test]
+async fn a_soundcloud_link_opens_its_track() {
+    if !prerequisites_met("link") {
+        return;
+    }
+    let config = temp_config("link");
+    let Some(provider) = install(&config, "link").await else {
+        return;
+    };
+    assert!(provider.info().capabilities.contains(Capabilities::LINKS));
+    let templates = provider.link_templates();
+
+    let link =
+        headshell_core::link::Link::parse("https://soundcloud.com/forss/flickermood?utm_source=x")
+            .unwrap();
+    let fit = headshell_core::link::fit_any(&templates, &link).expect("a track's link fits");
+    assert_eq!(fit.id, "forss/flickermood");
+    let at = match provider.open_link(&fit.id, &fit.template).await {
+        Ok(at) => at,
+        Err(err) => panic!("the link did not open:\n{}", err.chain_text()),
+    };
+    assert_eq!(at.len(), 1, "{at:?}");
+    assert!(
+        at[0].track.title.to_lowercase().contains("flickermood"),
+        "{at:?}"
+    );
+
+    let err = provider
+        .open_link("forss/sets/soulhack", "https://soundcloud.com/{id}")
+        .await
+        .unwrap_err();
+    assert!(
+        err.chain_text().contains("set's link"),
+        "{}",
+        err.chain_text()
+    );
+
+    let none = provider
+        .open_link(
+            "forss/no-such-track-headshell-test",
+            "https://soundcloud.com/{id}",
+        )
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "{none:?}");
+}
+
 /// The health answer must say which source the client_id came from.
 ///
 /// D-043 allows three sources (secret → cache → discovery); if which one was

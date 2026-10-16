@@ -166,6 +166,7 @@ const STAGE_TEXT = {
   VIDEO_LOOKUP: "The video couldn't be found",
   VIDEO_PLAYBACK: "The video couldn't be played",
   RECOMMEND: "Your picks couldn't be worked out",
+  LINK_OPEN: "That link couldn't be opened",
   LOCALE_LOAD: "The language couldn't be set up",
 };
 
@@ -188,6 +189,7 @@ const STAGE_HINT = {
   PLAYBACK_RESOLVE: "Try another search, or check for new music under sources.",
   PLAYBACK_DECODE: "The file may be damaged — try another song.",
   PLAYBACK_OUTPUT: "Check that your speakers or headphones are connected.",
+  LINK_OPEN: "Check the link — or add a service that plays links from this site under services.",
 };
 
 function stageText(stage) {
@@ -2144,12 +2146,33 @@ async function queueAdded(view, what) {
 }
 
 // Enter shows what the search finds as a list to choose from (issue #1,
-// point 8); a lit suggestion plays on Enter before this is reached.
+// point 8); a lit suggestion plays on Enter before this is reached. A link
+// the core already opened plays at once (D-095): there is nothing to choose.
 $("playForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const query = playQuery();
-  if (query) showResults(query);
+  if (!query) return;
+  const song = linkSong(lastSuggest, query);
+  if (song) playItems([song]);
+  else showResults(query);
 });
+
+/// The song at a link (D-095): the core read the text as a link, and the
+/// service that takes it found one song there. `null` for anything else.
+function linkSong(report, query) {
+  if (!report?.link?.fit || report.query.trim() !== query) return null;
+  return report.sections[0]?.tracks[0] ?? null;
+}
+
+/// A link no service takes says so, and where to go (D-095).
+function linkUnclaimed(report, cls) {
+  if (!report.link?.unclaimed) return null;
+  return h("p", {
+    class: cls,
+    text: debugMode ? `STEP: LINK_OPEN — ${firstLine(report.link.unclaimed)}` : t("ui.link.unclaimed"),
+    title: report.link.unclaimed,
+  });
+}
 
 // Shift+Enter: queue every matching track. The **core** builds the queue;
 // the results are not collected and sent from here.
@@ -2196,6 +2219,8 @@ let suggestAsked = 0;
 let suggestRows = [];
 let suggestLit = -1;
 let suggestUp = false;
+/// The last answer drawn: Enter on a link plays the song it found.
+let lastSuggest = null;
 
 function scheduleSuggest() {
   clearTimeout(suggestTimer);
@@ -2237,6 +2262,7 @@ function showSearching() {
 function drawSuggest(report, asked) {
   suggestRows = [];
   suggestLit = -1;
+  lastSuggest = report;
   const nodes = [];
   if (report.sections[0]?.fallback) {
     nodes.push(h("p", { class: "suggest-note", text: `Nothing in ${providerName(report.play_from.provider)}` }));
@@ -2249,7 +2275,9 @@ function drawSuggest(report, asked) {
     for (const artist of section.artists) nodes.push(suggestArtist(artist.artist));
     for (const item of section.more) nodes.push(suggestTrack(item));
   }
-  if (report.sections.length === 0) {
+  const unclaimed = linkUnclaimed(report, "suggest-failure");
+  if (unclaimed) nodes.push(unclaimed);
+  else if (report.sections.length === 0 && !report.link) {
     nodes.push(h("p", { class: "suggest-note", text: `Couldn't find “${report.query.trim()}” anywhere` }));
   }
   // "Not found" and "could not ask" are different answers (K9).
@@ -2510,6 +2538,9 @@ async function showResults(query) {
   }
   playFrom = report.play_from;
   drawResults(report, asked);
+  // Enter came before the suggestions' answer: a link's song still plays.
+  const song = linkSong(report, query);
+  if (song) playItems([song]);
 }
 
 function drawResults(report, asked) {
@@ -2532,7 +2563,9 @@ function drawResults(report, asked) {
     );
     group(named(t("ui.results.more")), section.more.map((item) => resultRow(suggestTrack(item, rows, "result-row"), rows)));
   }
-  if (report.sections.length === 0) {
+  const unclaimed = linkUnclaimed(report, "empty");
+  if (unclaimed) nodes.push(unclaimed);
+  else if (report.sections.length === 0 && !report.link) {
     nodes.push(h("p", { class: "empty", text: t("ui.results.nothing", { query: report.query.trim() }) }));
   }
   // "Not found" and "could not ask" are different answers (K9).

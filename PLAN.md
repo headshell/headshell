@@ -2695,6 +2695,48 @@ refusals); a generated HLS fixture from a local server — whole, opened at 3 s
 without the first fragment fetched, past the end; live: 7/7 against a local
 catalog mirror, a SoundCloud track played and moved to 30 s.
 
+### 3.27 Links — songs DONE (D-095), playlists TODO
+
+**The problem:** GitHub issue #1, point 5 (and issue #2): paste a YouTube link
+— something not on YouTube Music too — and play it; ideally any link.
+
+**Done (songs):** plugins name the links they take as templates with `{id}`
+(plugin api 7, `links` required); the core reads a pasted link against them
+(`link.rs`), the plugin music is played from first, and asks that plugin's
+`link(id, template)` for the song. `play`, `suggest`, the TUI and the play
+box take a link; a link no source takes is a `LINK_OPEN` error naming who
+takes links. `ytmusic` 0.10.0 (YouTube Music, YouTube, youtu.be) and
+`soundcloud` 0.8.0 take links; `youtube` 0.3.0 takes none.
+
+**Later (the user's call, 2026-10-15):**
+
+- **A playlist's link** — a YouTube Music/YouTube playlist, an album, a
+  SoundCloud set: `link` already returns an array; the core refuses more than
+  one track today ("only a song's link"). Open: queue them all or show them as
+  a list to pick from, a cap on a long playlist, and the plugins' templates
+  (`playlist?list={id}`, `sets/`).
+- **A video's link** through the `youtube` plugin (the video player rather than
+  the sound alone) — today a YouTube link plays its sound through `ytmusic`.
+- **SoundCloud's short links** (`on.soundcloud.com/…`, what its app shares):
+  they redirect, and following them needs a new host in the plugin's
+  permissions — a new approval for every user.
+- **Links from outside the app** (a `headshell://` scheme, opening a link
+  with headshell) — not asked yet.
+
+### 3.28 The video button — DONE (D-096)
+
+**The problem:** GitHub issue #2: the video button played nothing for songs
+that have a video. Measured: with YouTube Music as the main provider the
+video role fell to the local files; with YouTube chosen, the artist's audio
+upload (a still picture) won over the video on its length, a mislabelled
+video was refused, and a long title searched badly.
+
+**Done:** the video role falls to the first video plugin; ties keep the
+provider's order; the search leaves the release labels off; `youtube` 0.3.0
+reads the uploads' own titles (YouTube's search, same address), leaves the
+audio uploads out and puts the official video first. A song without an
+official video says so.
+
 ---
 
 # PHASE 4 — Rooms (the backend starts here)

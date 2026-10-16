@@ -836,6 +836,22 @@ pub fn suggest(report: &SuggestReport) -> String {
     {
         let _ = writeln!(out, "nothing in {first} for {:?}", report.query);
     }
+    // A link is opened, not searched for (D-095).
+    if let Some(link) = &report.link {
+        match (&link.fit, &link.unclaimed) {
+            (Some(fit), _) => {
+                let _ = writeln!(out, "link: {} → {}", fit.template, fit.id);
+            }
+            (None, Some(chain)) => {
+                let _ = writeln!(
+                    out,
+                    "no source plays this link — STEP: LINK_OPEN — {}",
+                    first_cause(chain)
+                );
+            }
+            (None, None) => {}
+        }
+    }
     for section in &report.sections {
         if section.fallback {
             let _ = writeln!(out, "results from {}:", section.display_name);
@@ -860,24 +876,29 @@ pub fn suggest(report: &SuggestReport) -> String {
             );
         }
     }
-    if report.sections.is_empty() && !report.query.trim().is_empty() {
+    if report.sections.is_empty() && !report.query.trim().is_empty() && report.link.is_none() {
         let _ = writeln!(out, "nothing found for {:?} anywhere", report.query);
     }
     // "Not found" and "could not ask" are different answers (K9).
     for failure in &report.failures {
-        let first_line = failure
-            .chain
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty() && !line.starts_with("STEP:"))
-            .unwrap_or(&failure.chain);
         let _ = writeln!(
             out,
             "could not ask {} — STEP: {} — {}",
-            failure.display_name, failure.stage, first_line
+            failure.display_name,
+            failure.stage,
+            first_cause(&failure.chain)
         );
     }
     out
+}
+
+/// The first line of an error chain that is not its `STEP:` line.
+fn first_cause(chain: &str) -> &str {
+    chain
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("STEP:"))
+        .unwrap_or(chain)
 }
 
 /// Songs recommended from one source (D-087): each section with its

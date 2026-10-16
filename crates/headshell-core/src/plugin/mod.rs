@@ -134,6 +134,10 @@ pub struct PluginEntry {
     /// declares. `None` when the manifest could not be read.
     #[serde(default)]
     pub related: Option<bool>,
+    /// The links it takes (api 7, D-095) — the templates its manifest names.
+    /// `None` when the manifest could not be read.
+    #[serde(default)]
+    pub links: Option<Vec<String>>,
     /// Why it cannot load, if it cannot — one line, copyable.
     pub problem: Option<String>,
 }
@@ -348,6 +352,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
                 lyrics: None,
                 video: None,
                 related: None,
+                links: None,
                 problem: Some(problem),
             };
         }
@@ -374,6 +379,7 @@ fn describe_plugin(dir: &Path, consents: &ConsentStore, store: &ArtifactStore) -
         lyrics: Some(manifest.lyrics),
         video: Some(manifest.video),
         related: Some(manifest.related),
+        links: Some(manifest.links.clone()),
         problem,
     }
 }
@@ -447,6 +453,8 @@ pub struct PluginProvider {
     display_name: String,
     capabilities: Capabilities,
     permissions: Permissions,
+    /// The links it takes, read from its manifest (D-095).
+    link_templates: Vec<crate::link::LinkTemplate>,
     spec: ScriptSpec,
     start_timeout: Duration,
     call_timeout: Duration,
@@ -627,6 +635,13 @@ impl PluginProvider {
         } else {
             capabilities
         };
+        // Links: api 7, D-095 — a template named is the yes.
+        let link_templates = manifest.link_templates();
+        let capabilities = if link_templates.is_empty() {
+            capabilities
+        } else {
+            capabilities | Capabilities::LINKS
+        };
 
         let spec = ScriptSpec {
             plugin: manifest.name.clone(),
@@ -646,6 +661,7 @@ impl PluginProvider {
             display_name: manifest.display_name.clone(),
             capabilities,
             permissions: manifest.permissions.normalized(),
+            link_templates,
             spec,
             start_timeout: START_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
@@ -872,6 +888,19 @@ impl PluginProvider {
         tracks.retain(|track| track.id != *id);
         tracks.truncate(limit);
         Ok(tracks)
+    }
+
+    /// What is at a link that fitted one of its templates (api 7, D-095):
+    /// what stood in `{id}` and the template go in, its tracks come out.
+    fn link_now(&self, id: &str, template: &str) -> Result<Vec<ProviderTrack>> {
+        if !self.capabilities.contains(Capabilities::LINKS) {
+            return Err(self.unsupported("links"));
+        }
+        let value = self.call(
+            export::LINK,
+            vec![serde_json::json!(id), serde_json::json!(template)],
+        )?;
+        self.tracks_from(export::LINK, value)
     }
 
     /// An export's array of tracks as core tracks; malformed ISRCs are
@@ -1141,6 +1170,18 @@ impl Provider for PluginProvider {
         limit: usize,
     ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
         Box::pin(std::future::ready(self.related_now(id, limit)))
+    }
+
+    fn link_templates(&self) -> Vec<crate::link::LinkTemplate> {
+        self.link_templates.clone()
+    }
+
+    fn open_link<'a>(
+        &'a self,
+        id: &'a str,
+        template: &'a str,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        Box::pin(std::future::ready(self.link_now(id, template)))
     }
 
     /// A plugin's tracks come from the internet anyway: their lyrics are

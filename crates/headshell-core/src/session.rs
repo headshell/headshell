@@ -1080,17 +1080,25 @@ impl Session {
             Some(id) if fits(&id, Role::Video) => (Some(id), true, false, None),
             saved => match main.clone().filter(|id| fits(id, Role::Video)) {
                 Some(id) => (Some(id), main_chosen, true, saved),
-                None => (
-                    registry
-                        .all()
-                        .iter()
-                        .map(|provider| provider.info())
-                        .find(|info| Role::Video.fits(info.capabilities))
-                        .map(|info| info.id),
-                    false,
-                    true,
-                    saved,
-                ),
+                // The main one shows no videos (a music service): the first
+                // video plugin, then anyone (D-096) — the local files only
+                // have the videos lying next to them.
+                None => {
+                    let all = registry.all();
+                    let shows = |provider: &&Arc<dyn crate::provider::Provider>| {
+                        Role::Video.fits(provider.info().capabilities)
+                    };
+                    (
+                        all.iter()
+                            .filter(|provider| provider.is_plugin())
+                            .find(shows)
+                            .or_else(|| all.iter().find(shows))
+                            .map(|provider| provider.info().id),
+                        false,
+                        true,
+                        saved,
+                    )
+                }
             },
         };
 
@@ -2079,9 +2087,14 @@ impl Session {
     /// If `all` is false only the first match is taken. An empty result is an
     /// **error**: better than "played it, but no sound".
     ///
+    /// A link is not searched for (D-095): the provider whose template it
+    /// fits — in the same order, the chosen one first — is asked what is
+    /// there, and the queue is that song.
+    ///
     /// # Errors
     /// If there is no provider, the chosen one's search fails, or nothing
-    /// matches anywhere.
+    /// matches anywhere; for a link, if no provider takes it, or the one that
+    /// does fails or finds no song there.
     pub async fn queue_from_search(
         &self,
         registry: &ProviderRegistry,
@@ -2090,6 +2103,11 @@ impl Session {
         limit: usize,
     ) -> Result<Vec<QueueItem>> {
         let play_from = self.play_from(registry)?;
+        if let Some(link) = crate::link::Link::parse(query) {
+            let order = search_order(registry, play_from.provider.as_ref());
+            let (provider, fit) = crate::link::taker(&order, &registry.all(), &link)?;
+            return Ok(vec![crate::link::open(&provider, &link, &fit).await?]);
+        }
         let order = search_order(registry, play_from.provider.as_ref());
         let Some((first, others)) = order.split_first() else {
             return Err(Error::new(
@@ -2223,6 +2241,35 @@ impl Session {
     ) -> Result<crate::suggest::SuggestPlan> {
         let play_from = self.play_from(registry)?;
         let mut steps = Vec::new();
+        if let Some(link) = crate::link::Link::parse(query) {
+            // A link is opened, not searched for (D-095): only the provider
+            // that takes it is asked.
+            let order = search_order(registry, play_from.provider.as_ref());
+            let link = match crate::link::taker(&order, &registry.all(), &link) {
+                Ok((provider, fit)) => {
+                    steps.push(crate::suggest::SuggestStep {
+                        provider,
+                        catalog: None,
+                    });
+                    crate::suggest::SuggestLinkPlan {
+                        link,
+                        fit: Some(fit),
+                        unclaimed: None,
+                    }
+                }
+                Err(err) => crate::suggest::SuggestLinkPlan {
+                    link,
+                    fit: None,
+                    unclaimed: Some(err.chain_text()),
+                },
+            };
+            return Ok(crate::suggest::SuggestPlan {
+                query: query.to_owned(),
+                play_from,
+                steps,
+                link: Some(link),
+            });
+        }
         if !query.trim().is_empty() {
             let catalog = self.library.search_catalog(query, SUGGEST_CATALOG_ROWS)?;
             for provider in search_order(registry, play_from.provider.as_ref()) {
@@ -2234,6 +2281,7 @@ impl Session {
             query: query.to_owned(),
             play_from,
             steps,
+            link: None,
         })
     }
 
@@ -3976,6 +4024,9 @@ mod tests {
         tracks: Vec<(&'static str, &'static str)>,
         fails: bool,
         asked: std::sync::Mutex<Vec<String>>,
+        /// The links it takes (D-095); a link is opened to the track whose
+        /// title stood in `{id}`, or to every track for `all`.
+        links: Vec<crate::link::LinkTemplate>,
     }
 
     impl Listed {
@@ -3986,6 +4037,25 @@ mod tests {
                 tracks,
                 fails: false,
                 asked: std::sync::Mutex::new(Vec::new()),
+                links: Vec::new(),
+            })
+        }
+
+        fn linked(
+            id: &'static str,
+            templates: &[&str],
+            tracks: Vec<(&'static str, &'static str)>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                capabilities: Capabilities::SEARCH | Capabilities::STREAM | Capabilities::LINKS,
+                tracks,
+                fails: false,
+                asked: std::sync::Mutex::new(Vec::new()),
+                links: templates
+                    .iter()
+                    .map(|template| crate::link::LinkTemplate::parse(template).unwrap())
+                    .collect(),
             })
         }
 
@@ -3996,6 +4066,7 @@ mod tests {
                 tracks: Vec::new(),
                 fails: true,
                 asked: std::sync::Mutex::new(Vec::new()),
+                links: Vec::new(),
             })
         }
 
@@ -4058,6 +4129,28 @@ mod tests {
             _id: &'a ProviderTrackId,
         ) -> ProviderFuture<'a, Option<AudioSource>> {
             Box::pin(async move { Ok(None) })
+        }
+        fn link_templates(&self) -> Vec<crate::link::LinkTemplate> {
+            self.links.clone()
+        }
+        fn open_link<'a>(
+            &'a self,
+            id: &'a str,
+            _template: &'a str,
+        ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push(format!("link {id}"));
+                Ok(self
+                    .tracks
+                    .iter()
+                    .filter(|(_, title)| id == "all" || id == *title)
+                    .map(|(artist, title)| ProviderTrack {
+                        id: ProviderTrackId::new(ProviderId::new(self.id), *title),
+                        track: TrackRef::new(*artist, *title),
+                        genres: Vec::new(),
+                    })
+                    .collect())
+            })
         }
     }
 
@@ -4225,6 +4318,136 @@ mod tests {
         assert_eq!(server.asked(), ["reckoner"]);
     }
 
+    const WATCH: &str = "https://www.youtube.com/watch?v={id}";
+
+    /// D-095: a link is not searched for. The provider music is played from
+    /// opens it when its template fits; the other that takes the same links
+    /// is not asked, and nobody's search is.
+    #[tokio::test]
+    async fn a_link_is_opened_by_the_chosen_provider_that_takes_it() {
+        let dir = TempDir::new("link-chosen");
+        let first = Listed::linked("yt", &[WATCH], vec![("A", "abc")]);
+        let chosen = Listed::linked("ytm", &[WATCH, "https://youtu.be/{id}"], vec![("B", "abc")]);
+        let (session, registry) =
+            session_with(&dir, &[], &[Arc::clone(&first), Arc::clone(&chosen)]);
+
+        // Not chosen: the first in the registry's order that takes it.
+        let items = session
+            .queue_from_search(&registry, "https://youtube.com/watch?v=abc&t=4s", true, 100)
+            .await
+            .unwrap();
+        assert_eq!(items[0].id.provider, ProviderId::new("yt"));
+
+        session
+            .set_play_from(&registry, &ProviderId::new("ytm"))
+            .unwrap();
+        let items = session
+            .queue_from_search(
+                &registry,
+                "  https://m.youtube.com/watch?v=abc  ",
+                true,
+                100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].id,
+            ProviderTrackId::new(ProviderId::new("ytm"), "abc")
+        );
+        assert_eq!(chosen.asked(), ["link abc"]);
+        assert_eq!(first.asked(), ["link abc"], "asked once, before the choice");
+    }
+
+    /// "No source takes this link" names the ones that take links, and the
+    /// sites they take them from (K9) — the stage is LINK_OPEN.
+    #[tokio::test]
+    async fn a_link_no_provider_takes_says_who_takes_links() {
+        let dir = TempDir::new("link-unclaimed");
+        let yt = Listed::linked("ytm", &[WATCH, "https://youtu.be/{id}"], vec![("B", "abc")]);
+        let (session, registry) = session_with(&dir, &[], &[Arc::clone(&yt)]);
+
+        let err = session
+            .queue_from_search(&registry, "https://soundcloud.com/ezhel/geceler", true, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::LinkOpen);
+        let text = err.chain_text();
+        assert!(
+            text.contains("soundcloud.com") && text.contains("ytm (youtube.com, youtu.be)"),
+            "{text}"
+        );
+        assert!(yt.asked().is_empty(), "a link is not searched for");
+    }
+
+    /// Nothing at a link, and a list's link, are LINK_OPEN errors that say
+    /// which — only a song's link is played for now (D-095).
+    #[tokio::test]
+    async fn a_link_to_nothing_or_to_a_list_is_refused_with_its_reason() {
+        let dir = TempDir::new("link-list");
+        let yt = Listed::linked("ytm", &[WATCH], vec![("A", "one"), ("B", "two")]);
+        let (session, registry) = session_with(&dir, &[], &[yt]);
+
+        let err = session
+            .queue_from_search(&registry, "https://youtube.com/watch?v=gone", true, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::LinkOpen);
+        assert!(
+            err.chain_text().contains("found nothing there"),
+            "{}",
+            err.chain_text()
+        );
+
+        let err = session
+            .queue_from_search(&registry, "https://youtube.com/watch?v=all", true, 100)
+            .await
+            .unwrap_err();
+        assert_eq!(err.stage(), Stage::LinkOpen);
+        let text = err.chain_text();
+        assert!(
+            text.contains("a list of 2 songs") && text.contains("only a song's link"),
+            "{text}"
+        );
+    }
+
+    /// The play box: a link typed in offers the song at it, from the one that
+    /// takes it — and says so; one nobody takes says why.
+    #[tokio::test]
+    async fn suggest_opens_a_link_instead_of_searching() {
+        let dir = TempDir::new("link-suggest");
+        let yt = Listed::linked("ytm", &[WATCH], vec![("A", "abc")]);
+        let (session, registry) = session_with(&dir, &[], &[Arc::clone(&yt)]);
+
+        let report = session
+            .suggest(&registry, "https://www.youtube.com/watch?v=abc")
+            .await
+            .unwrap();
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(titles(&report.sections[0].tracks), ["abc"]);
+        let link = report.link.unwrap();
+        assert_eq!(link.fit.unwrap().id, "abc");
+        assert_eq!(link.unclaimed, None);
+        assert_eq!(yt.asked(), ["link abc"]);
+
+        let report = session
+            .suggest(&registry, "https://soundcloud.com/a/b")
+            .await
+            .unwrap();
+        assert!(report.sections.is_empty() && report.failures.is_empty());
+        let link = report.link.unwrap();
+        assert_eq!(link.fit, None);
+        assert!(
+            link.unclaimed
+                .as_deref()
+                .is_some_and(|chain| chain.contains("LINK_OPEN")),
+            "{link:?}"
+        );
+
+        let text = session.suggest(&registry, "abc").await.unwrap();
+        assert_eq!(text.link, None, "a text is searched, as before");
+    }
+
     #[tokio::test]
     async fn the_chosen_provider_is_asked_first_and_its_answer_wins() {
         let dir = TempDir::new("play-from-chosen");
@@ -4293,6 +4516,7 @@ mod tests {
             tracks: Vec::new(),
             fails: false,
             asked: std::sync::Mutex::new(Vec::new()),
+            links: Vec::new(),
         });
         let (session, registry) = session_with(&dir, &[], &[mute]);
 
@@ -4569,11 +4793,23 @@ mod tests {
     /// YouTube video whose id is made from its title.
     struct Videos {
         tracks: Vec<(&'static str, &'static str)>,
+        /// Is it a plugin (D-096): the video role falls to one first.
+        plugin: bool,
     }
 
     impl Videos {
         fn new(tracks: Vec<(&'static str, &'static str)>) -> Arc<Self> {
-            Arc::new(Self { tracks })
+            Arc::new(Self {
+                tracks,
+                plugin: false,
+            })
+        }
+
+        fn plugin(tracks: Vec<(&'static str, &'static str)>) -> Arc<Self> {
+            Arc::new(Self {
+                tracks,
+                plugin: true,
+            })
         }
 
         fn video_id(title: &str) -> String {
@@ -4590,6 +4826,9 @@ mod tests {
     }
 
     impl Provider for Videos {
+        fn is_plugin(&self) -> bool {
+            self.plugin
+        }
         fn info(&self) -> ProviderInfo {
             ProviderInfo {
                 id: ProviderId::new("tube"),
@@ -4648,6 +4887,47 @@ mod tests {
 
     fn with_videos(registry: &mut ProviderRegistry, videos: &Arc<Videos>) {
         registry.register(Arc::clone(videos) as Arc<dyn Provider>);
+    }
+
+    /// D-096: a main provider that shows no videos (a music service) hands
+    /// the video role to the first video plugin — not to the local files
+    /// registered before it, which only have the videos lying next to them.
+    #[test]
+    fn the_video_role_falls_to_a_video_plugin_before_the_local_files() {
+        let dir = TempDir::new("roles-plugin");
+        let files = Arc::new(Listed {
+            id: "files",
+            capabilities: Capabilities::SEARCH | Capabilities::STREAM | Capabilities::VIDEO,
+            tracks: Vec::new(),
+            fails: false,
+            asked: std::sync::Mutex::new(Vec::new()),
+            links: Vec::new(),
+        });
+        let music = Listed::new("music", Vec::new());
+        let (session, mut registry) = session_with(&dir, &[], &[files, music]);
+        session
+            .set_role(&registry, Role::Main, Some(&ProviderId::new("music")))
+            .unwrap();
+        assert_eq!(
+            session.roles(&registry).unwrap().video.provider,
+            Some(ProviderId::new("files")),
+            "without a video plugin, the first that shows videos"
+        );
+
+        with_videos(&mut registry, &Videos::plugin(Vec::new()));
+        let roles = session.roles(&registry).unwrap();
+        assert_eq!(roles.video.provider, Some(ProviderId::new("tube")));
+        assert!(roles.video.follows_main && !roles.video.chosen);
+
+        // A main provider that shows videos keeps them: nothing goes online
+        // unasked for the local files.
+        session
+            .set_role(&registry, Role::Main, Some(&ProviderId::new("files")))
+            .unwrap();
+        assert_eq!(
+            session.roles(&registry).unwrap().video.provider,
+            Some(ProviderId::new("files"))
+        );
     }
 
     /// Music and video follow the main provider until each is chosen on its

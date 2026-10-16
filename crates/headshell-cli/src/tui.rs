@@ -222,6 +222,16 @@ fn rows(report: &SuggestReport) -> Vec<Row> {
             failure.display_name, failure.stage
         )));
     }
+    // A link no source takes (D-095): "not found" would be the wrong answer.
+    if report
+        .link
+        .as_ref()
+        .is_some_and(|link| link.unclaimed.is_some())
+    {
+        rows.push(Row::Failure(
+            "no source plays this link — STEP: LINK_OPEN".to_owned(),
+        ));
+    }
     rows
 }
 
@@ -984,6 +994,7 @@ mod tests {
                 stage: "NETWORK_REQUEST".to_owned(),
                 chain: "STEP: NETWORK_REQUEST\n  → refused".to_owned(),
             }],
+            link: None,
         }
     }
 

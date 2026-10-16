@@ -1879,6 +1879,66 @@ fn roles_are_chosen_apart_and_followed_again() {
     assert_eq!(json(&stdout)["play_from"]["provider"], "echo");
 }
 
+/// D-095: a link plays through the plugin whose template it fits; one no
+/// source takes, and a list's link, fail at LINK_OPEN saying why.
+#[test]
+fn a_link_plays_through_the_plugin_that_takes_it() {
+    let dir = temp_dir("link");
+    install_echo_plugin(&dir);
+    let (_, stderr, ok) = run(&dir, &["plugin", "approve", "echo"]);
+    assert!(ok, "{stderr}");
+
+    let link = "https://echo.example.invalid/track/track-1?si=shared";
+    let (stdout, stderr, ok) = run(&dir, &["play", link, "--dry-run", "--json"]);
+    assert!(ok, "{stderr}");
+    let queued = &json(&stdout)["queued"];
+    assert_eq!(queued.as_array().map(Vec::len), Some(1), "{stdout}");
+    assert_eq!(queued[0]["id"]["provider"], "echo", "{stdout}");
+    assert_eq!(queued[0]["track"]["title"], "Geceler", "{stdout}");
+
+    let (stdout, stderr, ok) = run(&dir, &["suggest", link, "--json"]);
+    assert!(ok, "{stderr}");
+    let report = json(&stdout);
+    assert_eq!(report["link"]["fit"]["id"], "track-1", "{stdout}");
+    assert_eq!(
+        report["sections"][0]["tracks"][0]["track"]["title"], "Geceler",
+        "{stdout}"
+    );
+    let (stdout, _, ok) = run(&dir, &["suggest", link]);
+    assert!(ok);
+    assert!(
+        stdout.contains("link: https://echo.example.invalid/track/{id} → track-1"),
+        "{stdout}"
+    );
+
+    let (_, stderr, ok) = run(
+        &dir,
+        &["play", "https://soundcloud.com/ezhel/geceler", "--dry-run"],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("STEP: LINK_OPEN") && stderr.contains("echo (echo.example.invalid)"),
+        "{stderr}"
+    );
+    let (stdout, _, ok) = run(&dir, &["suggest", "https://soundcloud.com/ezhel/geceler"]);
+    assert!(ok);
+    assert!(stdout.contains("no source plays this link"), "{stdout}");
+
+    let (_, stderr, ok) = run(
+        &dir,
+        &[
+            "play",
+            "https://echo.example.invalid/list?l=all",
+            "--dry-run",
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("STEP: LINK_OPEN") && stderr.contains("only a song's link"),
+        "{stderr}"
+    );
+}
+
 /// D-086: a video file is its own video; a song's video is searched for at
 /// the video provider, and the plan says what it found.
 #[test]

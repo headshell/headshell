@@ -67,7 +67,7 @@ fn fold_diacritics(input: &str) -> String {
 ///
 /// They do not change the recording itself: `Creep` and `Creep (Remastered
 /// 2011)` are the same performance.
-const REISSUE_MARKERS: [&str; 13] = [
+pub(crate) const REISSUE_MARKERS: [&str; 13] = [
     "remaster",
     "remastered",
     "deluxe",

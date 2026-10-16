@@ -6409,3 +6409,108 @@ the same byte given up after three, one the server won't continue failing with b
 container: searches at 5 Mbit/1% 6/6 alone and together (1.3–6.4 s), 2 Mbit/1% 6/6 and 6/6, 3G over two runs 16/16 and
 15/16 (the slowest 14.1 s); at 5 Mbit/1% 3 of 3 plays whole, and at 2 Mbit/1% googlevideo's cuts at
 ~4.8 MB were picked up from the same byte.
+
+## D-095 — Links: a pasted address plays through the plugin whose template it fits
+
+**Date:** 2026-10-15 · **Status:** APPLIED (2026-10-15)
+
+**Question:** Issue #1, point 5, answered in issue #2: the reporter wants to paste a YouTube link — for
+something that isn't on YouTube Music too — and play it; ideally any link. The user's choices:
+
+1. **Plugins say which links they take, as templates** — a link written out whole, `{id}` where the song's
+   part stands (`https://youtu.be/{id}`, `https://www.youtube.com/watch?v={id}`,
+   `https://soundcloud.com/{id}`) — and the core hands the plugin what stood there with the template.
+2. **The field is required: plugin api 6 → 7**, as `artwork`, `lyrics`, `video` and `related` were:
+   `"links": [...]` or `"links": []`. "Takes no links" and "written before links" read apart.
+3. **Only a song's link for now.** A playlist's (album's, set's) link waits; it is written in PLAN §3.27.
+4. **Two plugins taking the same link: the one music is played from first**, then the others in the
+   search order (D-080).
+
+**Decision:**
+
+1. **`link.rs` reads templates and links.** `{id}` is in a template once: in the path, where it takes
+   everything between the text around it (`/` included — SoundCloud's `artist/track`), or as a whole query
+   value. The host is compared without case and without a leading `www.`/`m.`; the scheme, a port, a
+   fragment and a slash at the end don't count; query pairs a template doesn't name (`&t=`, `&si=`) are
+   left aside, the ones it names must be there in any order. Of a plugin's templates the one naming the
+   most of the link wins. A template is validated when the manifest loads, each fault named.
+2. **The contract:** a template makes the engine expect `link(id, template)`, returning an array of
+   tracks — the song at the link, with the id `resolve_source` takes. `[]` is "nothing there"; more than
+   one track is refused as a list ("only a song's link is played for now"), so playlists can come later
+   through the same function without another api step. The core never fetches the link (K5); a template
+   is not a permission.
+3. **The provider side:** `Provider::link_templates()` (synchronous, like `info`) and
+   `Provider::open_link(id, template)`; the `LINKS` capability; a `LINK_OPEN` stage for "no source takes
+   this link" (naming the sites the installed sources take links from), "nothing there" and "a list".
+4. **Where a link is read:** `Session::queue_from_search` — so `play`, `artwork`, `lyrics`, `prefetch`,
+   the TUI and the desktop's play all take a link — and `Session::suggest_plan`, whose report gains
+   `link` (`fit`, or `unclaimed` with the chain). The desktop plays a link's song on Enter instead of
+   listing matches; a link no service takes says so and where to add one.
+5. **The catalog:** `ytmusic` 0.10.0 takes `music.youtube.com/watch?v=`, `www.youtube.com/watch?v=` and
+   `youtu.be/` (the song's name from InnerTube `next`, the player's details when the panel has none — a
+   video not on YouTube Music plays too; a video's view count, which its byline puts where a song's album
+   stands, is no longer taken for an album — the radio's rows had it too); `soundcloud` 0.8.0 takes `soundcloud.com/{id}` through its
+   `/resolve` (a set, a profile or a page refused, saying which); `youtube` 0.3.0 takes none — a YouTube
+   link plays its sound through `ytmusic`.
+
+**Testing:** templates and links (`link.rs`: query and path templates, other sites, a user before the
+host, literal pairs, the closest template, the faults); the manifest's `links` (missing, wrong type,
+bad template); the echo plugin's `link`; the session (the chosen one first, unclaimed with who takes
+links, nothing there, a list); `suggest` with a link; the CLI (`play <link> --dry-run`, `suggest <link>`,
+unclaimed, a list). Live against a local catalog mirror: a youtu.be link to "Me at the zoo" opened and
+resolved to a googlevideo stream, a YouTube Music link opened to its search hit, a SoundCloud track
+opened, a set refused, a missing track `[]`; all 20 live plugin tests passed. The desktop in a container
+(Xvfb): a pasted youtu.be link offered "Me at the zoo · jawed", Enter played it at once, and a Spotify
+link showed "None of your services plays links like this one".
+
+## D-096 — The video button finds the song's video, not its audio upload
+
+**Date:** 2026-10-16 · **Status:** APPLIED (2026-10-16)
+
+**Question:** Issue #2: "some songs I know have a video available, but clicking the video button doesn't play
+anything". Measured 2026-10-15 with ytmusic + youtube (a local catalog mirror; 30 songs, Turkish and
+international, each taken as the play box queues it from YouTube Music):
+
+- **The video role fell to the local files.** With YouTube Music as the main provider — it shows no
+  videos — the role took the first provider that does in the registry's order: the local files, which only
+  have the videos lying next to them. Every YouTube Music song said "We couldn't find a video for this
+  song" until the listener chose YouTube for videos by hand.
+- **The cover instead of the video.** With YouTube chosen, 27 of 30 had a match, and for 3 of them the
+  first was the artist's audio upload — a still picture: Daft Punk "(Official Audio)", Tame Impala
+  "(Audio)", Ezhel's. YouTube Music files those as official videos too and titles them the song's name
+  alone; the core's tie-break, the duration closest to the song's, picked them every time — the audio
+  upload is as long as the song, a video has its intro.
+- **A mislabelled video.** YouTube Music titles Queen's video "Bohemian Rhapsody (Live At Wembley
+  Stadium …)"; the match took it for a live take and refused it.
+- **A long title, a bad search.** "Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)"
+  brought only fan uploads.
+- Not the cause: the embed (every candidate was embeddable, oEmbed 200 ×28), and the player waiting for a
+  click (it started on its own in the container).
+
+The user's choices: the video role falls to the first video plugin; the uploads' own titles decide which
+is the video; a song without an official video says there is none.
+
+**Decision:**
+
+1. **The video role, following a main provider that shows no videos, falls to the first video plugin**,
+   then to anyone that shows videos. A main provider that shows videos keeps them — the local files' role
+   does not go online unasked.
+2. **`video::rank` no longer breaks ties by duration:** among equal scores the provider's order stands —
+   the provider knows the video from the audio upload, the score does not.
+3. **The video search leaves the release labels off the title** (`(Radio Edit)`, `- 2011 Remaster`,
+   `(feat. X)`); a label naming another recording (`(Live)`, `(Remix)`) stays.
+4. **`youtube` 0.3.0 asks YouTube's own search too** (the WEB client, at the same `music.youtube.com`
+   address — no new permission, one more request) for the uploads' titles. An upload whose title says it is
+   the sound — audio, lyrics, a visualizer, karaoke — and a song's art track are left out; one whose title
+   says it is the official video comes first; a row YouTube Music titled with a bracket more than its upload
+   gets the upload's title. The songs-filter fallback is gone: a still picture is not a video, and a song
+   without one says so. When that second search fails, the rows still come, unsorted, and the log says why.
+
+**Testing:** the role falls to a video plugin before the local files, and stays with a main provider that
+shows videos; ties keep the provider's order (the old test asserted the audio upload first); the search
+text without release labels, a live take's and a remix's kept. Live: the official video before Tame
+Impala's and Ezhel's audio uploads, Daft Punk's "(Official Audio)" not offered, Queen's video titled
+"Bohemian Rhapsody". The 30 songs again: 27 found, every first candidate a video (none an audio upload;
+Queen's found); the three without — Get Lucky (no official video, only its audio), UZI "Krvn" (none), a
+Eurovision version — say so. The desktop in a container, no video role chosen: the role was YouTube, and
+Tame Impala's official video played from the second the song was at.

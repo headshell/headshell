@@ -111,6 +111,10 @@ pub enum Stage {
     /// history, the songs gathered, what is left out. A provider that could
     /// not be asked keeps its own stage.
     Recommend,
+    /// Opening a link (D-095): reading a pasted address, finding the
+    /// provider whose template it fits, and checking what it found there.
+    /// The provider's own call keeps its stage.
+    LinkOpen,
     /// The language engine (D-089): the built-in English, the languages
     /// folder and the choice of language.
     LocaleLoad,
@@ -149,6 +153,7 @@ impl Stage {
             Self::VideoLookup => "VIDEO_LOOKUP",
             Self::VideoPlayback => "VIDEO_PLAYBACK",
             Self::Recommend => "RECOMMEND",
+            Self::LinkOpen => "LINK_OPEN",
             Self::LocaleLoad => "LOCALE_LOAD",
         }
     }

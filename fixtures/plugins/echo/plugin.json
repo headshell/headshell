@@ -2,11 +2,12 @@
   "name": "echo",
   "display_name": "Echo (test)",
   "version": "0.3.0",
-  "api": 6,
+  "api": 7,
   "artwork": true,
   "lyrics": true,
   "video": true,
   "related": true,
+  "links": ["https://echo.example.invalid/track/{id}", "https://echo.example.invalid/list?l={id}"],
   "main": "main.js",
   "capabilities": ["search", "stream"],
   "permissions": {

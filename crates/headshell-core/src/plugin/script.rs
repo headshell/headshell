@@ -484,6 +484,9 @@ fn check_exports(
     if capabilities.contains(Capabilities::RELATED) {
         wanted.push((export::RELATED, "`\"related\": true` in the manifest"));
     }
+    if capabilities.contains(Capabilities::LINKS) {
+        wanted.push((export::LINK, "the templates in the manifest's `links`"));
+    }
     let missing: Vec<String> = wanted
         .into_iter()
         .filter(|(name, _)| {

@@ -140,12 +140,14 @@ pub(crate) const SEARCH_ROWS: usize = 10;
 ///
 /// The duration is left out of the score: a music video is often longer than
 /// the song (an intro, an outro, a scene), and the score's duration penalty
-/// would push the right video under a wrong one. The duration only breaks
-/// ties.
+/// would push the right video under a wrong one. It does not break ties
+/// either (D-096): the row as long as the song is the audio upload — a still
+/// picture — more often than the video; the provider's order says which is
+/// the video.
 const MATCH_MIN: f64 = 0.82;
 
-/// Weighs search rows against the track: the ones that are it, best first,
-/// and how many were not.
+/// Weighs search rows against the track: the ones that are it, best first —
+/// among equals in the provider's own order — and how many were not.
 pub(crate) fn rank(
     track: &TrackRef,
     rows: Vec<ProviderTrack>,
@@ -168,25 +170,76 @@ pub(crate) fn rank(
             refused += 1;
         }
     }
-    let wanted = track.duration_ms;
-    let gap = |row: &ProviderTrack| match (wanted, row.track.duration_ms) {
-        (Some(a), Some(b)) if b > 0 => a.abs_diff(b),
-        _ => u64::MAX,
-    };
-    // Best score first; among equals the closer duration. The search's own
-    // order (relevance) is kept for the rest — the sort is stable.
-    kept.sort_by(|(a, score_a), (b, score_b)| {
+    // Best score first; among equals the provider's order — it knows the
+    // official video from the audio upload, the score does not (D-096). The
+    // sort is stable.
+    kept.sort_by(|(_, score_a), (_, score_b)| {
         score_b
             .partial_cmp(score_a)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| gap(a).cmp(&gap(b)))
     });
     (kept, refused)
 }
 
-/// The text a video provider is searched with.
+/// The text a video provider is searched with: the artist and the title,
+/// the labels a release adds to a title taken off (D-096). Measured
+/// 2026-10-15: "… Get Lucky (Radio Edit - feat. Pharrell Williams and Nile
+/// Rodgers)" brought fan uploads and no video; "… Get Lucky" the video.
 pub(crate) fn query_for(track: &TrackRef) -> String {
-    format!("{} {}", track.artist, track.title)
+    format!("{} {}", track.artist, searched_title(&track.title))
+}
+
+/// A title without its release labels — `(Radio Edit)`, `[Remastered 2011]`,
+/// `(feat. X)`, ` - 2011 Remaster` — as it is written otherwise. A label
+/// naming another recording (`(Live)`, `(Remix)`) stays: that one's video is
+/// another.
+fn searched_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut rest = title;
+    while let Some(open) = rest.find(['(', '[']) {
+        let close = if rest[open..].starts_with('(') {
+            ')'
+        } else {
+            ']'
+        };
+        let Some(length) = rest[open..].find(close) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        let label = &rest[open..=open + length];
+        if !release_label(&label[1..label.len() - 1]) {
+            out.push_str(label);
+        }
+        rest = &rest[open + length + 1..];
+    }
+    out.push_str(rest);
+    if let Some(dash) = out.rfind(" - ")
+        && release_label(&out[dash + 3..])
+    {
+        out.truncate(dash);
+    }
+    let searched = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if searched.is_empty() {
+        title.trim().to_owned()
+    } else {
+        searched
+    }
+}
+
+/// Does a title's label only say how the recording was released — a
+/// re-release, an edit, who is featured?
+fn release_label(label: &str) -> bool {
+    use crate::identity::normalize::{REISSUE_MARKERS, normalize_text, variant_markers};
+    let lowered = label.trim().to_lowercase();
+    if !variant_markers(&normalize_text(&lowered)).is_empty() {
+        return false;
+    }
+    ["feat.", "feat ", "ft.", "ft ", "featuring ", "with "]
+        .iter()
+        .any(|marker| lowered.starts_with(marker))
+        || REISSUE_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker))
 }
 
 #[cfg(test)]
@@ -238,8 +291,10 @@ mod tests {
         ];
         let (kept, refused) = rank(&track, rows);
         let ids: Vec<&str> = kept.iter().map(|(row, _)| row.id.id.as_str()).collect();
-        // Two videos of the song; the one whose length is the song's first.
-        assert_eq!(ids, ["5NV6Rdv1a3I", "CCHdMIEGaaM"]);
+        // Two uploads of the song, in the provider's order. The one as long
+        // as the song is "(Official Audio)", a still picture: preferring it
+        // for its length showed the cover instead of the video (D-096).
+        assert_eq!(ids, ["CCHdMIEGaaM", "5NV6Rdv1a3I"]);
         assert_eq!(refused, 2);
     }
 
@@ -270,6 +325,43 @@ mod tests {
         let (kept, refused) = rank(&track, rows);
         assert!(kept.is_empty(), "{kept:?}");
         assert_eq!(refused, 1);
+    }
+
+    /// D-096: a video is searched for without the labels a release adds;
+    /// a live take or a remix keeps its own.
+    #[test]
+    fn a_video_is_searched_for_without_the_release_labels() {
+        let query = |artist: &str, title: &str| query_for(&TrackRef::new(artist, title));
+        assert_eq!(
+            query(
+                "Daft Punk, Pharrell Williams & Nile Rodgers",
+                "Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)"
+            ),
+            "Daft Punk, Pharrell Williams & Nile Rodgers Get Lucky"
+        );
+        assert_eq!(
+            query("Queen", "Bohemian Rhapsody - Remastered 2011"),
+            "Queen Bohemian Rhapsody"
+        );
+        assert_eq!(query("Tarkan", "Şımarık [Remastered]"), "Tarkan Şımarık");
+        assert_eq!(
+            query("Mark Ronson", "Uptown Funk (feat. Bruno Mars)"),
+            "Mark Ronson Uptown Funk"
+        );
+        assert_eq!(
+            query("Radiohead", "Creep (Live at Glastonbury)"),
+            "Radiohead Creep (Live at Glastonbury)"
+        );
+        assert_eq!(query("Ezhel", "Geceler (Remix)"), "Ezhel Geceler (Remix)");
+        assert_eq!(
+            query("Prince", "(I Wanna) Be Your Lover"),
+            "Prince (I Wanna) Be Your Lover"
+        );
+        assert_eq!(
+            query("X", "(Radio Edit)"),
+            "X (Radio Edit)",
+            "a title that is all label stays"
+        );
     }
 
     #[test]

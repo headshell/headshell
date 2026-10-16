@@ -85,6 +85,55 @@ async fn it_is_a_video_service_and_its_search_names_the_song() {
     assert!(is_youtube_id(&song.id.id), "{:?}", song.id.id);
 }
 
+/// D-096, measured 2026-10-15: YouTube Music files the artist's audio upload
+/// (a still picture of the cover) as "official" too, titled the song's name
+/// alone. The official video comes first, an upload whose title says it is
+/// the sound not at all, and the video YouTube Music titled "Live At Wembley
+/// Stadium" is Queen's song.
+#[tokio::test]
+async fn the_official_video_comes_first_and_an_audio_upload_not_at_all() {
+    let test = "official";
+    let Some((_config, provider)) = install(test).await else {
+        return;
+    };
+    // (query, the official video when there is one, an audio upload whose
+    // title says so)
+    for (query, video, audio) in [
+        (
+            "Tame Impala The Less I Know The Better",
+            Some("sBzrzS1Ag_g"),
+            Some("2SUwOgmvzK4"),
+        ),
+        // "Ezhel - Geceler": nothing in its title says it is the sound — it
+        // stays, after the video.
+        ("Ezhel Geceler", Some("iurfbuXpqXM"), None),
+        // Get Lucky has no official video, only its "(Official Audio)".
+        ("Daft Punk Get Lucky", None, Some("5NV6Rdv1a3I")),
+    ] {
+        let rows = provider.search(query, 10).await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.id.as_str()).collect();
+        if let Some(video) = video {
+            assert_eq!(ids.first(), Some(&video), "{query}: {rows:#?}");
+        }
+        if let Some(audio) = audio {
+            assert!(
+                !ids.contains(&audio),
+                "{query}: the audio upload is offered: {rows:#?}"
+            );
+        }
+    }
+
+    let rows = provider
+        .search("Queen Bohemian Rhapsody", 10)
+        .await
+        .unwrap();
+    let queen = rows
+        .iter()
+        .find(|row| row.id.id == "fJ9rUzIMcZQ")
+        .unwrap_or_else(|| panic!("Queen's video is not offered: {rows:#?}"));
+    assert_eq!(queen.track.title, "Bohemian Rhapsody", "{queen:?}");
+}
+
 /// An item's video is its id, in the shape YouTube's player takes; a cover is
 /// a real image.
 #[tokio::test]

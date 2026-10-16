@@ -1,5 +1,5 @@
 // The test plugin: the smallest example that implements the plugin contract
-// (api 6) **in full**. It never goes online and answers from a fixed catalog.
+// (api 7) **in full**. It never goes online and answers from a fixed catalog.
 //
 // There is no misbehaving-plugin act here — the timeout, throwing, unpermitted
 // network and missing export tests write their own small scripts. This file
@@ -112,4 +112,16 @@ export function related(id, limit) {
     return [];
   }
   return CATALOG.filter((track) => track.id !== id).slice(0, limit);
+}
+
+// api 7: the manifest's `links` names templates, so this export is required.
+// The core hands over what stood in `{id}` and the template the link fitted;
+// the answer is an array of tracks — the song at the link. An empty array
+// means "nothing there". A list's link (`/list?l=…`) gives every song in it;
+// the core plays only a song's link for now, and says so.
+export function link(id, template) {
+  if (template.includes("/list?")) {
+    return id === "all" ? CATALOG : [];
+  }
+  return CATALOG.filter((track) => track.id === id);
 }

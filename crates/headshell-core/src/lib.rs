@@ -16,6 +16,7 @@ pub mod identity;
 pub mod ids;
 pub mod import;
 pub mod library;
+pub mod link;
 pub mod lyrics;
 pub mod model;
 pub mod net;

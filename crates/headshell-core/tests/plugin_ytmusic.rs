@@ -373,6 +373,67 @@ async fn a_song_names_songs_like_it_from_its_radio() {
     );
 }
 
+/// api 7 (D-095): a YouTube link opens the video at it — one YouTube Music
+/// doesn't list as a song too ("Me at the zoo", the site's first video) —
+/// and a YouTube Music link the song a search finds.
+#[tokio::test]
+async fn a_youtube_or_youtube_music_link_opens_its_song() {
+    if !prerequisites_met("link") {
+        return;
+    }
+    let config = temp_config("link");
+    let Some(provider) = install(&config, "link").await else {
+        return;
+    };
+    assert!(provider.info().capabilities.contains(Capabilities::LINKS));
+    let templates = provider.link_templates();
+
+    let link = headshell_core::link::Link::parse("https://youtu.be/jNQXAC9IVRw?si=x").unwrap();
+    let fit = headshell_core::link::fit_any(&templates, &link).expect("a youtu.be link fits");
+    let at = match provider.open_link(&fit.id, &fit.template).await {
+        Ok(at) => at,
+        Err(err) => panic!("the link did not open:\n{}", err.chain_text()),
+    };
+    assert_eq!(at.len(), 1, "{at:?}");
+    assert_eq!(at[0].id.id, "jNQXAC9IVRw");
+    assert!(at[0].track.title.to_lowercase().contains("zoo"), "{at:?}");
+    assert_eq!(
+        at[0].track.album, None,
+        "a video's byline names its views where a song's names its album"
+    );
+    // Not a song on YouTube Music, and it still plays: the stream comes as
+    // any video id's does.
+    match provider.resolve_source(&at[0].id).await {
+        Ok(Some(AudioSource::HttpStream { url, .. })) => {
+            assert!(url.contains("googlevideo.com"), "{url}");
+        }
+        other => panic!("the linked video gave no stream: {other:?}"),
+    }
+
+    let hits = provider.search("slowdive alison", 3).await.unwrap();
+    assert!(!hits.is_empty(), "the live search came back empty");
+    let link = headshell_core::link::Link::parse(&format!(
+        "https://music.youtube.com/watch?v={}&list=RDAMVM{}",
+        hits[0].id.id, hits[0].id.id
+    ))
+    .unwrap();
+    let fit = headshell_core::link::fit_any(&templates, &link).expect("a YouTube Music link fits");
+    let at = provider.open_link(&fit.id, &fit.template).await.unwrap();
+    assert_eq!(at.len(), 1, "{at:?}");
+    assert_eq!(at[0].id, hits[0].id);
+    assert!(!at[0].track.artist.is_empty(), "{at:?}");
+
+    let err = provider
+        .open_link("not-an-id", "https://youtu.be/{id}")
+        .await
+        .unwrap_err();
+    assert!(
+        err.chain_text().contains("isn't a YouTube video id"),
+        "{}",
+        err.chain_text()
+    );
+}
+
 /// A song's own lyrics come timed, line by line, with the service's credit
 /// (api 4, D-078). Measured when it was written: asked as the mobile app,
 /// YouTube Music's lyrics page carried timed lines for every song tried, from

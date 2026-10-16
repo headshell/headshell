@@ -92,6 +92,22 @@ pub struct SuggestReport {
     /// other provider that had something, in the registry's order.
     pub sections: Vec<SuggestSection>,
     pub failures: Vec<SuggestFailure>,
+    /// The text was a link (D-095): the sections hold the song at it, from
+    /// the provider that takes it. Absent for a text that is not a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<SuggestLink>,
+}
+
+/// What became of a link typed in the play box (D-095).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestLink {
+    /// The template it fitted and what stood in `{id}`; `None` when no
+    /// provider takes it.
+    pub fit: Option<crate::link::LinkFit>,
+    /// Why it cannot be opened when no provider takes it — the whole chain,
+    /// as `headshell diag` would print it (stage `LINK_OPEN`, K9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unclaimed: Option<String>,
 }
 
 /// Who is asked for a text, in order, with the catalog's answers in hand
@@ -100,6 +116,16 @@ pub struct SuggestPlan {
     pub(crate) query: String,
     pub(crate) play_from: PlayFrom,
     pub(crate) steps: Vec<SuggestStep>,
+    /// The text is a link (D-095): its one step is the provider that takes
+    /// it, and that provider is asked to open it instead of searched.
+    pub(crate) link: Option<SuggestLinkPlan>,
+}
+
+/// A link and the provider's template it fitted (D-095).
+pub(crate) struct SuggestLinkPlan {
+    pub(crate) link: crate::link::Link,
+    pub(crate) fit: Option<crate::link::LinkFit>,
+    pub(crate) unclaimed: Option<String>,
 }
 
 /// One provider to ask.
@@ -122,7 +148,35 @@ impl SuggestPlan {
             play_from: self.play_from,
             sections: Vec::new(),
             failures: Vec::new(),
+            link: None,
         };
+        if let Some(plan) = self.link {
+            for ask in self.steps {
+                let info = ask.provider.info();
+                let Some(fit) = &plan.fit else { break };
+                match crate::link::open(&ask.provider, &plan.link, fit).await {
+                    Ok(song) => report.sections.push(SuggestSection {
+                        provider: info.id,
+                        display_name: info.display_name,
+                        fallback: false,
+                        tracks: vec![song],
+                        artists: Vec::new(),
+                        more: Vec::new(),
+                    }),
+                    Err(err) => report.failures.push(SuggestFailure {
+                        provider: info.id,
+                        display_name: info.display_name,
+                        stage: err.stage().as_str().to_owned(),
+                        chain: err.chain_text(),
+                    }),
+                }
+            }
+            report.link = Some(SuggestLink {
+                fit: plan.fit,
+                unclaimed: plan.unclaimed,
+            });
+            return report;
+        }
         for (step, ask) in self.steps.into_iter().enumerate() {
             let info = ask.provider.info();
             let hits = match ask.catalog {

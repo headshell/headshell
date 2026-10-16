@@ -494,6 +494,16 @@ pub struct PluginManifest {
     /// is refused before, with its own message ([`Self::parse`]).
     #[serde(default)]
     pub related: bool,
+    /// The links the plugin takes, as templates (api 7, D-095): a link
+    /// written out whole, `{id}` where the song's part stands
+    /// (`https://youtu.be/{id}`). **Required**, as the four above are: `[]`
+    /// says it takes none; a template makes the engine expect a
+    /// `link(id, template)` export.
+    ///
+    /// The `default` only lets the struct parse; a manifest without the field
+    /// is refused before, with its own message ([`Self::parse`]).
+    #[serde(default)]
+    pub links: Vec<String>,
     /// An optional one-sentence description.
     #[serde(default)]
     pub description: Option<String>,
@@ -571,6 +581,7 @@ impl PluginManifest {
         require_declaration(&value, path, "lyrics", LYRICS_DECLARATION)?;
         require_declaration(&value, path, "video", VIDEO_DECLARATION)?;
         require_declaration(&value, path, "related", RELATED_DECLARATION)?;
+        require_links(&value, path)?;
 
         let manifest: Self = serde_json::from_value(value).map_err(json_err)?;
         manifest.validate(expected_name, path)?;
@@ -629,6 +640,11 @@ impl PluginManifest {
                 return invalid(detail);
             }
         }
+        for template in &self.links {
+            if let Err(detail) = crate::link::LinkTemplate::parse(template) {
+                return invalid(format!("`links`: {detail}"));
+            }
+        }
         let mut names: Vec<&str> = self.requires.iter().map(|r| r.name.as_str()).collect();
         names.sort_unstable();
         let count = names.len();
@@ -640,6 +656,16 @@ impl PluginManifest {
             );
         }
         Ok(())
+    }
+
+    /// The link templates, read (D-095). Validation already read every one;
+    /// one that would not read now is left out, not guessed at.
+    #[must_use]
+    pub fn link_templates(&self) -> Vec<crate::link::LinkTemplate> {
+        self.links
+            .iter()
+            .filter_map(|template| crate::link::LinkTemplate::parse(template).ok())
+            .collect()
     }
 
     /// The script's path inside the plugin directory.
@@ -667,6 +693,33 @@ const VIDEO_DECLARATION: &str = "a manifest says whether the plugin gives videos
 /// What a missing `related` asks for (api 6, D-087).
 const RELATED_DECLARATION: &str = "a manifest says whether the plugin names similar songs: \
      `\"related\": true` (it exports `related(id, limit)`) or `\"related\": false`";
+
+/// The links a manifest must name (api 7, D-095): an array of templates,
+/// `[]` when it takes none — and not left out.
+fn require_links(value: &serde_json::Value, path: &Path) -> Result<()> {
+    let detail = match value.get("links") {
+        Some(serde_json::Value::Array(items)) if items.iter().all(serde_json::Value::is_string) => {
+            return Ok(());
+        }
+        Some(serde_json::Value::Array(_)) => {
+            "`links` holds templates, each a text (`\"https://youtu.be/{id}\"`)".to_owned()
+        }
+        Some(other) => format!("`links` must be an array of templates, not {other}"),
+        None => format!("`links` is missing — {LINKS_DECLARATION}"),
+    };
+    Err(Error::new(
+        Stage::PluginLoad,
+        ErrorKind::PluginManifest {
+            path: path.to_path_buf(),
+            detail,
+        },
+    ))
+}
+
+/// What a missing `links` asks for (api 7, D-095).
+const LINKS_DECLARATION: &str = "a manifest names the links the plugin plays: \
+     `\"links\": [\"https://example.com/track/{id}\"]` (it exports `link(id, template)`) \
+     or `\"links\": []`";
 
 /// A yes-or-no a manifest must say — `artwork` (api 3, D-076), `lyrics`
 /// (api 4, D-078), `video` (api 5, D-086), `related` (api 6, D-087):
@@ -885,11 +938,12 @@ mod tests {
                 "name": "soundcloud",
                 "display_name": "SoundCloud",
                 "version": "0.2.0",
-                "api": 6,
+                "api": 7,
                 "artwork": false,
                 "lyrics": false,
                 "video": false,
                 "related": false,
+                "links": ["https://soundcloud.com/{id}"],
                 "main": "main.js",
                 "capabilities": ["search", "stream"],
                 "permissions": {"net": ["api-v2.soundcloud.com", "*.sndcdn.com"]}
@@ -907,7 +961,7 @@ mod tests {
         let dir = temp_dir("soundcloud");
         write_manifest(
             &dir,
-            r#"{"name":"other","display_name":"X","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#,
+            r#"{"name":"other","display_name":"X","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js"}"#,
         );
         let err = PluginManifest::load(&dir).unwrap_err();
         assert_eq!(err.stage(), Stage::PluginLoad);
@@ -945,11 +999,11 @@ mod tests {
     fn api1_fields_are_refused_not_silently_ignored() {
         for (manifest, expected) in [
             (
-                r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","exec":["x"]}"#,
+                r#"{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js","exec":["x"]}"#,
                 "`exec` does not exist in api 2",
             ),
             (
-                r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js",
+                r#"{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js",
                     "permissions":{"net":[],"fs":["/home"]}}"#,
                 "`permissions.fs` does not exist in api 2",
             ),
@@ -974,7 +1028,7 @@ mod tests {
             write_manifest(
                 &dir,
                 &format!(
-                    r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"{main}"}}"#
+                    r#"{{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"{main}"}}"#
                 ),
             );
             let err = PluginManifest::load(&dir).unwrap_err();
@@ -988,7 +1042,7 @@ mod tests {
         let dir = temp_dir("p");
         write_manifest(
             &dir,
-            r#"{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"./src/main.js"}"#,
+            r#"{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"./src/main.js"}"#,
         );
         assert!(PluginManifest::load(&dir).is_ok());
     }
@@ -1025,7 +1079,7 @@ mod tests {
             write_manifest(
                 &dir,
                 &format!(
-                    r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","requires":[{entry}]}}"#
+                    r#"{{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js","requires":[{entry}]}}"#
                 ),
             );
             let err = PluginManifest::load(&dir).unwrap_err();
@@ -1047,7 +1101,7 @@ mod tests {
         write_manifest(
             &dir,
             &format!(
-                r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js","requires":[{one},{one}]}}"#
+                r#"{{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js","requires":[{one},{one}]}}"#
             ),
         );
         let err = PluginManifest::load(&dir).unwrap_err();
@@ -1227,13 +1281,13 @@ mod tests {
     fn a_manifest_must_say_whether_it_gives_lyrics() {
         let origin = Path::new("plugin.json");
         let silent =
-            r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"main":"main.js"}"#;
+            r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
         let text = err.chain_text();
         assert!(text.contains("`lyrics` is missing"), "{text}");
         assert!(text.contains("`\"lyrics\": false`"), "{text}");
 
-        let wrong = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":"yes","main":"main.js"}"#;
+        let wrong = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":"yes","main":"main.js"}"#;
         let err = PluginManifest::parse(wrong, "echo", origin).unwrap_err();
         assert!(
             err.chain_text().contains("must be true or false"),
@@ -1246,13 +1300,13 @@ mod tests {
     #[test]
     fn a_manifest_must_say_whether_it_gives_videos() {
         let origin = Path::new("plugin.json");
-        let silent = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"main":"main.js"}"#;
+        let silent = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
         let text = err.chain_text();
         assert!(text.contains("`video` is missing"), "{text}");
         assert!(text.contains("`\"video\": false`"), "{text}");
 
-        let video = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":true,"related":false,"main":"main.js"}"#;
+        let video = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":true,"related":false,"links":[],"main":"main.js"}"#;
         assert!(PluginManifest::parse(video, "echo", origin).unwrap().video);
     }
 
@@ -1261,13 +1315,13 @@ mod tests {
     #[test]
     fn a_manifest_must_say_whether_it_names_similar_songs() {
         let origin = Path::new("plugin.json");
-        let silent = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#;
+        let silent = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"main":"main.js"}"#;
         let err = PluginManifest::parse(silent, "echo", origin).unwrap_err();
         let text = err.chain_text();
         assert!(text.contains("`related` is missing"), "{text}");
         assert!(text.contains("`\"related\": false`"), "{text}");
 
-        let related = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"related":true,"main":"main.js"}"#;
+        let related = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"related":true,"links":[],"main":"main.js"}"#;
         assert!(
             PluginManifest::parse(related, "echo", origin)
                 .unwrap()
@@ -1275,10 +1329,55 @@ mod tests {
         );
     }
 
+    /// api 7 (D-095): the links a plugin takes are named, `[]` when none —
+    /// and every template is read when the manifest is.
+    #[test]
+    fn a_manifest_must_name_the_links_it_takes() {
+        let origin = Path::new("plugin.json");
+        let with = |links: &str| {
+            format!(
+                r#"{{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,{links}"main":"main.js"}}"#
+            )
+        };
+        let err = PluginManifest::parse(&with(""), "echo", origin).unwrap_err();
+        let text = err.chain_text();
+        assert!(text.contains("`links` is missing"), "{text}");
+        assert!(text.contains("`\"links\": []`"), "{text}");
+
+        for (links, says) in [
+            (r#""links":"https://youtu.be/{id}","#, "must be an array"),
+            (r#""links":[1],"#, "each a text"),
+            (r#""links":["youtu.be/{id}"],"#, "must begin with"),
+            (r#""links":["https://youtu.be/"],"#, "exactly once"),
+        ] {
+            let err = PluginManifest::parse(&with(links), "echo", origin).unwrap_err();
+            assert!(
+                err.chain_text().contains(says),
+                "{links}: {}",
+                err.chain_text()
+            );
+        }
+
+        let none = PluginManifest::parse(&with(r#""links":[],"#), "echo", origin).unwrap();
+        assert!(none.link_templates().is_empty());
+        let two = PluginManifest::parse(
+            &with(r#""links":["https://youtu.be/{id}","https://www.youtube.com/watch?v={id}"],"#),
+            "echo",
+            origin,
+        )
+        .unwrap();
+        let hosts: Vec<String> = two
+            .link_templates()
+            .iter()
+            .map(|template| template.host().to_owned())
+            .collect();
+        assert_eq!(hosts, ["youtu.be", "youtube.com"]);
+    }
+
     #[test]
     fn parse_applies_the_same_rules_as_load() {
         let origin = Path::new("https://catalog.example/index.json");
-        let raw = r#"{"name":"echo","display_name":"E","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#;
+        let raw = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js"}"#;
         assert!(PluginManifest::parse(raw, "echo", origin).is_ok());
 
         let err = PluginManifest::parse(raw, "other", origin).unwrap_err();
@@ -1288,12 +1387,12 @@ mod tests {
             err.chain_text()
         );
 
-        let newer = r#"{"name":"echo","display_name":"E","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"main.js"}"#;
+        let newer = r#"{"name":"echo","display_name":"E","api":8,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"main.js"}"#;
         let err = PluginManifest::parse(newer, "echo", origin).unwrap_err();
         assert!(
             matches!(
                 err.kind(),
-                ErrorKind::PluginIncompatible { plugin_api: 7, .. }
+                ErrorKind::PluginIncompatible { plugin_api: 8, .. }
             ),
             "{err:?}"
         );
@@ -1304,7 +1403,7 @@ mod tests {
         let origin = Path::new("plugin.json");
         for (main, expected) in [("main.js", "main.js"), ("./src/main.js", "src/main.js")] {
             let raw = format!(
-                r#"{{"name":"p","display_name":"P","api":6,"artwork":false,"lyrics":false,"video":false,"related":false,"main":"{main}"}}"#
+                r#"{{"name":"p","display_name":"P","api":7,"artwork":false,"lyrics":false,"video":false,"related":false,"links":[],"main":"{main}"}}"#
             );
             let manifest = PluginManifest::parse(&raw, "p", origin).unwrap();
             assert_eq!(manifest.main_file(), expected);

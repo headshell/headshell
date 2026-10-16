@@ -53,6 +53,7 @@
     "ui.results.more": "more matches",
     "ui.results.from": "from {provider}",
     "ui.results.could_not_ask": "could not ask {name} — {reason}",
+    "ui.link.unclaimed": "None of your services plays links like this one — add one that does under services.",
     "ui.help.lyrics_click": "Click a line of the lyrics to play from it.",
     "ui.settings.language.group": "language",
     "ui.settings.language.title": "language",

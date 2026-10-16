@@ -1,12 +1,12 @@
-//! The **data format** of the plugin contract (api 6; D-069, D-076, D-078,
-//! D-086, D-087).
+//! The **data format** of the plugin contract (api 7; D-069, D-076, D-078,
+//! D-086, D-087, D-095).
 //!
 //! api 1 was a wire protocol: line-based JSON-RPC, a subprocess, a handshake.
 //! In api 2 there is no wire — the plugin runs in QuickJS inside the core and
 //! the contract is **the exported functions**. Values cross between JS and
 //! Rust as JSON; this file is the Rust-side shape of that JSON.
 //!
-//! ## The functions of api 6
+//! ## The functions of api 7
 //!
 //! | Function | Required | Returns | Counterpart |
 //! |---|---|---|---|
@@ -17,6 +17,7 @@
 //! | `lyrics(id)` | if the manifest says `"lyrics": true` | [`WireLyrics`] or `null` | [`crate::provider::Provider::lyrics`] |
 //! | `resolve_video(id)` | if the manifest says `"video": true` | [`crate::video::VideoSource`] (`{ kind: "youtube", video_id }`) or `null` | [`crate::provider::Provider::resolve_video`] |
 //! | `related(id, limit)` | if the manifest says `"related": true` | an array of [`WireTrack`] | [`crate::provider::Provider::related`] |
+//! | `link(id, template)` | if the manifest's `links` names a template | an array of [`WireTrack`] | [`crate::provider::Provider::open_link`] |
 //!
 //! The function names are deliberately the same as api 1's method names
 //! (`resolve_source`, not `resolveSource`): when the document, the provider
@@ -61,6 +62,15 @@
 //! radio, its "up next"), for the recommendations. Only the item's id is
 //! passed: a plugin never sees the history or the taste worked out from it.
 //! A [`WireTrack`] may now carry `genres`, which the recommendations learn.
+//!
+//! api 6 → 7 (D-095), the user's decision again: every manifest **must**
+//! name the links it takes — `links`, an array of templates, `[]` when it
+//! takes none. A template is a link written out whole with `{id}` where the
+//! song's part stands (`https://youtu.be/{id}`; [`crate::link`]). A template
+//! makes the engine expect a `link(id, template)` export: the core hands it
+//! what stood in `{id}` and the template it fitted, and it answers with the
+//! song as an array of tracks. One track is played; a list (a playlist's
+//! link) is refused for now, and an empty array is "nothing there".
 
 use crate::ids::{Isrc, ProviderId, ProviderTrackId};
 use crate::model::TrackRef;
@@ -69,7 +79,7 @@ use crate::provider::{AudioSource, Capabilities};
 use serde::{Deserialize, Serialize};
 
 /// The version of the plugin contract the core speaks.
-pub const PLUGIN_API: u32 = 6;
+pub const PLUGIN_API: u32 = 7;
 
 /// The names of the functions a plugin exports. Identifiers are in English
 /// (D-036).
@@ -85,6 +95,8 @@ pub mod export {
     pub const RESOLVE_VIDEO: &str = "resolve_video";
     /// api 6 (D-087).
     pub const RELATED: &str = "related";
+    /// api 7 (D-095).
+    pub const LINK: &str = "link";
 }
 
 /// Turns capability names into a bit mask.

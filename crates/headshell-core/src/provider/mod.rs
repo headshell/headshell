@@ -71,6 +71,9 @@ impl Capabilities {
     pub const RELATED: Self = Self(1 << 7);
     /// Can list the songs it holds in a genre (D-087).
     pub const GENRE: Self = Self(1 << 8);
+    /// Takes links (D-095): it names the links it plays as templates, and
+    /// opens one when a link fits.
+    pub const LINKS: Self = Self(1 << 9);
 
     /// No capability at all.
     pub const NONE: Self = Self(0);
@@ -110,6 +113,7 @@ impl Capabilities {
             (Self::VIDEO, "VIDEO"),
             (Self::RELATED, "RELATED"),
             (Self::GENRE, "GENRE"),
+            (Self::LINKS, "LINKS"),
         ];
         let names: Vec<&str> = all
             .iter()
@@ -423,6 +427,36 @@ pub trait Provider: Send + Sync {
             crate::error::ErrorKind::Unsupported {
                 provider: info.id.as_str().to_owned(),
                 what: "songs by genre".to_owned(),
+                capabilities: info.capabilities.describe(),
+            },
+        ))))
+    }
+
+    /// The links it takes, as templates (D-095). Synchronous, like
+    /// [`Self::info`]: it must be known without making a call. Empty — the
+    /// default — when it takes none.
+    fn link_templates(&self) -> Vec<crate::link::LinkTemplate> {
+        Vec::new()
+    }
+
+    /// Opens a link that fitted one of its templates (D-095): `id` is what
+    /// stood in `{id}`, `template` the template as it wrote it. Needs the
+    /// `LINKS` flag.
+    ///
+    /// `Ok(vec![])`: it looked and found nothing at the link. Without the
+    /// flag the default returns `Unsupported` (K9).
+    fn open_link<'a>(
+        &'a self,
+        id: &'a str,
+        template: &'a str,
+    ) -> ProviderFuture<'a, Vec<ProviderTrack>> {
+        let _ = (id, template);
+        let info = self.info();
+        Box::pin(std::future::ready(Err(crate::Error::new(
+            crate::diag::Stage::LinkOpen,
+            crate::error::ErrorKind::Unsupported {
+                provider: info.id.as_str().to_owned(),
+                what: "links".to_owned(),
                 capabilities: info.capabilities.describe(),
             },
         ))))

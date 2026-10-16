@@ -25,13 +25,17 @@
   "permissions_enforced": true,
   "plugins": [
     {
-      "api": 6,
+      "api": 7,
       "artwork": true,
       "consent": {
         "state": "approved"
       },
       "dir": "<variable>",
       "display_name": "Echo (test)",
+      "links": [
+        "https://echo.example.invalid/track/{id}",
+        "https://echo.example.invalid/list?l={id}"
+      ],
       "lyrics": true,
       "name": "echo",
       "permissions": {
